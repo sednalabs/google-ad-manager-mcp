@@ -86,7 +86,7 @@ mod tests {
         let inventory = build_tool_inventory().expect("inventory");
         let results = inventory.search(
             &ToolSearchFilter {
-                query: Some("run report rows".to_string()),
+                query: Some("run report result".to_string()),
                 group: Some("reports".to_string()),
                 read_only: Some(true),
                 limit: Some(10),

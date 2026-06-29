@@ -13,6 +13,7 @@ const DEFAULT_API_BASE_URL: &str = "https://admanager.googleapis.com/v1";
 #[derive(Debug, Clone, Parser)]
 #[command(name = "google-ad-manager-mcp")]
 #[command(about = "Google Ad Manager read-only MCP server")]
+#[command(version)]
 pub struct Cli {
     /// Print the exported tool names as JSON and exit.
     #[arg(long)]
