@@ -275,18 +275,21 @@ jobs:
         run: |
           set -euo pipefail
 
+          repo="${GITHUB_REPOSITORY}"
           tag_name="${{ needs.prepare.outputs.tag_name }}"
           release_title="${{ needs.prepare.outputs.release_title }}"
           target_ref="${{ needs.prepare.outputs.target_ref }}"
 
-          if gh release view "${tag_name}" >/dev/null 2>&1; then
-            gh release upload "${tag_name}" release/*.tar.gz release/*.zip release/SHA256SUMS release/RELEASE-METADATA.json release/RELEASE-METADATA.txt release/SHA256SUMS.sigstore.json --clobber
+          if gh release view "${tag_name}" --repo "${repo}" >/dev/null 2>&1; then
+            gh release upload "${tag_name}" release/*.tar.gz release/*.zip release/SHA256SUMS release/RELEASE-METADATA.json release/RELEASE-METADATA.txt release/SHA256SUMS.sigstore.json --clobber --repo "${repo}"
             gh release edit "${tag_name}" \
+              --repo "${repo}" \
               --title "${release_title}" \
               --notes-file release/RELEASE_NOTES.md \
               ${{ needs.prepare.outputs.prerelease == 'true' && '--prerelease' || '' }}
           else
             gh release create "${tag_name}" \
+              --repo "${repo}" \
               release/*.tar.gz release/*.zip release/SHA256SUMS release/RELEASE-METADATA.json release/RELEASE-METADATA.txt release/SHA256SUMS.sigstore.json \
               --title "${release_title}" \
               --notes-file release/RELEASE_NOTES.md \
