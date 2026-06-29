@@ -12,7 +12,7 @@ permissions:
 jobs:
   build:
     name: Build Linux x86_64 artifact
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
 
     steps:
@@ -22,6 +22,21 @@ jobs:
         with:
           fetch-depth: 1
           persist-credentials: false
+
+      - name: Install Rust toolchain
+        # dtolnay/rust-toolchain stable
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
+
+      - name: Cache cargo artifacts
+        # swatinem/rust-cache v2
+        uses: swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
+        with:
+          shared-key: linux-artifact-${{ runner.os }}
+          workspaces: |
+            . -> target
+          cache-on-failure: "true"
+          cache-all-crates: "true"
+          cache-workspace-crates: "true"
 
       - name: Build release binary
         run: cargo build --release --locked --bin google-ad-manager-mcp
@@ -41,8 +56,8 @@ jobs:
           } > dist/MANIFEST.txt
 
       - name: Upload artifact
-        # actions/upload-artifact v4.6.2
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        # actions/upload-artifact v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: google-ad-manager-mcp-linux-x86_64
           path: dist/

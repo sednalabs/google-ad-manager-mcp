@@ -40,6 +40,13 @@ jobs:
       - name: Cache cargo artifacts
         # swatinem/rust-cache v2
         uses: swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
+        with:
+          shared-key: code-coverage-${{ runner.os }}-workspace
+          workspaces: |
+            . -> target
+          cache-on-failure: "true"
+          cache-all-crates: "true"
+          cache-workspace-crates: "true"
 
       - name: Install coverage tool
         # taiki-e/install-action v2
@@ -60,11 +67,31 @@ jobs:
           file: coverage/google-ad-manager-mcp.xml
           language: Rust
           label: code-coverage/google-ad-manager-mcp
+          fail-on-error: false
 
       - name: Upload Cobertura report
         # actions/upload-artifact v7
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: rust-cobertura-coverage
-          path: coverage/*.xml
+          name: rust-cobertura-coverage-google-ad-manager-mcp
+          path: coverage/google-ad-manager-mcp.xml
           if-no-files-found: error
+
+      - name: Summarize coverage report
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          from pathlib import Path
+          from xml.etree import ElementTree
+
+          report = Path("coverage/google-ad-manager-mcp.xml")
+          root = ElementTree.parse(report).getroot()
+          line_rate = float(root.attrib.get("line-rate", "0"))
+          print("### Rust coverage")
+          print()
+          print("- Target: `google-ad-manager-mcp`")
+          print(f"- Report: `{report}`")
+          print(f"- Line coverage: {line_rate * 100:.2f}%")
+          print("- GitHub Code Quality upload: attempted; non-blocking until the repository setting is enabled.")
+          PY

@@ -115,24 +115,17 @@ mod tests {
     #[test]
     fn inventory_matches_exported_tool_names() {
         let server = AdManagerServer::new(Settings::default()).expect("server");
-        let names = server
-            .tool_schema_snapshot()
-            .iter()
-            .map(|tool| tool.name.as_ref())
+        let mut inventory_names = server
+            .inventory()
+            .capabilities()
+            .into_iter()
+            .map(|tool| tool.name())
+            .map(str::to_string)
             .collect::<Vec<_>>();
-        assert_eq!(
-            names,
-            vec![
-                "find_tools",
-                "gam_get_started",
-                "gam_auth_status",
-                "gam_auth_login_command",
-                "gam_networks_list",
-                "gam_network_catalog_list",
-                "gam_report_run",
-                "gam_report_result_rows",
-            ]
-        );
+        inventory_names.sort();
+        let mut exported_names = server.tool_names();
+        exported_names.sort();
+        assert_eq!(inventory_names, exported_names);
 
         let policy = ToolInventoryPolicy::strict();
         assert!(

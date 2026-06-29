@@ -21,7 +21,7 @@ allow = [
 ]
 
 [[licenses.exceptions]]
-name = "webpki-root-certs"
+name = "webpki-roots"
 allow = ["CDLA-Permissive-2.0"]
 
 [bans]
@@ -36,4 +36,4 @@ skip-tree = []
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-allow-git = []
+allow-git = ["https://github.com/sednalabs/mcp-toolkit-rs"]

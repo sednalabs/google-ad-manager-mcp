@@ -15,10 +15,20 @@ permissions:
   contents: read
 
 jobs:
-  rust-baseline:
-    name: Run targeted Rust baseline
+  rust-baseline-lane:
+    name: Rust baseline / ${{ matrix.lane.phase_name }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        lane:
+          - phase_name: fmt
+            command: cargo fmt --all --check
+          - phase_name: clippy
+            command: cargo clippy --all-targets --all-features -- -D warnings
+          - phase_name: tests
+            command: cargo test --all-targets --all-features
     steps:
       - name: Checkout
         # actions/checkout v6
@@ -36,12 +46,28 @@ jobs:
       - name: Cache cargo artifacts
         # swatinem/rust-cache v2
         uses: swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
+        with:
+          shared-key: rust-baseline-${{ runner.os }}-workspace
+          workspaces: |
+            . -> target
+          cache-on-failure: "true"
+          cache-all-crates: "true"
+          cache-workspace-crates: "true"
 
-      - name: Check formatting
-        run: cargo fmt --all --check
+      - name: Run baseline lane
+        run: ${{ matrix.lane.command }}
 
-      - name: Run clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
-
-      - name: Run tests
-        run: cargo test --all-targets --all-features
+  rust-baseline:
+    name: Run targeted Rust baseline
+    runs-on: ubuntu-24.04
+    needs: [rust-baseline-lane]
+    if: ${{ always() }}
+    steps:
+      - name: Require every baseline lane to pass
+        shell: bash
+        run: |
+          if [[ "${{ needs.rust-baseline-lane.result }}" != "success" ]]; then
+            echo "One or more Rust baseline lanes failed." >&2
+            exit 1
+          fi
+          echo "All Rust baseline lanes passed."
