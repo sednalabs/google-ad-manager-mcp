@@ -47,17 +47,7 @@ jobs:
           set -euo pipefail
 
           package_version="$(
-            python - <<'PY'
-            import tomllib
-            from pathlib import Path
-
-            cargo = tomllib.loads(Path("Cargo.toml").read_text())
-            package = cargo.get("package") or {}
-            version = package.get("version")
-            if not version:
-                raise SystemExit("package version not found in Cargo.toml [package].version")
-            print(version)
-            PY
+            python -c 'import sys, tomllib; from pathlib import Path; cargo = tomllib.loads(Path("Cargo.toml").read_text()); version = (cargo.get("package") or {}).get("version"); sys.exit("package version not found in Cargo.toml [package].version") if not version else print(version)'
           )"
 
           if [[ "${GITHUB_EVENT_NAME}" == "push" ]]; then
