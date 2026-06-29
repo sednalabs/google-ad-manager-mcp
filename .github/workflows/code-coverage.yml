@@ -67,6 +67,7 @@ jobs:
           file: coverage/google-ad-manager-mcp.xml
           language: Rust
           label: code-coverage/google-ad-manager-mcp
+          fail-on-error: false
 
       - name: Upload Cobertura report
         # actions/upload-artifact v7
@@ -92,4 +93,5 @@ jobs:
           print("- Target: `google-ad-manager-mcp`")
           print(f"- Report: `{report}`")
           print(f"- Line coverage: {line_rate * 100:.2f}%")
+          print("- GitHub Code Quality upload: attempted; non-blocking until the repository setting is enabled.")
           PY
