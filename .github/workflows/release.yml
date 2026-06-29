@@ -24,13 +24,12 @@ concurrency:
   group: release::${{ github.event_name == 'push' && github.ref_name || inputs.tag_name || inputs.target_ref || github.run_id }}
   cancel-in-progress: false
 
-permissions:
-  contents: write
-
 jobs:
   prepare:
     name: Resolve release metadata
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
     outputs:
       package_version: ${{ steps.meta.outputs.package_version }}
       prerelease: ${{ steps.meta.outputs.prerelease }}
@@ -109,6 +108,8 @@ jobs:
     name: Build release bundle / ${{ matrix.name }}
     runs-on: ${{ matrix.runs_on }}
     needs: prepare
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -206,11 +207,15 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  publish:
+  publish-release:
     name: Publish GitHub release
     runs-on: ubuntu-24.04
     needs: [prepare, build]
     timeout-minutes: 30
+    permissions:
+      attestations: write
+      contents: write
+      id-token: write
     steps:
       - name: Download release bundles
         # actions/download-artifact v5
@@ -243,6 +248,15 @@ jobs:
           Prebuilt release bundles are attached for Linux x86_64, macOS arm64, and Windows x86_64.
           See README.md and docs/GETTING_STARTED.md for credential setup and first-run flow.
           EOF
+
+      - name: Attest release bundles
+        # actions/attest-build-provenance v3
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a
+        with:
+          subject-path: |
+            release/*.tar.gz
+            release/*.zip
+            release/SHA256SUMS
 
       - name: Create or update GitHub release
         env:
