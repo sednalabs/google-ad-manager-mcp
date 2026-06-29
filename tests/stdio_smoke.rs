@@ -2,10 +2,8 @@ use mcp_toolkit_testing::stdio_contract::assert_stdio_tools_list;
 
 #[test]
 fn stdio_initializes_and_lists_tools() {
-    let binary_path = std::env::var("CARGO_BIN_EXE_google_ad_manager_mcp")
-        .expect("google-ad-manager-mcp binary path");
     assert_stdio_tools_list(
-        &binary_path,
+        env!("CARGO_BIN_EXE_google-ad-manager-mcp"),
         &[
             "find_tools",
             "gam_get_started",
