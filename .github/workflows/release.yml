@@ -1,0 +1,284 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      target_ref:
+        description: "Git ref or SHA to release"
+        required: false
+        default: "main"
+      tag_name:
+        description: "Release tag to create or update; defaults to v<package version>"
+        required: false
+        default: ""
+      prerelease:
+        description: "Mark the GitHub release as a prerelease"
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: release::${{ github.event_name == 'push' && github.ref_name || inputs.tag_name || inputs.target_ref || github.run_id }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  prepare:
+    name: Resolve release metadata
+    runs-on: ubuntu-24.04
+    outputs:
+      package_version: ${{ steps.meta.outputs.package_version }}
+      prerelease: ${{ steps.meta.outputs.prerelease }}
+      release_title: ${{ steps.meta.outputs.release_title }}
+      tag_name: ${{ steps.meta.outputs.tag_name }}
+      target_ref: ${{ steps.meta.outputs.target_ref }}
+    steps:
+      - name: Checkout
+        # actions/checkout v6
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.target_ref || github.ref }}
+
+      - name: Resolve package version and release target
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          package_version="$(
+            python - <<'PY'
+            from pathlib import Path
+            import re
+
+            cargo = Path("Cargo.toml").read_text()
+            match = re.search(r'(?m)^version\s*=\s*"([^"]+)"\s*$', cargo)
+            if not match:
+                raise SystemExit("package version not found in Cargo.toml")
+            print(match.group(1))
+            PY
+          )"
+
+          if [[ "${GITHUB_EVENT_NAME}" == "push" ]]; then
+            target_ref="${GITHUB_REF_NAME}"
+            tag_name="${GITHUB_REF_NAME}"
+            prerelease="false"
+          else
+            target_ref="${{ inputs.target_ref }}"
+            tag_name="${{ inputs.tag_name }}"
+            prerelease="${{ inputs.prerelease }}"
+            if [[ -z "${tag_name}" ]]; then
+              tag_name="v${package_version}"
+            fi
+          fi
+
+          expected_tag="v${package_version}"
+          if [[ "${tag_name}" != "${expected_tag}" ]]; then
+            echo "Expected tag ${expected_tag} for package version ${package_version}, got ${tag_name}" >&2
+            exit 1
+          fi
+
+          {
+            echo "package_version=${package_version}"
+            echo "prerelease=${prerelease}"
+            echo "release_title=google-ad-manager-mcp ${tag_name}"
+            echo "tag_name=${tag_name}"
+            echo "target_ref=${target_ref}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Summarize release intent
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "### Release metadata"
+            echo
+            echo "- Package version: \`${{ steps.meta.outputs.package_version }}\`"
+            echo "- Release tag: \`${{ steps.meta.outputs.tag_name }}\`"
+            echo "- Target ref: \`${{ steps.meta.outputs.target_ref }}\`"
+            echo "- Prerelease: \`${{ steps.meta.outputs.prerelease }}\`"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+  build:
+    name: Build release bundle / ${{ matrix.name }}
+    runs-on: ${{ matrix.runs_on }}
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            runs_on: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            binary_name: google-ad-manager-mcp
+            archive_ext: tar.gz
+          - name: macos-arm64
+            runs_on: macos-15
+            target: aarch64-apple-darwin
+            binary_name: google-ad-manager-mcp
+            archive_ext: tar.gz
+          - name: windows-x86_64
+            runs_on: windows-2025
+            target: x86_64-pc-windows-msvc
+            binary_name: google-ad-manager-mcp.exe
+            archive_ext: zip
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        # actions/checkout v6
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+          ref: ${{ needs.prepare.outputs.target_ref }}
+
+      - name: Install Rust toolchain
+        # dtolnay/rust-toolchain stable
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo artifacts
+        # swatinem/rust-cache v2
+        uses: swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
+        with:
+          shared-key: release-${{ runner.os }}-${{ matrix.target }}
+          workspaces: |
+            . -> target
+          cache-on-failure: "true"
+          cache-all-crates: "true"
+          cache-workspace-crates: "true"
+
+      - name: Build release binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --release --locked --bin google-ad-manager-mcp --target "${{ matrix.target }}"
+
+      - name: Stage archive bundle on Unix
+        if: ${{ runner.os != 'Windows' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          asset_base="google-ad-manager-mcp-${{ needs.prepare.outputs.tag_name }}-${{ matrix.target }}"
+          bundle_dir="dist/${asset_base}"
+          mkdir -p "${bundle_dir}"
+
+          install -m 0755 "target/${{ matrix.target }}/release/${{ matrix.binary_name }}" "${bundle_dir}/google-ad-manager-mcp"
+          cp README.md LICENSE "${bundle_dir}/"
+
+          "./${bundle_dir}/google-ad-manager-mcp" --version > "${bundle_dir}/VERSION.txt"
+
+          tar -C dist -czf "dist/${asset_base}.tar.gz" "${asset_base}"
+
+      - name: Stage archive bundle on Windows
+        if: ${{ runner.os == 'Windows' }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $assetBase = "google-ad-manager-mcp-${{ needs.prepare.outputs.tag_name }}-${{ matrix.target }}"
+          $bundleDir = "dist/$assetBase"
+          New-Item -ItemType Directory -Path $bundleDir -Force | Out-Null
+
+          Copy-Item "target/${{ matrix.target }}/release/${{ matrix.binary_name }}" "$bundleDir/google-ad-manager-mcp.exe"
+          Copy-Item README.md "$bundleDir/README.md"
+          Copy-Item LICENSE "$bundleDir/LICENSE"
+
+          $version = & "$bundleDir/google-ad-manager-mcp.exe" --version
+          Set-Content -Path "$bundleDir/VERSION.txt" -Value $version
+
+          Compress-Archive -Path "$bundleDir/*" -DestinationPath "dist/$assetBase.zip" -Force
+
+      - name: Upload release bundle
+        # actions/upload-artifact v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: release-${{ matrix.name }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish GitHub release
+    runs-on: ubuntu-24.04
+    needs: [prepare, build]
+    timeout-minutes: 30
+    steps:
+      - name: Download release bundles
+        # actions/download-artifact v5
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0
+        with:
+          path: release-artifacts
+          merge-multiple: true
+
+      - name: Assemble release payload
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p release
+          find release-artifacts -type f \( -name '*.tar.gz' -o -name '*.zip' \) -print -exec cp {} release/ \;
+          cd release
+          sha256sum *.tar.gz *.zip > SHA256SUMS
+
+          cat > RELEASE_NOTES.md <<EOF
+          google-ad-manager-mcp ${{ needs.prepare.outputs.tag_name }}
+
+          Public read-only stdio MCP server for Google Ad Manager workflows.
+
+          Install from source:
+
+          \`\`\`bash
+          cargo install --locked --git https://github.com/sednalabs/google-ad-manager-mcp --tag ${{ needs.prepare.outputs.tag_name }} google-ad-manager-mcp
+          \`\`\`
+
+          Prebuilt release bundles are attached for Linux x86_64, macOS arm64, and Windows x86_64.
+          See README.md and docs/GETTING_STARTED.md for credential setup and first-run flow.
+          EOF
+
+      - name: Create or update GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          tag_name="${{ needs.prepare.outputs.tag_name }}"
+          release_title="${{ needs.prepare.outputs.release_title }}"
+          target_ref="${{ needs.prepare.outputs.target_ref }}"
+
+          if gh release view "${tag_name}" >/dev/null 2>&1; then
+            gh release upload "${tag_name}" release/*.tar.gz release/*.zip release/SHA256SUMS --clobber
+            gh release edit "${tag_name}" \
+              --title "${release_title}" \
+              --notes-file release/RELEASE_NOTES.md \
+              ${{ needs.prepare.outputs.prerelease == 'true' && '--prerelease' || '' }}
+          else
+            gh release create "${tag_name}" \
+              release/*.tar.gz release/*.zip release/SHA256SUMS \
+              --title "${release_title}" \
+              --notes-file release/RELEASE_NOTES.md \
+              --target "${target_ref}" \
+              ${{ needs.prepare.outputs.prerelease == 'true' && '--prerelease' || '' }}
+          fi
+
+      - name: Summarize published assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "### Published release"
+            echo
+            echo "- Tag: \`${{ needs.prepare.outputs.tag_name }}\`"
+            echo "- GitHub release: \`${{ needs.prepare.outputs.release_title }}\`"
+            echo "- Assets:"
+            ls -1 release | sed 's/^/  - /'
+          } >> "${GITHUB_STEP_SUMMARY}"
