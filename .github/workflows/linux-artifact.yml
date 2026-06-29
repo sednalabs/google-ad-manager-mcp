@@ -1,0 +1,49 @@
+name: Linux Artifact
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build Linux x86_64 artifact
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        # actions/checkout v6
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Build release binary
+        run: cargo build --release --locked --bin google-ad-manager-mcp
+
+      - name: Stage artifact
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp target/release/google-ad-manager-mcp dist/google-ad-manager-mcp
+          chmod 0755 dist/google-ad-manager-mcp
+          {
+            echo "name=google-ad-manager-mcp"
+            echo "version=$(dist/google-ad-manager-mcp --version)"
+            echo "commit=${GITHUB_SHA}"
+            echo "target=x86_64-unknown-linux-gnu"
+            sha256sum dist/google-ad-manager-mcp
+          } > dist/MANIFEST.txt
+
+      - name: Upload artifact
+        # actions/upload-artifact v4.6.2
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: google-ad-manager-mcp-linux-x86_64
+          path: dist/
+          if-no-files-found: error

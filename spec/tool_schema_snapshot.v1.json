@@ -1,0 +1,283 @@
+{
+  "schema": "mcp_tool_schema_snapshot",
+  "tools": [
+    {
+      "description": "Search Google Ad Manager MCP tools by keyword, group, and read-only status for OpenAI tool_search or deferred-loading clients.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "group": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "include_schema": {
+            "default": false,
+            "type": "boolean"
+          },
+          "limit": {
+            "default": null,
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "query": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "read_only": {
+            "default": null,
+            "type": [
+              "boolean",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "name": "find_tools"
+    },
+    {
+      "description": "Build a copyable gcloud Application Default Credentials login command for Google Ad Manager without running it.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "client_id_file": {
+            "description": "Optional downloaded OAuth client JSON path for gcloud ADC login.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "no_launch_browser": {
+            "description": "Include --no-launch-browser for headless flows. Defaults to true.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "quota_project": {
+            "description": "Optional quota project to set after login.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "name": "gam_auth_login_command"
+    },
+    {
+      "description": "Inspect configured Google Ad Manager credential inputs and optionally verify live upstream access without returning secrets.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "verify_access": {
+            "default": false,
+            "description": "When true, make a live low-cost Ad Manager API call to prove access.",
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
+      "name": "gam_auth_status"
+    },
+    {
+      "description": "Explain the recommended first-run flow, credential options, and starter tools for Google Ad Manager.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object"
+      },
+      "name": "gam_get_started"
+    },
+    {
+      "description": "List a curated Google Ad Manager network collection such as ad units, orders, line items, or reports.",
+      "inputSchema": {
+        "$defs": {
+          "CatalogCollection": {
+            "enum": [
+              "ad_units",
+              "orders",
+              "line_items",
+              "reports"
+            ],
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "collection": {
+            "$ref": "#/$defs/CatalogCollection",
+            "description": "Which curated collection to list."
+          },
+          "filter": {
+            "description": "Optional Ad Manager Beta filter expression.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "network_code": {
+            "description": "Raw Ad Manager network code, for example 1234567.",
+            "type": "string"
+          },
+          "order_by": {
+            "description": "Optional Ad Manager Beta orderBy expression.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "page_size": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "page_token": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "network_code",
+          "collection"
+        ],
+        "type": "object"
+      },
+      "name": "gam_network_catalog_list"
+    },
+    {
+      "description": "List Google Ad Manager networks visible to the authenticated principal.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "page_size": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "page_token": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "name": "gam_networks_list"
+    },
+    {
+      "description": "Fetch rows from a completed Google Ad Manager report result resource.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "page_size": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "page_token": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "result_name": {
+            "description": "Result resource name, for example networks/123/reports/456/results/789.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "result_name"
+        ],
+        "type": "object"
+      },
+      "name": "gam_report_result_rows"
+    },
+    {
+      "description": "Run a saved Google Ad Manager report, optionally wait for completion, and optionally fetch the first page of result rows.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "fetch_first_page": {
+            "description": "If waiting, also fetch the first page of result rows. Defaults to true.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "initial_poll_interval_ms": {
+            "description": "Optional initial poll interval override.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "network_code": {
+            "description": "Raw Ad Manager network code, for example 1234567.",
+            "type": "string"
+          },
+          "poll_timeout_ms": {
+            "description": "Optional polling timeout override.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "report_id": {
+            "description": "Numeric report identifier from the Ad Manager UI or reports.list.",
+            "type": "string"
+          },
+          "result_page_size": {
+            "description": "Optional first-page result row cap.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "wait_for_completion": {
+            "description": "Wait for the report operation to complete. Defaults to true.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "network_code",
+          "report_id"
+        ],
+        "type": "object"
+      },
+      "name": "gam_report_run"
+    }
+  ],
+  "version": 1
+}

@@ -1,0 +1,28 @@
+version: 2
+updates:
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "daily"
+      time: "22:00"
+      timezone: "Etc/UTC"
+    groups:
+      rmcp:
+        patterns:
+          - "rmcp"
+      cargo-dependencies:
+        patterns:
+          - "*"
+        exclude-patterns:
+          - "rmcp"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "daily"
+      time: "22:00"
+      timezone: "Etc/UTC"
+    groups:
+      github-actions:
+        patterns:
+          - "*"

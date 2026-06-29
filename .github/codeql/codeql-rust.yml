@@ -1,0 +1,10 @@
+name: google-ad-manager-mcp-codeql-rust
+
+queries:
+  - uses: security-and-quality
+
+paths:
+  - src
+  - tests
+
+threat-models: [local]
