@@ -25,18 +25,26 @@ surface, or default write operations.
 - [Security model](docs/SECURITY_MODEL.md)
 - [Architecture](docs/ARCHITECTURE.md)
 - [Decision 0001: Beta REST read-only first](docs/decision-0001-beta-rest-read-only.md)
+- [Releasing](docs/RELEASING.md)
 
 ## Install
 
 The lowest-friction install path today is:
 
 ```bash
-cargo install --git https://github.com/sednalabs/google-ad-manager-mcp google-ad-manager-mcp
+cargo install --locked --git https://github.com/sednalabs/google-ad-manager-mcp google-ad-manager-mcp
 ```
 
-The repository also publishes a GitHub-hosted Linux artifact on `main` through
-the `Linux Artifact` workflow. That artifact is useful when you want a pinned
-binary plus SHA256 manifest from hosted compute rather than a local `cargo install`.
+For a pinned tagged source install:
+
+```bash
+cargo install --locked --git https://github.com/sednalabs/google-ad-manager-mcp --tag v0.1.0 google-ad-manager-mcp
+```
+
+The repository also publishes GitHub-hosted binary bundles through the release
+workflow and a Linux artifact on `main` through the `Linux Artifact` workflow.
+Those hosted artifacts are useful when you want a pinned binary plus SHA256
+manifests from hosted compute rather than a local `cargo install`.
 
 ## First Run
 

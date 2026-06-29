@@ -2,25 +2,9 @@ name: dependency-governance
 
 on:
   pull_request:
-    paths:
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "deny.toml"
-      - "scripts/dependency_governance_check.sh"
-      - "scripts/rmcp_macro_runtime_pin_check.py"
-      - "docs/dependency-governance.md"
-      - ".github/workflows/dependency-governance.yml"
   push:
     branches:
       - main
-    paths:
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "deny.toml"
-      - "scripts/dependency_governance_check.sh"
-      - "scripts/rmcp_macro_runtime_pin_check.py"
-      - "docs/dependency-governance.md"
-      - ".github/workflows/dependency-governance.yml"
   workflow_dispatch:
 
 permissions:
