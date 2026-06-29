@@ -47,6 +47,17 @@ Hosted release bundles:
   `SHA256SUMS.sigstore.json` Sigstore bundle; and
 - unpack the archive and place `google-ad-manager-mcp` on your `PATH`.
 
+Example verification flow from the download directory:
+
+```bash
+cosign verify-blob SHA256SUMS \
+  --bundle SHA256SUMS.sigstore.json \
+  --certificate-identity "https://github.com/sednalabs/google-ad-manager-mcp/.github/workflows/release.yml@refs/heads/main" \
+  --certificate-oidc-issuer "https://token.actions.githubusercontent.com"
+
+sha256sum -c SHA256SUMS
+```
+
 ## Before publishing
 
 Check these first:
