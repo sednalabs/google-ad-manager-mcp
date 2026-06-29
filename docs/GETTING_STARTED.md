@@ -35,7 +35,9 @@ export GOOGLE_AD_MANAGER_MCP_SERVICE_ACCOUNT_JSON_PATH=/path/to/service-account.
 ## 3. Start the server
 
 If you installed from a tagged GitHub release bundle, unpack the archive,
-verify it against `SHA256SUMS`, and place the extracted binary on your `PATH`.
+verify it against `SHA256SUMS` and the attached
+`SHA256SUMS.sigstore.json` bundle, and place the extracted binary on your
+`PATH`.
 
 ```bash
 google-ad-manager-mcp

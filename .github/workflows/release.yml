@@ -240,8 +240,7 @@ jobs:
             "target_commit": "${GITHUB_SHA}",
             "source_ref": "${GITHUB_REF_NAME}",
             "checksum_manifest": "SHA256SUMS",
-            "sigstore_signature": "SHA256SUMS.sig",
-            "sigstore_certificate": "SHA256SUMS.pem",
+            "sigstore_bundle": "SHA256SUMS.sigstore.json",
             "build_provenance": "sigstore-keyless-checksum-signing"
           }
           EOF
@@ -252,8 +251,7 @@ jobs:
           target_commit=${GITHUB_SHA}
           source_ref=${GITHUB_REF_NAME}
           checksum_manifest=SHA256SUMS
-          sigstore_signature=SHA256SUMS.sig
-          sigstore_certificate=SHA256SUMS.pem
+          sigstore_bundle=SHA256SUMS.sigstore.json
           build_provenance=sigstore-keyless-checksum-signing
           EOF
 
@@ -267,8 +265,7 @@ jobs:
           set -euo pipefail
           cosign sign-blob \
             --yes \
-            --output-signature release/SHA256SUMS.sig \
-            --output-certificate release/SHA256SUMS.pem \
+            --bundle release/SHA256SUMS.sigstore.json \
             release/SHA256SUMS
 
       - name: Create or update GitHub release
@@ -283,14 +280,14 @@ jobs:
           target_ref="${{ needs.prepare.outputs.target_ref }}"
 
           if gh release view "${tag_name}" >/dev/null 2>&1; then
-            gh release upload "${tag_name}" release/*.tar.gz release/*.zip release/SHA256SUMS release/RELEASE-METADATA.json release/RELEASE-METADATA.txt release/SHA256SUMS.sig release/SHA256SUMS.pem --clobber
+            gh release upload "${tag_name}" release/*.tar.gz release/*.zip release/SHA256SUMS release/RELEASE-METADATA.json release/RELEASE-METADATA.txt release/SHA256SUMS.sigstore.json --clobber
             gh release edit "${tag_name}" \
               --title "${release_title}" \
               --notes-file release/RELEASE_NOTES.md \
               ${{ needs.prepare.outputs.prerelease == 'true' && '--prerelease' || '' }}
           else
             gh release create "${tag_name}" \
-              release/*.tar.gz release/*.zip release/SHA256SUMS release/RELEASE-METADATA.json release/RELEASE-METADATA.txt release/SHA256SUMS.sig release/SHA256SUMS.pem \
+              release/*.tar.gz release/*.zip release/SHA256SUMS release/RELEASE-METADATA.json release/RELEASE-METADATA.txt release/SHA256SUMS.sigstore.json \
               --title "${release_title}" \
               --notes-file release/RELEASE_NOTES.md \
               --target "${target_ref}" \
