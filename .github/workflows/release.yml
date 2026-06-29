@@ -47,16 +47,7 @@ jobs:
           set -euo pipefail
 
           package_version="$(
-            python - <<'PY'
-            from pathlib import Path
-            import re
-
-            cargo = Path("Cargo.toml").read_text()
-            match = re.search(r'(?m)^version\s*=\s*"([^"]+)"\s*$', cargo)
-            if not match:
-                raise SystemExit("package version not found in Cargo.toml")
-            print(match.group(1))
-            PY
+            python -c 'from pathlib import Path; import re; cargo = Path("Cargo.toml").read_text(); match = re.search(r"(?m)^version\\s*=\\s*\"([^\"]+)\"\\s*$", cargo); raise SystemExit("package version not found in Cargo.toml") if not match else None; print(match.group(1))'
           )"
 
           if [[ "${GITHUB_EVENT_NAME}" == "push" ]]; then
