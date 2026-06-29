@@ -2,23 +2,9 @@ name: rust-2024-compatibility
 
 on:
   pull_request:
-    paths:
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "src/**"
-      - "tests/**"
-      - "rust-toolchain*"
-      - ".github/workflows/rust-2024-compatibility.yml"
   push:
     branches:
       - main
-    paths:
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "src/**"
-      - "tests/**"
-      - "rust-toolchain*"
-      - ".github/workflows/rust-2024-compatibility.yml"
   workflow_dispatch:
 
 permissions:
