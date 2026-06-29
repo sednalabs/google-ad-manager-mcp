@@ -115,8 +115,8 @@ mod tests {
     #[test]
     fn inventory_matches_exported_tool_names() {
         let server = AdManagerServer::new(Settings::default()).expect("server");
-        let names = server
-            .tool_schema_snapshot()
+        let snapshot = server.tool_schema_snapshot();
+        let names = snapshot
             .iter()
             .map(|tool| tool.name.as_ref())
             .collect::<Vec<_>>();
