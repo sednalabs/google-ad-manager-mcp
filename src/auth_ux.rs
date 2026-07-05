@@ -11,7 +11,7 @@ use crate::config::{
     GCLOUD_ADC_REQUIRED_SCOPE, Settings, adc_credentials_path,
 };
 use crate::contract::redact_secret_text;
-use crate::{AdManagerClient, AuthSource};
+use crate::{AdManagerClient, AuthSource, MANAGE_SCOPE};
 
 pub async fn run_auth_command(settings: &Settings, command: &AuthSubcommand) -> Result<()> {
     match command {
@@ -62,13 +62,10 @@ pub(crate) fn shell_join(parts: &[String]) -> String {
 }
 
 async fn run_login(settings: &Settings, args: &AuthLoginArgs) -> Result<()> {
-    let command = gcloud_adc_login_command(
-        &settings.scope,
-        args.client_id_file.as_deref(),
-        args.headless,
-    );
+    let scope = selected_login_scope(settings, args.manage_scope);
+    let command = gcloud_adc_login_command(&scope, args.client_id_file.as_deref(), args.headless);
     println!("Starting Google Ad Manager login using Application Default Credentials.");
-    println!("Scope: {}", settings.scope);
+    println!("Scope: {scope}");
     println!("Command: {}", shell_join(&command));
     println!(
         "Tip: ADC login includes the required cloud-platform scope because gcloud requires it for local ADC user credentials."
@@ -118,7 +115,9 @@ async fn run_login(settings: &Settings, args: &AuthLoginArgs) -> Result<()> {
     }
 
     println!("Google login completed.");
-    let report = build_report(settings, !args.no_verify).await;
+    let mut verify_settings = settings.clone();
+    verify_settings.scope = scope;
+    let report = build_report(&verify_settings, !args.no_verify).await;
     print_human_report(&report);
     if !args.no_verify && report.ready == "no" {
         return Err(anyhow!(
@@ -129,16 +128,21 @@ async fn run_login(settings: &Settings, args: &AuthLoginArgs) -> Result<()> {
 }
 
 fn print_login_command(settings: &Settings, args: &AuthCommandArgs) -> Result<()> {
-    let command = gcloud_adc_login_command(
-        &settings.scope,
-        args.client_id_file.as_deref(),
-        args.headless,
-    );
+    let scope = selected_login_scope(settings, args.manage_scope);
+    let command = gcloud_adc_login_command(&scope, args.client_id_file.as_deref(), args.headless);
     println!("{}", shell_join(&command));
     if let Some(project) = settings.quota_project.as_deref() {
         println!("{}", shell_join(&gcloud_set_quota_project_command(project)));
     }
     Ok(())
+}
+
+fn selected_login_scope(settings: &Settings, manage_scope: bool) -> String {
+    if manage_scope {
+        MANAGE_SCOPE.to_string()
+    } else {
+        settings.scope.clone()
+    }
 }
 
 async fn run_status(settings: &Settings, args: &AuthStatusCliArgs) -> Result<()> {

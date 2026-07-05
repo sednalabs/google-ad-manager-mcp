@@ -15,6 +15,19 @@ pub enum AdManagerError {
     UpstreamJson(#[from] serde_json::Error),
     #[error("upstream returned status {status}: {message}")]
     UpstreamApi { status: u16, message: String },
+    #[error("write action disabled: {message}")]
+    WriteActionDisabled { message: String },
+    #[error("write scope required: current scope is `{scope}`")]
+    WriteScopeRequired { scope: String },
+    #[error("unsupported Ad Manager REST write operation: {resource}.{operation}")]
+    UnsupportedRestWrite {
+        resource: &'static str,
+        operation: &'static str,
+    },
+    #[error(
+        "confirmation token mismatch: rerun the plan tool and pass the returned confirmation_token unchanged"
+    )]
+    ConfirmationTokenMismatch,
     #[error("report run operation `{operation_name}` timed out after {timeout_ms}ms")]
     ReportRunTimeout {
         operation_name: String,
@@ -39,6 +52,10 @@ impl AdManagerError {
             Self::Transport(_) => "transport_error",
             Self::UpstreamJson(_) => "upstream_json_error",
             Self::UpstreamApi { .. } => "upstream_api_error",
+            Self::WriteActionDisabled { .. } => "write_action_disabled",
+            Self::WriteScopeRequired { .. } => "write_scope_required",
+            Self::UnsupportedRestWrite { .. } => "unsupported_rest_write",
+            Self::ConfirmationTokenMismatch => "confirmation_token_mismatch",
             Self::ReportRunTimeout { .. } => "report_run_timeout",
             Self::ReportRunMissingResult { .. } => "report_run_missing_result",
         }
@@ -51,6 +68,10 @@ impl AdManagerError {
             Self::Transport(_) => "upstream_transport_failed",
             Self::UpstreamJson(_) => "upstream_json_invalid",
             Self::UpstreamApi { .. } => "upstream_request_failed",
+            Self::WriteActionDisabled { .. } => "write_runtime_gate_closed",
+            Self::WriteScopeRequired { .. } => "google_scope_not_write_capable",
+            Self::UnsupportedRestWrite { .. } => "rest_beta_surface_gap",
+            Self::ConfirmationTokenMismatch => "confirmation_required",
             Self::ReportRunTimeout { .. } => "report_poll_timeout",
             Self::ReportRunMissingResult { .. } => "report_result_missing",
         }
@@ -61,6 +82,10 @@ impl AdManagerError {
             Self::InvalidInput { .. } => "input",
             Self::AuthBootstrap(_) => "auth",
             Self::Transport(_) | Self::UpstreamJson(_) | Self::UpstreamApi { .. } => "upstream",
+            Self::WriteActionDisabled { .. }
+            | Self::WriteScopeRequired { .. }
+            | Self::UnsupportedRestWrite { .. }
+            | Self::ConfirmationTokenMismatch => "safety",
             Self::ReportRunTimeout { .. } | Self::ReportRunMissingResult { .. } => "reports",
         }
     }
@@ -75,6 +100,18 @@ impl AdManagerError {
             }
             Self::Transport(_) | Self::UpstreamJson(_) | Self::UpstreamApi { .. } => {
                 "Retry the request, then confirm the Google principal can access the target network."
+            }
+            Self::WriteActionDisabled { .. } => {
+                "Start the server with GOOGLE_AD_MANAGER_MCP_WRITE_MODE=enabled only in an operator-approved environment."
+            }
+            Self::WriteScopeRequired { .. } => {
+                "Reauthenticate with --scope https://www.googleapis.com/auth/admanager before applying write plans."
+            }
+            Self::UnsupportedRestWrite { .. } => {
+                "The current REST beta API does not expose this trafficking mutation; use the tool matrix to see the SOAP follow-up boundary."
+            }
+            Self::ConfirmationTokenMismatch => {
+                "Rerun gam_rest_write_plan and copy the returned confirmation_token into gam_rest_write_apply."
             }
             Self::ReportRunTimeout { .. } => {
                 "Retry with a longer timeout or poll later with gam_report_result_rows once the run completes."

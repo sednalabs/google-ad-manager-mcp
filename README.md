@@ -1,8 +1,8 @@
 # google-ad-manager-mcp
 
-`google-ad-manager-mcp` is a public Rust stdio MCP server for read-only Google
-Ad Manager workflows. It is built on `mcp-toolkit-rs` and the official Google
-Ad Manager API (Beta).
+`google-ad-manager-mcp` is a public Rust stdio MCP server for Google Ad
+Manager workflows. It is built on `mcp-toolkit-rs` and the official Google Ad
+Manager API (Beta).
 
 The current alpha focuses on a small useful surface:
 
@@ -14,11 +14,14 @@ The current alpha focuses on a small useful surface:
   - line items
   - saved reports
 - run saved reports and fetch paginated result rows;
+- plan allowlisted REST write operations with no upstream mutation;
+- apply allowlisted REST writes only when an operator explicitly enables write
+  mode, uses the manage scope, and passes the matching confirmation token;
 - load catalog/report pages into a bounded local DuckDB scratchpad for
   read-only analysis and evidence bundles.
 
 The server intentionally does not expose a generic HTTP proxy, arbitrary query
-surface, or default write operations.
+surface, or default live write operations.
 
 ## Documentation
 
@@ -27,6 +30,7 @@ surface, or default write operations.
 - [Security model](docs/SECURITY_MODEL.md)
 - [Architecture](docs/ARCHITECTURE.md)
 - [Decision 0001: Beta REST read-only first](docs/decision-0001-beta-rest-read-only.md)
+- [Decision 0002: Guarded REST writes before SOAP trafficking](docs/decision-0002-guarded-rest-writes-before-soap-trafficking.md)
 - [Releasing](docs/RELEASING.md)
 
 ## Install
@@ -87,16 +91,29 @@ After auth is proven:
 2. `gam_network_catalog_list`
 3. `gam_report_run`
 4. `gam_report_result_rows` when a report result has more pages
-5. `gam_scratchpad_open_session` and the `gam_scratchpad_ingest_*` tools when
+5. `gam_trafficking_tool_matrix` before planning writes
+6. `gam_rest_write_plan` for dry-run write previews
+7. `gam_rest_write_apply` only in explicit operator mode
+8. `gam_scratchpad_open_session` and the `gam_scratchpad_ingest_*` tools when
    you want local SQL analysis or a markdown evidence bundle
 
 ## Authentication
 
-The initial public release defaults to the read-only Ad Manager scope:
+The server defaults to the read-only Ad Manager scope:
 
 ```text
 https://www.googleapis.com/auth/admanager.readonly
 ```
+
+Live write apply requires the manage scope:
+
+```text
+https://www.googleapis.com/auth/admanager
+```
+
+Dry-run write planning does not require the manage scope because it does not
+call an upstream mutation endpoint. Applying a plan requires both the manage
+scope and `GOOGLE_AD_MANAGER_MCP_WRITE_MODE=enabled`.
 
 Supported credential sources:
 
@@ -119,6 +136,15 @@ gcloud auth application-default login \
 gcloud auth application-default set-quota-project <PROJECT_ID>
 ```
 
+For operator write testing, replace the Ad Manager scope with:
+
+```bash
+google-ad-manager-mcp auth login --headless --quota-project <PROJECT_ID> --manage-scope
+```
+
+The equivalent raw `gcloud` command uses
+`https://www.googleapis.com/auth/admanager` instead of the read-only scope.
+
 Set `GOOGLE_AD_MANAGER_MCP_QUOTA_PROJECT=<PROJECT_ID>` in the MCP server
 environment when you want the server to send the `x-goog-user-project` header.
 The `gcloud auth application-default set-quota-project` command remains useful
@@ -138,6 +164,7 @@ whole credential files in tool responses.
 | `GOOGLE_AD_MANAGER_MCP_SERVICE_ACCOUNT_JSON` | unset | Server-specific raw service-account JSON |
 | `GOOGLE_AD_MANAGER_MCP_HTTP_TIMEOUT_MS` | `15000` | Upstream request timeout |
 | `GOOGLE_AD_MANAGER_MCP_API_BASE_URL` | `https://admanager.googleapis.com/v1` | Upstream API root |
+| `GOOGLE_AD_MANAGER_MCP_WRITE_MODE` | `preview_only` | Write runtime gate: `read_only`, `preview_only`, or `enabled` |
 | `GOOGLE_AD_MANAGER_MCP_REPORT_POLL_TIMEOUT_MS` | `300000` | Default report wait timeout |
 | `GOOGLE_AD_MANAGER_MCP_REPORT_POLL_INITIAL_INTERVAL_MS` | `5000` | Initial report polling interval |
 | `GOOGLE_AD_MANAGER_MCP_SCRATCHPAD_SESSION_TTL_SECS` | `900` | Scratchpad session idle TTL |
@@ -159,6 +186,9 @@ whole credential files in tool responses.
 - `gam_network_catalog_list`
 - `gam_report_run`
 - `gam_report_result_rows`
+- `gam_trafficking_tool_matrix`
+- `gam_rest_write_plan`
+- `gam_rest_write_apply`
 - `gam_scratchpad_open_session`
 - `gam_scratchpad_close_session`
 - `gam_scratchpad_list_sessions`
@@ -185,6 +215,12 @@ All tool responses use Contract V1 envelopes:
 
 This server is intentionally shaped around the official Google Ad Manager API
 (Beta) rather than the legacy SOAP API. The public v1 keeps the surface small,
-read-only, and auditable. If a later slice needs a SOAP-only read path, it
-should be isolated behind a documented adapter boundary instead of broadening
-the existing tool surface into a generic proxy.
+guarded, and auditable. REST beta currently exposes write methods for
+inventory/supporting resources and saved reports, but not order or line-item
+mutations. `gam_trafficking_tool_matrix` makes that boundary explicit.
+
+True order, line item, creative, line-item creative association, and forecast
+apply workflows need a SOAP-capable follow-up adapter before they can be live
+write tools in this Rust server. That adapter should remain a documented,
+operator-gated boundary rather than broadening the existing surface into a
+generic proxy.

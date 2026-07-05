@@ -1,18 +1,19 @@
 //! # Google Ad Manager MCP
 //!
-//! Public stdio MCP server for Google Ad Manager read-only workflows.
+//! Public stdio MCP server for Google Ad Manager workflows.
 //!
 //! ## Rationale
 //! This server gives MCP clients a compact, public-safe way to inspect Google
-//! Ad Manager networks, inventory, delivery catalog data, and saved reports
-//! without exposing a generic API proxy.
+//! Ad Manager networks, inventory, delivery catalog data, saved reports, and
+//! guarded REST write previews without exposing a generic API proxy.
 //!
 //! ## Security Boundaries
 //! * Upstream Google credentials are used only for Ad Manager API calls.
 //! * Tool responses never return raw access tokens, private keys, or whole
 //!   credential files.
-//! * The initial release is read-only and exposes only allowlisted Ad Manager
-//!   Beta REST collections plus report execution/readback.
+//! * Reads are available by default.
+//! * Write tools fail closed unless the server runtime mode explicitly enables
+//!   apply, and every apply path is bound to a dry-run preview token.
 //!
 //! ## References
 //! * Google Ad Manager API (Beta) Getting Started
@@ -27,7 +28,10 @@ mod error;
 mod tool_surface;
 mod tools;
 
-pub use client::{AdManagerClient, AuthSource, CatalogCollection, CompletedReportRun};
+pub use client::{
+    AdManagerClient, AuthSource, CatalogCollection, CompletedReportRun, RestWriteApplyResult,
+    RestWriteOperation, RestWritePlan, RestWriteResource,
+};
 pub use config::{Cli, CliCommand, DEFAULT_READONLY_SCOPE, MANAGE_SCOPE, Settings};
 pub use error::AdManagerError;
 
@@ -125,6 +129,14 @@ impl AdManagerServer {
     pub fn report_posture() -> GuardedActionPosture {
         GuardedActionPosture::read_only()
     }
+
+    pub fn write_preview_posture() -> GuardedActionPosture {
+        GuardedActionPosture::preview()
+    }
+
+    pub fn write_apply_posture() -> GuardedActionPosture {
+        GuardedActionPosture::guarded_apply()
+    }
 }
 
 #[tool_handler(router = self.tool_router)]
@@ -132,7 +144,7 @@ impl ServerHandler for AdManagerServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_instructions(
-                "Google Ad Manager read-only MCP for networks, inventory, delivery catalog, and saved reports.",
+                "Google Ad Manager MCP for networks, inventory, delivery catalog, saved reports, and guarded REST write previews.",
             )
     }
 }
