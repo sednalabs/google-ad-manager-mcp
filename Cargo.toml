@@ -13,10 +13,10 @@ readme = "README.md"
 anyhow = "1.0.102"
 clap = { version = "4.5.60", features = ["derive", "env"] }
 gcp_auth = "0.12.6"
-mcp-toolkit = { version = "0.1.0", git = "https://github.com/sednalabs/mcp-toolkit-rs", rev = "4d49cb84ae60345161aafd1fd81632eeb8591c02", package = "mcp-toolkit", features = ["server-stdio"] }
-mcp-toolkit-core = { version = "0.1.0", git = "https://github.com/sednalabs/mcp-toolkit-rs", rev = "4d49cb84ae60345161aafd1fd81632eeb8591c02", package = "mcp-toolkit-core" }
-mcp-toolkit-observability = { version = "0.1.0", git = "https://github.com/sednalabs/mcp-toolkit-rs", rev = "4d49cb84ae60345161aafd1fd81632eeb8591c02", package = "mcp-toolkit-observability", features = ["tracing-bridge"] }
-mcp-toolkit-scratchpad = { version = "0.1.0", git = "https://github.com/sednalabs/mcp-toolkit-rs", rev = "4d49cb84ae60345161aafd1fd81632eeb8591c02", package = "mcp-toolkit-scratchpad" }
+mcp-toolkit = { version = "0.1.0", git = "https://github.com/sednalabs/mcp-toolkit-rs", rev = "8f3ffd1c197fe111449e46e06314f690ed1ccfdc", package = "mcp-toolkit", features = ["server-stdio"] }
+mcp-toolkit-core = { version = "0.1.0", git = "https://github.com/sednalabs/mcp-toolkit-rs", rev = "8f3ffd1c197fe111449e46e06314f690ed1ccfdc", package = "mcp-toolkit-core" }
+mcp-toolkit-observability = { version = "0.1.0", git = "https://github.com/sednalabs/mcp-toolkit-rs", rev = "8f3ffd1c197fe111449e46e06314f690ed1ccfdc", package = "mcp-toolkit-observability", features = ["tracing-bridge"] }
+mcp-toolkit-scratchpad = { version = "0.1.0", git = "https://github.com/sednalabs/mcp-toolkit-rs", rev = "8f3ffd1c197fe111449e46e06314f690ed1ccfdc", package = "mcp-toolkit-scratchpad", features = ["tokio"] }
 reqwest = { version = "0.12.24", default-features = false, features = ["http2", "json", "rustls-tls"] }
 schemars = "1.2.1"
 serde = { version = "1.0.228", features = ["derive"] }
@@ -27,4 +27,4 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.22", features = ["env-filter", "fmt"] }
 
 [dev-dependencies]
-mcp-toolkit-testing = { version = "0.1.0", git = "https://github.com/sednalabs/mcp-toolkit-rs", rev = "4d49cb84ae60345161aafd1fd81632eeb8591c02", package = "mcp-toolkit-testing" }
+mcp-toolkit-testing = { version = "0.1.0", git = "https://github.com/sednalabs/mcp-toolkit-rs", rev = "8f3ffd1c197fe111449e46e06314f690ed1ccfdc", package = "mcp-toolkit-testing" }
