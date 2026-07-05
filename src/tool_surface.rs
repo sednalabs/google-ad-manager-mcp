@@ -61,6 +61,52 @@ pub(crate) fn build_tool_inventory() -> Result<ToolInventory, ToolInventoryError
             ["google", "ad-manager", "reports", "rows", "fetch"],
         ),
         cap(
+            "gam_trafficking_tool_matrix",
+            "trafficking",
+            "Describe REST-supported Ad Manager write tools and SOAP-only trafficking gaps.",
+            [
+                "google",
+                "ad-manager",
+                "trafficking",
+                "write",
+                "matrix",
+                "orders",
+                "line-items",
+            ],
+        )
+        .with_risk_posture(GuardedActionPosture::no_mutation_proof()),
+        cap(
+            "gam_rest_write_plan",
+            "trafficking",
+            "Create a dry-run plan and confirmation token for an allowlisted Ad Manager REST write.",
+            [
+                "google",
+                "ad-manager",
+                "write",
+                "dry-run",
+                "plan",
+                "preview",
+                "inventory",
+            ],
+        )
+        .with_risk_posture(GuardedActionPosture::preview()),
+        cap(
+            "gam_rest_write_apply",
+            "trafficking",
+            "Apply an allowlisted Ad Manager REST write after runtime, scope, and confirmation gates.",
+            [
+                "google",
+                "ad-manager",
+                "write",
+                "apply",
+                "mutation",
+                "operator",
+                "confirmation",
+            ],
+        )
+        .with_read_only(false)
+        .with_risk_posture(GuardedActionPosture::guarded_apply()),
+        cap(
             "gam_scratchpad_open_session",
             "scratchpad",
             "Open or refresh a bounded local DuckDB scratchpad session for Ad Manager evidence work.",
@@ -168,6 +214,26 @@ mod tests {
             results
                 .iter()
                 .any(|result| result.name == "gam_scratchpad_export_evidence_bundle")
+        );
+    }
+
+    #[test]
+    fn inventory_search_finds_write_plan_tool() {
+        let inventory = build_tool_inventory().expect("inventory");
+        let results = inventory.search(
+            &ToolSearchFilter {
+                query: Some("trafficking write dry run".to_string()),
+                group: Some("trafficking".to_string()),
+                read_only: None,
+                limit: Some(10),
+            },
+            ToolOperation::List,
+            &ToolInventoryPolicy::strict(),
+        );
+        assert!(
+            results
+                .iter()
+                .any(|result| result.name == "gam_rest_write_plan")
         );
     }
 }

@@ -12,6 +12,7 @@ surface, not an SDK mirror or generic upstream proxy.
   - CLI and runtime settings
   - scope, timeout, quota-project, service-account, auth subcommand, and
     scratchpad configuration
+  - write runtime mode for preview/apply gating
 - `src/auth_ux.rs`
   - operator-facing `auth login`, `auth command`, `auth status`, and
     `auth doctor` flows
@@ -20,6 +21,7 @@ surface, not an SDK mirror or generic upstream proxy.
   - authenticated Google Ad Manager REST adapter
   - curated collection routing
   - saved report run and result polling helpers
+  - allowlisted REST write planning and execution helpers
 - `src/error.rs`
   - stable error categories and hints
 - `src/contract.rs`
@@ -48,10 +50,15 @@ The public v1 uses only the official Ad Manager Beta REST surface:
 - `reports.run`
 - `reports.results.fetchRows`
 - `networks.operations.reports.runs.get`
+- allowlisted REST write methods for ad units, placements, saved reports,
+  labels, teams, contacts, custom fields, custom targeting keys, applications,
+  sites, ad spots, and related batch state actions
 
-No SOAP adapter is included in this release. If a future read-only gap forces a
-SOAP fallback, it should land behind a separate adapter boundary instead of
-leaking SOAP semantics into the current tool surface.
+No SOAP adapter is included in this release. Current REST beta does not expose
+order or line-item mutations, creative mutations, line-item creative
+associations, or forecast apply workflows. Those should land behind a separate
+SOAP-capable adapter boundary instead of leaking SOAP semantics into the REST
+tool surface.
 
 ## Tool design
 
@@ -64,15 +71,18 @@ The initial first-class tool set is:
 5. `gam_network_catalog_list`
 6. `gam_report_run`
 7. `gam_report_result_rows`
-8. `gam_scratchpad_open_session`
-9. `gam_scratchpad_close_session`
-10. `gam_scratchpad_list_sessions`
-11. `gam_scratchpad_list_tables`
-12. `gam_scratchpad_drop_table`
-13. `gam_scratchpad_query`
-14. `gam_scratchpad_ingest_network_catalog`
-15. `gam_scratchpad_ingest_report_result_rows`
-16. `gam_scratchpad_export_evidence_bundle`
+8. `gam_trafficking_tool_matrix`
+9. `gam_rest_write_plan`
+10. `gam_rest_write_apply`
+11. `gam_scratchpad_open_session`
+12. `gam_scratchpad_close_session`
+13. `gam_scratchpad_list_sessions`
+14. `gam_scratchpad_list_tables`
+15. `gam_scratchpad_drop_table`
+16. `gam_scratchpad_query`
+17. `gam_scratchpad_ingest_network_catalog`
+18. `gam_scratchpad_ingest_report_result_rows`
+19. `gam_scratchpad_export_evidence_bundle`
 
 `find_tools` is also exposed for deferred-loading and `tool_search` clients.
 
@@ -84,6 +94,13 @@ most for a first useful release:
 - orders
 - line items
 - saved reports
+
+The deliberately grouped write tools are `gam_rest_write_plan` and
+`gam_rest_write_apply`. They cover the current REST beta write surface through
+typed allowlists rather than exposing arbitrary HTTP. Planning is a no-mutation
+preview; apply requires explicit runtime enablement, the manage OAuth scope, a
+matching confirmation token, operator context, and post-apply readback where the
+upstream response exposes a resource name.
 
 ## Auth UX
 
@@ -97,9 +114,12 @@ The binary exposes auth subcommands before stdio startup:
 These commands are deliberately wrappers around Google Application Default
 Credentials rather than a custom token store. The login command requests both
 the `cloud-platform` ADC scope required by `gcloud` and the configured Ad
-Manager scope. Verification uses `networks.list` with a small page size, which
-proves token minting, API enablement, quota-project behavior, and Ad Manager
-network visibility without exposing tokens.
+Manager scope. The `--manage-scope` flag switches the login command to
+`https://www.googleapis.com/auth/admanager` for operator-approved write apply
+testing without asking users to remember the raw scope string. Verification
+uses `networks.list` with a small page size, which proves token minting, API
+enablement, quota-project behavior, and Ad Manager network visibility without
+exposing tokens.
 
 ## Scratchpad Boundary
 

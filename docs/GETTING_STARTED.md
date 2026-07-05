@@ -2,8 +2,8 @@
 
 ## Goal
 
-Get from zero to the first useful Ad Manager read without exposing secrets or
-guessing resource identifiers.
+Get from zero to the first useful Ad Manager read or write preview without
+exposing secrets or guessing resource identifiers.
 
 ## 1. Enable the API
 
@@ -29,7 +29,9 @@ Useful variants:
 
 ```bash
 google-ad-manager-mcp auth login --quota-project <PROJECT_ID>
+google-ad-manager-mcp auth login --headless --quota-project <PROJECT_ID> --manage-scope
 google-ad-manager-mcp auth command --headless
+google-ad-manager-mcp auth command --headless --manage-scope
 google-ad-manager-mcp auth status --verify-token
 google-ad-manager-mcp auth doctor --verify-token --json
 ```
@@ -39,6 +41,14 @@ If you prefer raw `gcloud`, use both scopes:
 ```bash
 gcloud auth application-default login \
   --scopes=https://www.googleapis.com/auth/cloud-platform,https://www.googleapis.com/auth/admanager.readonly
+gcloud auth application-default set-quota-project <PROJECT_ID>
+```
+
+For operator-approved write testing, use the manage scope instead:
+
+```bash
+gcloud auth application-default login \
+  --scopes=https://www.googleapis.com/auth/cloud-platform,https://www.googleapis.com/auth/admanager
 gcloud auth application-default set-quota-project <PROJECT_ID>
 ```
 
@@ -65,6 +75,16 @@ verify it against `SHA256SUMS` and the attached
 google-ad-manager-mcp
 ```
 
+By default the server uses `GOOGLE_AD_MANAGER_MCP_WRITE_MODE=preview_only`.
+That allows write planning but denies live apply. For an operator-approved
+apply session, start it with both the manage scope and enabled write mode:
+
+```bash
+GOOGLE_AD_MANAGER_MCP_SCOPE=https://www.googleapis.com/auth/admanager \
+GOOGLE_AD_MANAGER_MCP_WRITE_MODE=enabled \
+google-ad-manager-mcp
+```
+
 Useful local inspection commands:
 
 ```bash
@@ -85,6 +105,13 @@ For reports:
 1. `gam_network_catalog_list` with `collection="reports"`
 2. `gam_report_run`
 3. `gam_report_result_rows` when pagination is needed
+
+For write planning:
+
+1. `gam_trafficking_tool_matrix`
+2. `gam_rest_write_plan`
+3. `gam_rest_write_apply` only after enabling write mode, using the manage
+   scope, and passing the exact confirmation token from the plan
 
 For scratchpad analysis:
 

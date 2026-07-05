@@ -8,15 +8,19 @@ use mcp_toolkit_scratchpad::{
     ScratchpadSessionSnapshot, ScratchpadTableInfo, run_scratchpad_blocking,
 };
 use schemars::JsonSchema;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use tokio::process::Command;
 
 use crate::auth_ux::{gcloud_adc_login_command, shell_join};
-use crate::client::CatalogCollection;
+use crate::client::{CatalogCollection, RestWriteOperation, RestWritePlan, RestWriteResource};
 use crate::config::GCLOUD_ADC_REQUIRED_SCOPE;
 use crate::contract;
 use crate::{AdManagerError, AdManagerServer, MANAGE_SCOPE, McpError};
+use mcp_toolkit_core::guarded_action::{
+    GuardedActionApply, GuardedActionError, GuardedActionNoMutationProof, GuardedActionPlanSeed,
+    GuardedActionPosture, GuardedActionPreview, GuardedActionRuntimeMode,
+};
 use mcp_toolkit_core::tool_inventory::{ToolOperation, ToolSearchFilter, ToolSearchResponse};
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
@@ -51,6 +55,9 @@ pub struct AuthLoginCommandArgs {
     pub quota_project: Option<String>,
     /// Include --no-launch-browser for headless flows. Defaults to true.
     pub no_launch_browser: Option<bool>,
+    /// Request the write-capable Ad Manager manage scope instead of the current server scope.
+    #[serde(default)]
+    pub manage_scope: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
@@ -97,6 +104,48 @@ pub struct ReportResultRowsArgs {
     pub result_name: String,
     pub page_size: Option<u32>,
     pub page_token: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct RestWriteRequestArgs {
+    /// Raw Ad Manager network code, for example 1234567.
+    pub network_code: String,
+    /// Allowlisted REST beta resource to mutate.
+    pub resource: RestWriteResource,
+    /// Allowlisted REST beta write operation.
+    pub operation: RestWriteOperation,
+    /// Full resource name for patch operations, for example networks/123/adUnits/456.
+    pub resource_name: Option<String>,
+    /// Optional field mask for patch operations, for example displayName,status.
+    pub update_mask: Option<String>,
+    /// Official Ad Manager REST request JSON body.
+    pub body: Value,
+    /// Human-readable reason for the proposed change.
+    pub reason: String,
+    /// Expected advertiser, campaign, delivery, or operational impact.
+    pub expected_impact: Option<String>,
+    /// Rollback or reversal note. Required by policy for live apply review.
+    pub rollback_note: Option<String>,
+    /// Optional caller-supplied idempotency or ticket reference.
+    pub idempotency_key: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct RestWritePlanArgs {
+    pub request: RestWriteRequestArgs,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct RestWriteApplyArgs {
+    pub request: RestWriteRequestArgs,
+    /// Confirmation token returned by gam_rest_write_plan for this exact request.
+    pub confirmation_token: String,
+}
+
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+pub struct TraffickingToolMatrixArgs {
+    /// Include SOAP-only and not-yet-exposed trafficking gaps. Defaults to true.
+    pub include_gaps: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -245,7 +294,7 @@ impl AdManagerServer {
         Ok(contract::success(
             json!({
                 "server": "google-ad-manager-mcp",
-                "goal": "Inspect Google Ad Manager networks, inventory, delivery catalog data, and saved report results through a read-only MCP surface.",
+                "goal": "Inspect Google Ad Manager networks, inventory, delivery catalog data, saved report results, and guarded REST write plans through an MCP surface.",
                 "recommended_steps": [
                     "Run google-ad-manager-mcp auth login --headless --quota-project <PROJECT_ID> for the easiest local browser login.",
                     format!("The login helper requests both {GCLOUD_ADC_REQUIRED_SCOPE} and {scope}, matching gcloud ADC requirements."),
@@ -254,6 +303,9 @@ impl AdManagerServer {
                     "Call gam_networks_list to discover the exact network code.",
                     "Call gam_network_catalog_list for ad_units, orders, line_items, or reports.",
                     "Call gam_report_run for saved reports and gam_report_result_rows for large paginated results.",
+                    "Call gam_trafficking_tool_matrix before planning writes so the REST-supported surface and SOAP-only trafficking gaps are explicit.",
+                    "Use gam_rest_write_plan for dry-run write plans; gam_rest_write_apply only works when the server is explicitly started with GOOGLE_AD_MANAGER_MCP_WRITE_MODE=enabled and the manage scope.",
+                    "For local operator apply testing, rerun auth with google-ad-manager-mcp auth login --headless --quota-project <PROJECT_ID> --manage-scope.",
                     "Use gam_scratchpad_open_session plus the gam_scratchpad_ingest_* tools when you need local joins, filtering, evidence bundles, or larger result review."
                 ],
                 "supported_credential_sources": [
@@ -277,11 +329,14 @@ impl AdManagerServer {
                     "gam_auth_status",
                     "gam_networks_list",
                     "gam_network_catalog_list",
+                    "gam_trafficking_tool_matrix",
+                    "gam_rest_write_plan",
                     "gam_scratchpad_open_session"
                 ],
                 "notes": [
-                    "The server is read-only in the initial public release.",
+                    format!("Current write mode is {}. Live apply is disabled unless this is enabled.", self.settings().write_mode.as_str()),
                     "The official Google Ad Manager Beta REST API is the primary upstream surface.",
+                    "Order and line-item mutations are not exposed by the current REST beta surface and require a future SOAP-capable trafficking layer.",
                     "Saved report execution remains asynchronous; gam_report_run can wait for completion and optionally fetch the first page.",
                     "Scratchpad data stays local to the MCP server process and is bounded by session, table, row, memory, SQL-size, and query-time limits."
                 ]
@@ -354,8 +409,13 @@ impl AdManagerServer {
     ) -> Result<CallToolResult, McpError> {
         let started = Instant::now();
         let no_launch_browser = args.no_launch_browser.unwrap_or(true);
+        let requested_scope = if args.manage_scope.unwrap_or(false) {
+            MANAGE_SCOPE
+        } else {
+            self.client().scope()
+        };
         let command = gcloud_adc_login_command(
-            self.client().scope(),
+            requested_scope,
             args.client_id_file.as_deref().map(std::path::Path::new),
             no_launch_browser,
         );
@@ -376,11 +436,12 @@ impl AdManagerServer {
                 "command": command,
                 "shell_command": shell_join(&command),
                 "follow_up_commands": follow_up_commands,
-                "scope": self.client().scope(),
+                "scope": requested_scope,
+                "manage_scope": requested_scope == MANAGE_SCOPE,
                 "notes": [
                     "This command writes Application Default Credentials on the machine where it is run.",
                     "No token or client secret is returned by this tool.",
-                    format!("Use {} when you need write-capable Ad Manager credentials in a future operator slice.", MANAGE_SCOPE),
+                    format!("Use manage_scope=true or --manage-scope when you need write-capable Ad Manager credentials for operator-approved apply."),
                 ]
             }),
             started,
@@ -556,6 +617,176 @@ impl AdManagerServer {
             )),
             Err(err) => Ok(contract::error(err, started)),
         }
+    }
+
+    #[tool(
+        name = "gam_rest_write_plan",
+        description = "Create a dry-run plan and confirmation token for an allowlisted Google Ad Manager REST write operation without mutating upstream state."
+    )]
+    async fn gam_rest_write_plan(
+        &self,
+        Parameters(args): Parameters<RestWritePlanArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let started = Instant::now();
+        if let Err(err) = self
+            .settings()
+            .write_mode
+            .assert_allowed("gam_rest_write_plan", GuardedActionPosture::preview())
+        {
+            return Ok(contract::error(write_action_disabled(err), started));
+        }
+
+        let plan = match build_write_plan(self, &args.request) {
+            Ok(plan) => plan,
+            Err(err) => return Ok(contract::error(err, started)),
+        };
+        let (plan_id, confirmation_token, fingerprint) =
+            match guarded_write_identifiers(&args.request, &plan) {
+                Ok(value) => value,
+                Err(err) => return Ok(contract::error(err, started)),
+            };
+        let warnings = write_plan_warnings(
+            self.settings().write_mode,
+            self.client().scope(),
+            &args.request,
+            &plan,
+        );
+        let preview = GuardedActionPreview::new(
+            plan_id,
+            self.settings().write_mode,
+            GuardedActionPosture::preview(),
+            json!({
+                "request": args.request,
+                "rest_request": rest_write_plan_to_json(&plan),
+                "confirmation_token": confirmation_token,
+                "fingerprint": fingerprint,
+                "warnings": warnings,
+                "next_step": "Review the plan. To apply, restart/configure the server with GOOGLE_AD_MANAGER_MCP_WRITE_MODE=enabled, use the manage scope, and call gam_rest_write_apply with this exact request and confirmation_token.",
+            }),
+            json!({
+                "mutation_performed": false,
+                "upstream_called": false,
+                "write_mode": self.settings().write_mode.as_str(),
+                "required_apply_scope": MANAGE_SCOPE,
+                "policy": provider_safety_contract_json(),
+            }),
+        );
+        Ok(contract::success(json!(preview), started))
+    }
+
+    #[tool(
+        name = "gam_rest_write_apply",
+        description = "Apply an allowlisted Google Ad Manager REST write plan after explicit runtime, scope, and confirmation-token gates."
+    )]
+    async fn gam_rest_write_apply(
+        &self,
+        Parameters(args): Parameters<RestWriteApplyArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let started = Instant::now();
+        let plan = match build_write_plan(self, &args.request) {
+            Ok(plan) => plan,
+            Err(err) => return Ok(contract::error(err, started)),
+        };
+        let apply_posture = apply_posture_for_plan(&plan);
+        if let Err(err) = self
+            .settings()
+            .write_mode
+            .assert_allowed("gam_rest_write_apply", apply_posture)
+        {
+            return Ok(contract::error(write_action_disabled(err), started));
+        }
+        if !scope_allows_write(self.client().scope()) {
+            return Ok(contract::error(
+                AdManagerError::WriteScopeRequired {
+                    scope: self.client().scope().to_string(),
+                },
+                started,
+            ));
+        }
+        if let Err(err) = validate_apply_context(&args.request) {
+            return Ok(contract::error(err, started));
+        }
+
+        let (plan_id, expected_token, fingerprint) =
+            match guarded_write_identifiers(&args.request, &plan) {
+                Ok(value) => value,
+                Err(err) => return Ok(contract::error(err, started)),
+            };
+        if args.confirmation_token.trim() != expected_token {
+            return Ok(contract::error(
+                AdManagerError::ConfirmationTokenMismatch,
+                started,
+            ));
+        }
+
+        let applied = match self.client().execute_rest_write_plan(&plan).await {
+            Ok(value) => value,
+            Err(err) => return Ok(contract::error(err, started)),
+        };
+        let apply = GuardedActionApply::new(
+            plan_id,
+            self.settings().write_mode,
+            apply_posture,
+            json!({
+                "rest_request": rest_write_plan_to_json(&plan),
+                "upstream_response": applied.upstream_response,
+                "post_apply_readback": {
+                    "attempted": plan.readback_path.is_some(),
+                    "result": applied.readback,
+                    "error": applied.readback_error,
+                },
+            }),
+            json!({
+                "mutation_performed": true,
+                "fingerprint": fingerprint,
+                "required_apply_scope": MANAGE_SCOPE,
+                "operator_context": {
+                    "reason": args.request.reason,
+                    "expected_impact": args.request.expected_impact,
+                    "rollback_note": args.request.rollback_note,
+                    "idempotency_key": args.request.idempotency_key,
+                },
+                "policy": provider_safety_contract_json(),
+            }),
+        );
+        Ok(contract::success(json!(apply), started))
+    }
+
+    #[tool(
+        name = "gam_trafficking_tool_matrix",
+        description = "Describe the current Google Ad Manager write and trafficking surface, including REST-supported writes and SOAP-only gaps."
+    )]
+    async fn gam_trafficking_tool_matrix(
+        &self,
+        Parameters(args): Parameters<TraffickingToolMatrixArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let started = Instant::now();
+        let include_gaps = args.include_gaps.unwrap_or(true);
+        let proof = GuardedActionNoMutationProof::new(
+            self.settings().write_mode,
+            json!({
+                "write_mode": self.settings().write_mode.as_str(),
+                "apply_enabled": self.settings().write_mode == GuardedActionRuntimeMode::Enabled,
+                "current_scope": self.client().scope(),
+                "required_apply_scope": MANAGE_SCOPE,
+                "rest_beta_write_tools": [
+                    "gam_rest_write_plan",
+                    "gam_rest_write_apply"
+                ],
+                "rest_beta_supported_resources": rest_supported_resource_matrix(),
+                "trafficking_gaps": if include_gaps { trafficking_gap_matrix() } else { Value::Null },
+            }),
+            json!({
+                "mutation_performed": false,
+                "upstream_called": false,
+                "policy": provider_safety_contract_json(),
+                "notes": [
+                    "Google Ad Manager REST beta currently exposes write methods for inventory/supporting resources and saved reports, but not order or line-item mutations.",
+                    "Order, line item, creative, LICA, and forecast apply paths need a SOAP-capable follow-up layer before they can be live write tools in this Rust server."
+                ],
+            }),
+        );
+        Ok(contract::success(json!(proof), started))
     }
 
     #[tool(
@@ -944,6 +1175,257 @@ impl AdManagerServer {
 
 fn default_true() -> bool {
     true
+}
+
+fn build_write_plan(
+    server: &AdManagerServer,
+    request: &RestWriteRequestArgs,
+) -> Result<RestWritePlan, AdManagerError> {
+    validate_plan_context(request)?;
+    server.client().build_rest_write_plan(
+        &request.network_code,
+        request.resource,
+        request.operation,
+        request.resource_name.as_deref(),
+        request.update_mask.as_deref(),
+        request.body.clone(),
+    )
+}
+
+fn validate_plan_context(request: &RestWriteRequestArgs) -> Result<(), AdManagerError> {
+    if request.reason.trim().is_empty() {
+        return Err(AdManagerError::invalid(
+            "reason",
+            "must explain why the provider write is being planned",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_apply_context(request: &RestWriteRequestArgs) -> Result<(), AdManagerError> {
+    if request
+        .expected_impact
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or_default()
+        .is_empty()
+    {
+        return Err(AdManagerError::invalid(
+            "expected_impact",
+            "is required before applying provider writes",
+        ));
+    }
+    if request
+        .rollback_note
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or_default()
+        .is_empty()
+    {
+        return Err(AdManagerError::invalid(
+            "rollback_note",
+            "is required before applying provider writes",
+        ));
+    }
+    Ok(())
+}
+
+fn write_action_disabled(err: GuardedActionError) -> AdManagerError {
+    AdManagerError::WriteActionDisabled {
+        message: err.to_string(),
+    }
+}
+
+fn apply_posture_for_plan(plan: &RestWritePlan) -> GuardedActionPosture {
+    if plan.destructive {
+        GuardedActionPosture::destructive()
+    } else if plan.send_adjacent {
+        GuardedActionPosture::send_adjacent()
+    } else {
+        GuardedActionPosture::guarded_apply()
+    }
+}
+
+fn scope_allows_write(scope: &str) -> bool {
+    scope
+        .split([',', ' ', '\t', '\n'])
+        .any(|part| part.trim() == MANAGE_SCOPE)
+}
+
+fn guarded_write_identifiers(
+    request: &RestWriteRequestArgs,
+    plan: &RestWritePlan,
+) -> Result<(String, String, String), AdManagerError> {
+    let target = format!(
+        "{}:{}:{}",
+        request.resource.as_str(),
+        request.operation.as_str(),
+        plan.target
+    );
+    let seed = GuardedActionPlanSeed::new("gam_rest_write", &request.network_code, &target)
+        .map_err(|err| AdManagerError::invalid("plan_seed", err.to_string()))?;
+    let fingerprint_input = json!({
+        "request": request,
+        "method": plan.method,
+        "path": plan.path,
+        "query": plan.query,
+        "target": plan.target,
+    });
+    let fingerprint = stable_fingerprint(&fingerprint_input.to_string());
+    let plan_id = format!("{}.{}", seed.stable_plan_id(), fingerprint);
+    let confirmation_token = format!("confirm-gam-{fingerprint}");
+    Ok((plan_id, confirmation_token, fingerprint))
+}
+
+fn stable_fingerprint(input: &str) -> String {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for byte in input.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{hash:016x}")
+}
+
+fn rest_write_plan_to_json(plan: &RestWritePlan) -> Value {
+    json!({
+        "resource": plan.resource.as_str(),
+        "operation": plan.operation.as_str(),
+        "network_code": plan.network_code,
+        "method": plan.method,
+        "path": plan.path,
+        "query": plan.query,
+        "body": plan.body,
+        "target": plan.target,
+        "readback_path": plan.readback_path,
+        "destructive": plan.destructive,
+        "send_adjacent": plan.send_adjacent,
+        "request_hint": plan.operation.request_hint(),
+    })
+}
+
+fn write_plan_warnings(
+    write_mode: GuardedActionRuntimeMode,
+    scope: &str,
+    request: &RestWriteRequestArgs,
+    plan: &RestWritePlan,
+) -> Vec<String> {
+    let mut warnings = Vec::new();
+    if write_mode != GuardedActionRuntimeMode::Enabled {
+        warnings.push(format!(
+            "Apply is disabled while GOOGLE_AD_MANAGER_MCP_WRITE_MODE is {}.",
+            write_mode.as_str()
+        ));
+    }
+    if !scope_allows_write(scope) {
+        warnings.push(format!(
+            "Apply requires the Google Ad Manager manage scope: {MANAGE_SCOPE}."
+        ));
+    }
+    if request
+        .expected_impact
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or_default()
+        .is_empty()
+    {
+        warnings.push("Apply requires expected_impact to be set.".to_string());
+    }
+    if request
+        .rollback_note
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or_default()
+        .is_empty()
+    {
+        warnings.push("Apply requires rollback_note to be set.".to_string());
+    }
+    if plan.readback_path.is_none()
+        && !matches!(
+            plan.operation,
+            RestWriteOperation::Create | RestWriteOperation::Patch
+        )
+    {
+        warnings.push(
+            "Batch operation readback depends on the upstream response; use catalog/list or get tools for post-apply verification."
+                .to_string(),
+        );
+    }
+    warnings
+}
+
+fn provider_safety_contract_json() -> Value {
+    json!({
+        "defaults": {
+            "read_tools": "enabled",
+            "write_preview": "enabled unless runtime mode is read_only",
+            "write_apply": "disabled unless runtime mode is enabled",
+        },
+        "apply_requirements": [
+            "explicit write-enabled runtime mode",
+            "Google Ad Manager manage OAuth scope",
+            "confirmation token from a matching dry-run plan",
+            "human-readable reason",
+            "expected impact",
+            "rollback or reversal note",
+            "post-apply readback or explicit verification instruction"
+        ],
+        "never_default": [
+            "live mutation",
+            "production campaign launch",
+            "implicit order or line-item trafficking"
+        ]
+    })
+}
+
+fn rest_supported_resource_matrix() -> Value {
+    json!([
+        { "resource": "ad_spots", "operations": ["create", "patch", "batch_create", "batch_update"] },
+        { "resource": "ad_units", "operations": ["create", "patch", "batch_create", "batch_update", "batch_activate", "batch_deactivate", "batch_archive"] },
+        { "resource": "applications", "operations": ["create", "patch", "batch_create", "batch_update", "batch_archive", "batch_unarchive"] },
+        { "resource": "cms_metadata_keys", "operations": ["batch_activate", "batch_deactivate"] },
+        { "resource": "cms_metadata_values", "operations": ["batch_activate", "batch_deactivate"] },
+        { "resource": "contacts", "operations": ["create", "patch", "batch_create", "batch_update"] },
+        { "resource": "custom_fields", "operations": ["create", "patch", "batch_create", "batch_update", "batch_activate", "batch_deactivate"] },
+        { "resource": "custom_targeting_keys", "operations": ["create", "patch", "batch_create", "batch_update", "batch_activate", "batch_deactivate"] },
+        { "resource": "entity_signals_mappings", "operations": ["create", "patch", "batch_create", "batch_update"] },
+        { "resource": "labels", "operations": ["create", "patch", "batch_create", "batch_update", "batch_activate", "batch_deactivate"] },
+        { "resource": "placements", "operations": ["create", "patch", "batch_create", "batch_update", "batch_activate", "batch_deactivate", "batch_archive"] },
+        { "resource": "private_auction_deals", "operations": ["create", "patch"] },
+        { "resource": "private_auctions", "operations": ["create", "patch"] },
+        { "resource": "reports", "operations": ["create", "patch"] },
+        { "resource": "sites", "operations": ["create", "patch", "batch_create", "batch_update", "batch_deactivate", "batch_submit_for_approval"] },
+        { "resource": "suggested_ad_unit", "operations": ["batch_approve"] },
+        { "resource": "teams", "operations": ["create", "patch", "batch_create", "batch_update", "batch_activate", "batch_deactivate"] }
+    ])
+}
+
+fn trafficking_gap_matrix() -> Value {
+    json!([
+        {
+            "surface": "orders",
+            "rest_beta": "list/get only",
+            "needed_for": ["create order", "update order", "approve/order lifecycle"],
+            "follow_up": "SOAP-capable order trafficking layer"
+        },
+        {
+            "surface": "line_items",
+            "rest_beta": "list/get only",
+            "needed_for": ["create line item", "update line item", "pause/resume/archive", "targeting changes", "budget and schedule changes"],
+            "follow_up": "SOAP-capable LineItemService layer"
+        },
+        {
+            "surface": "creatives",
+            "rest_beta": "not exposed in current server/discovery slice",
+            "needed_for": ["create creative", "update creative", "associate creative with line item"],
+            "follow_up": "SOAP-capable creative and LICA layer"
+        },
+        {
+            "surface": "forecasts",
+            "rest_beta": "not exposed as a write/apply method in current server",
+            "needed_for": ["availability checks before apply", "delivery risk proof"],
+            "follow_up": "forecast read/proof layer before live line-item apply"
+        }
+    ])
 }
 
 fn network_catalog_ingest_columns() -> Vec<ScratchpadIngestColumn> {

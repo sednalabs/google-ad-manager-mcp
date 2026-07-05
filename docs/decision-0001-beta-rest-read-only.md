@@ -2,7 +2,8 @@
 
 ## Status
 
-Accepted
+Accepted, extended by
+[Decision 0002](decision-0002-guarded-rest-writes-before-soap-trafficking.md)
 
 ## Context
 
@@ -30,6 +31,10 @@ The initial public release will:
 - keep the MCP surface read-only;
 - treat saved report execution and result retrieval as the reporting path;
 - keep any future SOAP fallback isolated behind a separate adapter boundary.
+
+Decision 0002 keeps the same REST-first/SOAP-isolated boundary while adding
+guarded REST write planning and explicitly gated apply for the REST beta write
+methods that now exist.
 
 ## Consequences
 

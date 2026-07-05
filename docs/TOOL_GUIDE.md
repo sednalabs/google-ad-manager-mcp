@@ -15,6 +15,9 @@ All tools return Contract V1 envelopes: `ok/data/meta` on success and
 | `gam_network_catalog_list` | List one curated network collection: `ad_units`, `orders`, `line_items`, or `reports`. |
 | `gam_report_run` | Run a saved Ad Manager report, optionally wait, and optionally fetch the first result page. |
 | `gam_report_result_rows` | Fetch rows from a completed report result resource. |
+| `gam_trafficking_tool_matrix` | Describe REST-supported write operations and SOAP-only trafficking gaps. |
+| `gam_rest_write_plan` | Create a dry-run plan and confirmation token for an allowlisted REST write. |
+| `gam_rest_write_apply` | Apply an allowlisted REST write after runtime, scope, and confirmation gates. |
 | `gam_scratchpad_open_session` | Open or refresh a bounded local DuckDB scratchpad session. |
 | `gam_scratchpad_close_session` | Close a scratchpad session and remove its local database. |
 | `gam_scratchpad_list_sessions` | List active scratchpad sessions. |
@@ -58,6 +61,65 @@ Use `gam_report_result_rows` with the returned `result_name` when:
 - the first page was truncated;
 - you intentionally skipped fetching the first page during `gam_report_run`;
 - you want to revisit a completed report result later.
+
+## Write And Trafficking Tools
+
+Write tools are available as a guarded preview/apply pair:
+
+1. `gam_trafficking_tool_matrix`
+2. `gam_rest_write_plan`
+3. `gam_rest_write_apply`
+
+The default runtime mode is `preview_only`. In that mode, `gam_rest_write_plan`
+can return the exact REST request shape and confirmation token, but
+`gam_rest_write_apply` fails closed.
+
+Live apply requires all of the following:
+
+- `GOOGLE_AD_MANAGER_MCP_WRITE_MODE=enabled`
+- `GOOGLE_AD_MANAGER_MCP_SCOPE=https://www.googleapis.com/auth/admanager`
+- the exact `confirmation_token` from `gam_rest_write_plan`
+- a non-empty `reason`
+- `expected_impact`
+- `rollback_note`
+
+For local ADC credentials, the easiest way to request the manage scope is:
+
+```bash
+google-ad-manager-mcp auth login --headless --quota-project <PROJECT_ID> --manage-scope
+```
+
+The REST write surface is allowlisted from the official Ad Manager REST beta
+discovery document. It includes inventory/supporting resources such as
+`ad_units`, `placements`, `reports`, `labels`, `teams`, `contacts`,
+`custom_fields`, `custom_targeting_keys`, `applications`, `sites`, and related
+batch state actions.
+
+The current REST beta surface does not expose order or line-item create/update
+actions. `gam_trafficking_tool_matrix` reports those as SOAP-only gaps rather
+than presenting fake tools that would fail at apply time.
+
+Example dry-run plan for a saved-report patch:
+
+```json
+{
+  "request": {
+    "network_code": "1234567",
+    "resource": "reports",
+    "operation": "patch",
+    "resource_name": "networks/1234567/reports/987654",
+    "update_mask": "displayName",
+    "body": {
+      "name": "networks/1234567/reports/987654",
+      "displayName": "Campaign delivery proof"
+    },
+    "reason": "Rename a saved report used for delivery proof packs.",
+    "expected_impact": "Report name only; no campaign delivery changes.",
+    "rollback_note": "Patch displayName back to the previous value.",
+    "idempotency_key": "ticket-123"
+  }
+}
+```
 
 ## Scratchpad Tools
 

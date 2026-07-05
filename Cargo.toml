@@ -5,7 +5,7 @@ name = "google-ad-manager-mcp"
 version = "0.1.1-alpha.0"
 edition = "2024"
 license = "Apache-2.0"
-description = "Public Rust MCP server for Google Ad Manager read-only workflows."
+description = "Public Rust MCP server for Google Ad Manager workflows."
 repository = "https://github.com/sednalabs/google-ad-manager-mcp"
 readme = "README.md"
 

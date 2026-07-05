@@ -6,11 +6,13 @@ use std::time::Duration;
 
 use crate::AdManagerError;
 use clap::{Args, Parser, Subcommand};
+use mcp_toolkit_core::guarded_action::GuardedActionRuntimeMode;
 
 pub const DEFAULT_READONLY_SCOPE: &str = "https://www.googleapis.com/auth/admanager.readonly";
 pub const MANAGE_SCOPE: &str = "https://www.googleapis.com/auth/admanager";
 pub const GCLOUD_ADC_REQUIRED_SCOPE: &str = "https://www.googleapis.com/auth/cloud-platform";
 const DEFAULT_API_BASE_URL: &str = "https://admanager.googleapis.com/v1";
+const DEFAULT_WRITE_MODE: &str = "preview_only";
 const DEFAULT_SCRATCHPAD_SESSION_TTL_SECS: u64 = 900;
 const DEFAULT_SCRATCHPAD_MAX_SESSIONS: usize = 64;
 const DEFAULT_SCRATCHPAD_MAX_TABLES_PER_SESSION: usize = 32;
@@ -21,7 +23,7 @@ const DEFAULT_SCRATCHPAD_MAX_SQL_BYTES: usize = 65_536;
 
 #[derive(Debug, Clone, Parser)]
 #[command(name = "google-ad-manager-mcp")]
-#[command(about = "Google Ad Manager read-only MCP server")]
+#[command(about = "Google Ad Manager MCP server")]
 #[command(version)]
 pub struct Cli {
     /// Print the exported tool names as JSON and exit.
@@ -67,6 +69,14 @@ pub struct Cli {
     /// Default upstream API base URL.
     #[arg(long, env = "GOOGLE_AD_MANAGER_MCP_API_BASE_URL", default_value = DEFAULT_API_BASE_URL)]
     pub api_base_url: String,
+
+    /// Runtime mode for Ad Manager write tools: read_only, preview_only, or enabled.
+    #[arg(
+        long,
+        env = "GOOGLE_AD_MANAGER_MCP_WRITE_MODE",
+        default_value = DEFAULT_WRITE_MODE
+    )]
+    pub write_mode: String,
 
     /// Default report polling timeout in milliseconds.
     #[arg(
@@ -189,6 +199,10 @@ pub struct AuthLoginArgs {
     #[arg(long)]
     pub quota_project: Option<String>,
 
+    /// Request the write-capable Ad Manager manage scope instead of the configured scope.
+    #[arg(long, alias = "write-scope")]
+    pub manage_scope: bool,
+
     /// Print the command that would run, without invoking gcloud.
     #[arg(long)]
     pub dry_run: bool,
@@ -207,6 +221,10 @@ pub struct AuthCommandArgs {
     /// Optional downloaded Google OAuth client id JSON for gcloud ADC login.
     #[arg(long)]
     pub client_id_file: Option<PathBuf>,
+
+    /// Request the write-capable Ad Manager manage scope instead of the configured scope.
+    #[arg(long, alias = "write-scope")]
+    pub manage_scope: bool,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -241,6 +259,7 @@ pub struct Settings {
     pub service_account_json: Option<String>,
     pub http_timeout: Duration,
     pub api_base_url: String,
+    pub write_mode: GuardedActionRuntimeMode,
     pub report_poll_timeout: Duration,
     pub report_poll_initial_interval: Duration,
     pub scratchpad_session_ttl: Duration,
@@ -267,6 +286,7 @@ impl Settings {
     pub fn from_cli(cli: Cli) -> Result<Self, AdManagerError> {
         let scope = normalize_required("scope", cli.scope)?;
         let api_base_url = normalize_required("api_base_url", cli.api_base_url)?;
+        let write_mode = parse_write_mode(&cli.write_mode)?;
         if !api_base_url.starts_with("https://") {
             return Err(AdManagerError::invalid(
                 "api_base_url",
@@ -324,6 +344,7 @@ impl Settings {
             service_account_json: normalize_optional(cli.service_account_json),
             http_timeout: Duration::from_millis(cli.http_timeout_ms.max(1)),
             api_base_url,
+            write_mode,
             report_poll_timeout: Duration::from_millis(cli.report_poll_timeout_ms.max(1)),
             report_poll_initial_interval: Duration::from_millis(
                 cli.report_poll_initial_interval_ms.max(250),
@@ -352,6 +373,7 @@ impl Default for Settings {
             service_account_json: None,
             http_timeout: Duration::from_millis(15_000),
             api_base_url: DEFAULT_API_BASE_URL.to_string(),
+            write_mode: GuardedActionRuntimeMode::PreviewOnly,
             report_poll_timeout: Duration::from_millis(300_000),
             report_poll_initial_interval: Duration::from_millis(5_000),
             scratchpad_session_ttl: Duration::from_secs(DEFAULT_SCRATCHPAD_SESSION_TTL_SECS),
@@ -379,6 +401,20 @@ fn normalize_required(field: &'static str, value: String) -> Result<String, AdMa
         return Err(AdManagerError::invalid(field, "must not be empty"));
     }
     Ok(trimmed)
+}
+
+fn parse_write_mode(value: &str) -> Result<GuardedActionRuntimeMode, AdManagerError> {
+    match value.trim().to_ascii_lowercase().replace('-', "_").as_str() {
+        "read_only" | "readonly" => Ok(GuardedActionRuntimeMode::ReadOnly),
+        "preview_only" | "preview" | "dry_run" | "dryrun" => {
+            Ok(GuardedActionRuntimeMode::PreviewOnly)
+        }
+        "enabled" | "write" | "writes" | "apply" => Ok(GuardedActionRuntimeMode::Enabled),
+        _ => Err(AdManagerError::invalid(
+            "write_mode",
+            "must be one of read_only, preview_only, or enabled",
+        )),
+    }
 }
 
 pub fn adc_credentials_path() -> Option<PathBuf> {
@@ -410,13 +446,28 @@ pub fn adc_credentials_path() -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{DEFAULT_READONLY_SCOPE, GCLOUD_ADC_REQUIRED_SCOPE, Settings};
+    use super::{DEFAULT_READONLY_SCOPE, GCLOUD_ADC_REQUIRED_SCOPE, Settings, parse_write_mode};
+    use mcp_toolkit_core::guarded_action::GuardedActionRuntimeMode;
 
     #[test]
-    fn defaults_are_read_only_and_https() {
+    fn defaults_are_read_only_preview_only_and_https() {
         let settings = Settings::default();
         assert_eq!(settings.scope, DEFAULT_READONLY_SCOPE);
+        assert_eq!(settings.write_mode, GuardedActionRuntimeMode::PreviewOnly);
         assert!(settings.api_base_url.starts_with("https://"));
         assert!(GCLOUD_ADC_REQUIRED_SCOPE.ends_with("/auth/cloud-platform"));
+    }
+
+    #[test]
+    fn parses_write_mode_aliases() {
+        assert_eq!(
+            parse_write_mode("preview-only").expect("mode"),
+            GuardedActionRuntimeMode::PreviewOnly
+        );
+        assert_eq!(
+            parse_write_mode("enabled").expect("mode"),
+            GuardedActionRuntimeMode::Enabled
+        );
+        assert!(parse_write_mode("surprise").is_err());
     }
 }

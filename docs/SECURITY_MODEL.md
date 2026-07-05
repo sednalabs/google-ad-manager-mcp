@@ -3,10 +3,11 @@
 ## Core posture
 
 - Public repository
-- Read-only initial release
+- Read tools and write previews are enabled by default
+- Live write apply is disabled by default
 - Official Google Ad Manager API (Beta) only
 - No generic HTTP proxy
-- No write or approval surfaces
+- No ambient write or approval surfaces
 - No credential material in tool output
 - Bounded local scratchpad analysis only
 
@@ -36,11 +37,35 @@ The server intentionally does not expose:
 
 - arbitrary Google REST calls
 - raw OAuth token exchange helpers
-- generic report-definition mutations
-- generic entity creation or patch methods
+- unallowlisted generic entity creation or patch methods
+- default live mutations
 - bulk export or file-write surfaces
 
-The missing tools are intentional safety boundaries, not backlog accidents.
+The missing order, line-item, creative, line-item creative association, and
+forecast apply tools are intentional REST beta boundaries, not hidden generic
+proxy paths. They require a SOAP-capable follow-up layer before live use.
+
+## Write safety
+
+The write surface uses a preview/apply contract:
+
+- default `GOOGLE_AD_MANAGER_MCP_WRITE_MODE=preview_only`
+- `gam_rest_write_plan` builds a dry-run plan without calling mutation
+  endpoints
+- `gam_rest_write_apply` requires
+  `GOOGLE_AD_MANAGER_MCP_WRITE_MODE=enabled`
+- apply requires the manage scope
+  `https://www.googleapis.com/auth/admanager`
+- local ADC users can request that scope with
+  `google-ad-manager-mcp auth login --manage-scope`
+- apply requires the confirmation token returned by the matching plan
+- apply requires `reason`, `expected_impact`, and `rollback_note`
+- create and patch operations attempt post-apply readback through the returned
+  or target resource name
+
+Batch operations return the upstream response and explicit verification
+guidance. Operators should follow with read/list tools or scratchpad evidence
+when the upstream batch response does not include a directly readable resource.
 
 ## Scratchpad safety
 
