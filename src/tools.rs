@@ -4,8 +4,8 @@ use mcp_toolkit::rmcp::handler::server::wrapper::Parameters;
 use mcp_toolkit::rmcp::model::CallToolResult;
 use mcp_toolkit::rmcp::{self, tool, tool_router};
 use mcp_toolkit_scratchpad::{
-    ScratchpadError, ScratchpadIngestColumn, ScratchpadIngestMode, ScratchpadQueryProjection,
-    ScratchpadSessionInfo, ScratchpadSessionSnapshot, ScratchpadTableInfo,
+    ScratchpadIngestColumn, ScratchpadIngestMode, ScratchpadQueryProjection, ScratchpadSessionInfo,
+    ScratchpadSessionSnapshot, ScratchpadTableInfo, run_scratchpad_blocking,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -569,7 +569,7 @@ impl AdManagerServer {
         let started = Instant::now();
         let sessions = self.scratchpad_sessions().clone();
         let session_id = args.session_id.clone();
-        match scratchpad_blocking(move || sessions.open_session(&session_id)).await {
+        match run_scratchpad_blocking(move || sessions.open_session(&session_id)).await {
             Ok(info) => Ok(contract::success(
                 scratchpad_session_info_to_json(info),
                 started,
@@ -589,7 +589,7 @@ impl AdManagerServer {
         let started = Instant::now();
         let sessions = self.scratchpad_sessions().clone();
         let session_id = args.session_id.clone();
-        match scratchpad_blocking(move || sessions.release_session(&session_id)).await {
+        match run_scratchpad_blocking(move || sessions.release_session(&session_id)).await {
             Ok(released) => Ok(contract::success(
                 json!({
                     "session_id": args.session_id,
@@ -612,7 +612,7 @@ impl AdManagerServer {
         let started = Instant::now();
         let limit = args.limit.unwrap_or(20).clamp(1, 100);
         let sessions = self.scratchpad_sessions().clone();
-        match scratchpad_blocking(move || sessions.list_sessions(limit)).await {
+        match run_scratchpad_blocking(move || sessions.list_sessions(limit)).await {
             Ok(sessions) => Ok(contract::success(
                 json!({
                     "sessions": sessions
@@ -639,7 +639,7 @@ impl AdManagerServer {
         let limit = args.limit.unwrap_or(50).clamp(1, 200);
         let sessions = self.scratchpad_sessions().clone();
         let session_id = args.session_id.clone();
-        match scratchpad_blocking(move || sessions.list_tables(&session_id, limit)).await {
+        match run_scratchpad_blocking(move || sessions.list_tables(&session_id, limit)).await {
             Ok(tables) => Ok(contract::success(
                 json!({
                     "session_id": args.session_id,
@@ -668,8 +668,10 @@ impl AdManagerServer {
         let session_id = args.session_id.clone();
         let table_name = args.table_name.clone();
         let if_exists = args.if_exists;
-        match scratchpad_blocking(move || sessions.drop_table(&session_id, &table_name, if_exists))
-            .await
+        match run_scratchpad_blocking(move || {
+            sessions.drop_table(&session_id, &table_name, if_exists)
+        })
+        .await
         {
             Ok(stats) => Ok(contract::success(
                 json!({
@@ -699,8 +701,10 @@ impl AdManagerServer {
         let sessions = self.scratchpad_sessions().clone();
         let session_id = args.session_id.clone();
         let sql = args.sql.clone();
-        match scratchpad_blocking(move || sessions.query_rows(&session_id, &sql, offset, page_size))
-            .await
+        match run_scratchpad_blocking(move || {
+            sessions.query_rows(&session_id, &sql, offset, page_size)
+        })
+        .await
         {
             Ok(projection) => Ok(contract::success(
                 scratchpad_query_projection_to_json(projection, offset, page_size),
@@ -747,7 +751,7 @@ impl AdManagerServer {
         let sessions = self.scratchpad_sessions().clone();
         let session_id = args.session_id.clone();
         let table_name = args.table_name.clone();
-        match scratchpad_blocking(move || {
+        match run_scratchpad_blocking(move || {
             sessions.ingest_rows_with_mode(&session_id, &table_name, &columns, &rows, ingest_mode)
         })
         .await
@@ -804,7 +808,7 @@ impl AdManagerServer {
         let sessions = self.scratchpad_sessions().clone();
         let session_id = args.session_id.clone();
         let table_name = args.table_name.clone();
-        match scratchpad_blocking(move || {
+        match run_scratchpad_blocking(move || {
             sessions.ingest_rows_with_mode(&session_id, &table_name, &columns, &rows, ingest_mode)
         })
         .await
@@ -843,7 +847,7 @@ impl AdManagerServer {
         let sessions = self.scratchpad_sessions().clone();
         let session_id = args.session_id.clone();
         let requested_tables = args.tables.clone();
-        let bundle_result = scratchpad_blocking(move || {
+        let bundle_result = run_scratchpad_blocking(move || {
             let table_names = match requested_tables {
                 Some(tables) => tables,
                 None => sessions
@@ -940,20 +944,6 @@ impl AdManagerServer {
 
 fn default_true() -> bool {
     true
-}
-
-async fn scratchpad_blocking<T, F>(operation: F) -> Result<T, ScratchpadError>
-where
-    T: Send + 'static,
-    F: FnOnce() -> Result<T, ScratchpadError> + Send + 'static,
-{
-    tokio::task::spawn_blocking(operation)
-        .await
-        .unwrap_or_else(|err| {
-            Err(ScratchpadError::Internal(format!(
-                "scratchpad blocking task failed: {err}"
-            )))
-        })
 }
 
 fn network_catalog_ingest_columns() -> Vec<ScratchpadIngestColumn> {
