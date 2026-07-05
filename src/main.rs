@@ -3,7 +3,7 @@ use clap::Parser;
 use mcp_toolkit_core::tool_schema::tool_schema_snapshot_value;
 use tracing_subscriber::EnvFilter;
 
-use google_ad_manager_mcp::{AdManagerServer, Cli, Settings};
+use google_ad_manager_mcp::{AdManagerServer, Cli, CliCommand, Settings, auth_ux};
 
 #[tokio::main]
 async fn main() {
@@ -16,6 +16,17 @@ async fn main() {
 async fn run() -> Result<()> {
     init_tracing();
     let settings = Settings::from_cli(Cli::parse())?;
+
+    if let Some(command) = settings.command.clone() {
+        match command {
+            CliCommand::Serve => {}
+            CliCommand::Auth(auth) => {
+                auth_ux::run_auth_command(&settings, &auth.command).await?;
+                return Ok(());
+            }
+        }
+    }
+
     let server = AdManagerServer::new(settings.clone())?;
 
     if settings.print_tools {

@@ -14,7 +14,8 @@ use tokio::time::sleep;
 use crate::config::Settings;
 use crate::error::AdManagerError;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum AuthSource {
     GoogleDefaultProviderChain,
     ServiceAccountJsonPath,
@@ -58,6 +59,10 @@ impl CatalogCollection {
             Self::Reports => "reports",
         }
     }
+
+    pub fn response_field(self) -> &'static str {
+        self.resource_segment()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -88,7 +93,7 @@ impl AdManagerClient {
         let mut headers = HeaderMap::new();
         headers.insert(
             USER_AGENT,
-            HeaderValue::from_static("google-ad-manager-mcp/0.1.0"),
+            HeaderValue::from_static(concat!("google-ad-manager-mcp/", env!("CARGO_PKG_VERSION"))),
         );
 
         let http = Client::builder()
@@ -97,16 +102,15 @@ impl AdManagerClient {
             .build()
             .expect("reqwest client should build");
 
+        let quota_project = settings.quota_project.clone().map(Arc::<str>::from);
+
         Self {
             http,
             auth_mode: select_auth_mode(settings).expect("auth mode should build"),
             token_provider: Arc::new(OnceCell::new()),
             scope: Arc::from(settings.scope.as_str()),
             api_base_url: Arc::from(settings.api_base_url.as_str()),
-            quota_project: settings
-                .quota_project
-                .as_ref()
-                .map(|value| Arc::<str>::from(value.as_str())),
+            quota_project,
         }
     }
 

@@ -277,6 +277,310 @@
         "type": "object"
       },
       "name": "gam_report_run"
+    },
+    {
+      "description": "Close a Google Ad Manager scratchpad session and remove its local DuckDB database.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "session_id": {
+            "description": "Scratchpad session identifier. Use stable names such as gam_delivery_2026_07.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id"
+        ],
+        "type": "object"
+      },
+      "name": "gam_scratchpad_close_session"
+    },
+    {
+      "description": "Drop one table from a Google Ad Manager scratchpad session.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "if_exists": {
+            "default": true,
+            "description": "Treat a missing table as a success. Defaults to true.",
+            "type": "boolean"
+          },
+          "session_id": {
+            "description": "Scratchpad session identifier.",
+            "type": "string"
+          },
+          "table_name": {
+            "description": "Scratchpad table name to drop.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "table_name"
+        ],
+        "type": "object"
+      },
+      "name": "gam_scratchpad_drop_table"
+    },
+    {
+      "description": "Export a bounded markdown evidence bundle from Google Ad Manager scratchpad tables.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "sample_rows_per_table": {
+            "description": "Rows sampled from each table in the markdown bundle.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "session_id": {
+            "description": "Scratchpad session identifier.",
+            "type": "string"
+          },
+          "tables": {
+            "description": "Optional table allowlist. Defaults to every table in the session.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "session_id"
+        ],
+        "type": "object"
+      },
+      "name": "gam_scratchpad_export_evidence_bundle"
+    },
+    {
+      "description": "Fetch one Google Ad Manager network catalog page and ingest it into a scratchpad table.",
+      "inputSchema": {
+        "$defs": {
+          "CatalogCollection": {
+            "enum": [
+              "ad_units",
+              "orders",
+              "line_items",
+              "reports"
+            ],
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "append": {
+            "default": false,
+            "description": "Append rows to an existing scratchpad table instead of replacing it.",
+            "type": "boolean"
+          },
+          "collection": {
+            "$ref": "#/$defs/CatalogCollection",
+            "description": "Which curated network collection to fetch and ingest."
+          },
+          "filter": {
+            "description": "Optional Ad Manager Beta filter expression.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "network_code": {
+            "description": "Raw Ad Manager network code, for example 1234567.",
+            "type": "string"
+          },
+          "order_by": {
+            "description": "Optional Ad Manager Beta orderBy expression.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "page_size": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "page_token": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "session_id": {
+            "description": "Scratchpad session identifier.",
+            "type": "string"
+          },
+          "table_name": {
+            "description": "Scratchpad table name to create or append to.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "table_name",
+          "network_code",
+          "collection"
+        ],
+        "type": "object"
+      },
+      "name": "gam_scratchpad_ingest_network_catalog"
+    },
+    {
+      "description": "Fetch one completed Google Ad Manager report-result page and ingest it into a scratchpad table.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "append": {
+            "default": false,
+            "description": "Append rows to an existing scratchpad table instead of replacing it.",
+            "type": "boolean"
+          },
+          "page_size": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "page_token": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "result_name": {
+            "description": "Result resource name, for example networks/123/reports/456/results/789.",
+            "type": "string"
+          },
+          "session_id": {
+            "description": "Scratchpad session identifier.",
+            "type": "string"
+          },
+          "table_name": {
+            "description": "Scratchpad table name to create or append to.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "table_name",
+          "result_name"
+        ],
+        "type": "object"
+      },
+      "name": "gam_scratchpad_ingest_report_result_rows"
+    },
+    {
+      "description": "List active Google Ad Manager scratchpad sessions.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "limit": {
+            "description": "Maximum sessions to return.",
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "name": "gam_scratchpad_list_sessions"
+    },
+    {
+      "description": "List tables in a Google Ad Manager scratchpad session.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "limit": {
+            "description": "Maximum tables to return.",
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "session_id": {
+            "description": "Scratchpad session identifier.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id"
+        ],
+        "type": "object"
+      },
+      "name": "gam_scratchpad_list_tables"
+    },
+    {
+      "description": "Open or refresh a bounded local DuckDB scratchpad session for Google Ad Manager evidence work.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "session_id": {
+            "description": "Scratchpad session identifier. Use stable names such as gam_delivery_2026_07.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id"
+        ],
+        "type": "object"
+      },
+      "name": "gam_scratchpad_open_session"
+    },
+    {
+      "description": "Run bounded read-only DuckDB SQL against a Google Ad Manager scratchpad session.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "offset": {
+            "description": "Zero-based result offset.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "page_size": {
+            "description": "Page size for returned rows.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "session_id": {
+            "description": "Scratchpad session identifier.",
+            "type": "string"
+          },
+          "sql": {
+            "description": "Read-only SQL query. Only SELECT/WITH/EXPLAIN/DESCRIBE/SUMMARIZE style queries are allowed.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "sql"
+        ],
+        "type": "object"
+      },
+      "name": "gam_scratchpad_query"
     }
   ],
   "version": 1

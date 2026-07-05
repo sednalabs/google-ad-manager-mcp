@@ -3,6 +3,7 @@
 use std::time::Instant;
 
 use mcp_toolkit::rmcp::model::CallToolResult;
+use mcp_toolkit_scratchpad::ScratchpadError;
 use serde_json::{Map, Value, json};
 
 use crate::AdManagerError;
@@ -38,6 +39,23 @@ pub fn error(err: AdManagerError, started: Instant) -> CallToolResult {
             "reason": err.reason(),
             "message": redact_secret_text(&err.to_string()),
             "category": err.category(),
+            "hint": err.hint(),
+        },
+        "meta": {
+            "elapsed_ms": elapsed_ms(started),
+        }
+    }))
+}
+
+pub fn scratchpad_error(err: ScratchpadError, started: Instant) -> CallToolResult {
+    CallToolResult::structured(json!({
+        "ok": false,
+        "error": {
+            "code": err.code(),
+            "reason": err.reason(),
+            "message": redact_secret_text(&err.to_string()),
+            "category": err.category(),
+            "detail": err.detail(),
             "hint": err.hint(),
         },
         "meta": {

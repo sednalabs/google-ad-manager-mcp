@@ -60,6 +60,60 @@ pub(crate) fn build_tool_inventory() -> Result<ToolInventory, ToolInventoryError
             "Fetch rows from a completed Google Ad Manager report result.",
             ["google", "ad-manager", "reports", "rows", "fetch"],
         ),
+        cap(
+            "gam_scratchpad_open_session",
+            "scratchpad",
+            "Open or refresh a bounded local DuckDB scratchpad session for Ad Manager evidence work.",
+            ["google", "ad-manager", "scratchpad", "duckdb", "session"],
+        ),
+        cap(
+            "gam_scratchpad_close_session",
+            "scratchpad",
+            "Close an Ad Manager scratchpad session and remove its local database.",
+            ["google", "ad-manager", "scratchpad", "close", "cleanup"],
+        ),
+        cap(
+            "gam_scratchpad_list_sessions",
+            "scratchpad",
+            "List active Ad Manager scratchpad sessions.",
+            ["google", "ad-manager", "scratchpad", "sessions", "list"],
+        ),
+        cap(
+            "gam_scratchpad_list_tables",
+            "scratchpad",
+            "List tables in an Ad Manager scratchpad session.",
+            ["google", "ad-manager", "scratchpad", "tables", "schema"],
+        ),
+        cap(
+            "gam_scratchpad_drop_table",
+            "scratchpad",
+            "Drop one table from an Ad Manager scratchpad session.",
+            ["google", "ad-manager", "scratchpad", "drop", "table"],
+        ),
+        cap(
+            "gam_scratchpad_query",
+            "scratchpad",
+            "Run bounded read-only DuckDB SQL against an Ad Manager scratchpad session.",
+            ["google", "ad-manager", "scratchpad", "sql", "query"],
+        ),
+        cap(
+            "gam_scratchpad_ingest_network_catalog",
+            "scratchpad",
+            "Fetch one Ad Manager network catalog page and ingest it into a scratchpad table.",
+            ["google", "ad-manager", "scratchpad", "ingest", "catalog"],
+        ),
+        cap(
+            "gam_scratchpad_ingest_report_result_rows",
+            "scratchpad",
+            "Fetch one Ad Manager report-result page and ingest it into a scratchpad table.",
+            ["google", "ad-manager", "scratchpad", "ingest", "reports"],
+        ),
+        cap(
+            "gam_scratchpad_export_evidence_bundle",
+            "scratchpad",
+            "Export a bounded markdown evidence bundle from Ad Manager scratchpad tables.",
+            ["google", "ad-manager", "scratchpad", "evidence", "markdown"],
+        ),
     ])
 }
 
@@ -95,5 +149,25 @@ mod tests {
             &ToolInventoryPolicy::strict(),
         );
         assert!(results.iter().any(|result| result.name == "gam_report_run"));
+    }
+
+    #[test]
+    fn inventory_search_finds_scratchpad_evidence_tool() {
+        let inventory = build_tool_inventory().expect("inventory");
+        let results = inventory.search(
+            &ToolSearchFilter {
+                query: Some("scratchpad evidence markdown".to_string()),
+                group: Some("scratchpad".to_string()),
+                read_only: Some(true),
+                limit: Some(10),
+            },
+            ToolOperation::List,
+            &ToolInventoryPolicy::strict(),
+        );
+        assert!(
+            results
+                .iter()
+                .any(|result| result.name == "gam_scratchpad_export_evidence_bundle")
+        );
     }
 }
