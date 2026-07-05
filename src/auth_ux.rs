@@ -47,9 +47,10 @@ pub(crate) fn shell_join(parts: &[String]) -> String {
     parts
         .iter()
         .map(|part| {
-            if part
-                .chars()
-                .all(|ch| ch.is_ascii_alphanumeric() || "-_=:/.,+".contains(ch))
+            if !part.is_empty()
+                && part
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || "-_=:/.,+".contains(ch))
             {
                 part.clone()
             } else {
@@ -465,5 +466,11 @@ mod tests {
         assert!(rendered.contains("--no-launch-browser"));
         assert!(rendered.contains("--client-id-file="));
         assert!(rendered.contains("/tmp/client id.json"));
+    }
+
+    #[test]
+    fn shell_join_quotes_empty_args() {
+        let command = vec!["a".to_string(), String::new(), "b".to_string()];
+        assert_eq!(shell_join(&command), "a '' b");
     }
 }

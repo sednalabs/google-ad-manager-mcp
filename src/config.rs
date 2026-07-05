@@ -385,14 +385,27 @@ pub fn adc_credentials_path() -> Option<PathBuf> {
     if let Some(config_dir) = env::var_os("CLOUDSDK_CONFIG").filter(|value| !value.is_empty()) {
         return Some(PathBuf::from(config_dir).join("application_default_credentials.json"));
     }
-    env::var_os("HOME")
-        .filter(|value| !value.is_empty())
-        .map(|home| {
-            PathBuf::from(home)
-                .join(".config")
-                .join("gcloud")
-                .join("application_default_credentials.json")
-        })
+    #[cfg(windows)]
+    {
+        env::var_os("APPDATA")
+            .filter(|value| !value.is_empty())
+            .map(|appdata| {
+                PathBuf::from(appdata)
+                    .join("gcloud")
+                    .join("application_default_credentials.json")
+            })
+    }
+    #[cfg(not(windows))]
+    {
+        env::var_os("HOME")
+            .filter(|value| !value.is_empty())
+            .map(|home| {
+                PathBuf::from(home)
+                    .join(".config")
+                    .join("gcloud")
+                    .join("application_default_credentials.json")
+            })
+    }
 }
 
 #[cfg(test)]

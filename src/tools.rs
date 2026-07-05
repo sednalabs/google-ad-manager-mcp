@@ -4,8 +4,8 @@ use mcp_toolkit::rmcp::handler::server::wrapper::Parameters;
 use mcp_toolkit::rmcp::model::CallToolResult;
 use mcp_toolkit::rmcp::{self, tool, tool_router};
 use mcp_toolkit_scratchpad::{
-    ScratchpadIngestColumn, ScratchpadIngestMode, ScratchpadQueryProjection, ScratchpadSessionInfo,
-    ScratchpadSessionSnapshot, ScratchpadTableInfo,
+    ScratchpadError, ScratchpadIngestColumn, ScratchpadIngestMode, ScratchpadQueryProjection,
+    ScratchpadSessionInfo, ScratchpadSessionSnapshot, ScratchpadTableInfo,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -567,7 +567,9 @@ impl AdManagerServer {
         Parameters(args): Parameters<ScratchpadSessionArgs>,
     ) -> Result<CallToolResult, McpError> {
         let started = Instant::now();
-        match self.scratchpad_sessions().open_session(&args.session_id) {
+        let sessions = self.scratchpad_sessions().clone();
+        let session_id = args.session_id.clone();
+        match scratchpad_blocking(move || sessions.open_session(&session_id)).await {
             Ok(info) => Ok(contract::success(
                 scratchpad_session_info_to_json(info),
                 started,
@@ -585,7 +587,9 @@ impl AdManagerServer {
         Parameters(args): Parameters<ScratchpadSessionArgs>,
     ) -> Result<CallToolResult, McpError> {
         let started = Instant::now();
-        match self.scratchpad_sessions().release_session(&args.session_id) {
+        let sessions = self.scratchpad_sessions().clone();
+        let session_id = args.session_id.clone();
+        match scratchpad_blocking(move || sessions.release_session(&session_id)).await {
             Ok(released) => Ok(contract::success(
                 json!({
                     "session_id": args.session_id,
@@ -607,7 +611,8 @@ impl AdManagerServer {
     ) -> Result<CallToolResult, McpError> {
         let started = Instant::now();
         let limit = args.limit.unwrap_or(20).clamp(1, 100);
-        match self.scratchpad_sessions().list_sessions(limit) {
+        let sessions = self.scratchpad_sessions().clone();
+        match scratchpad_blocking(move || sessions.list_sessions(limit)).await {
             Ok(sessions) => Ok(contract::success(
                 json!({
                     "sessions": sessions
@@ -632,10 +637,9 @@ impl AdManagerServer {
     ) -> Result<CallToolResult, McpError> {
         let started = Instant::now();
         let limit = args.limit.unwrap_or(50).clamp(1, 200);
-        match self
-            .scratchpad_sessions()
-            .list_tables(&args.session_id, limit)
-        {
+        let sessions = self.scratchpad_sessions().clone();
+        let session_id = args.session_id.clone();
+        match scratchpad_blocking(move || sessions.list_tables(&session_id, limit)).await {
             Ok(tables) => Ok(contract::success(
                 json!({
                     "session_id": args.session_id,
@@ -660,11 +664,13 @@ impl AdManagerServer {
         Parameters(args): Parameters<ScratchpadDropTableArgs>,
     ) -> Result<CallToolResult, McpError> {
         let started = Instant::now();
-        match self.scratchpad_sessions().drop_table(
-            &args.session_id,
-            &args.table_name,
-            args.if_exists,
-        ) {
+        let sessions = self.scratchpad_sessions().clone();
+        let session_id = args.session_id.clone();
+        let table_name = args.table_name.clone();
+        let if_exists = args.if_exists;
+        match scratchpad_blocking(move || sessions.drop_table(&session_id, &table_name, if_exists))
+            .await
+        {
             Ok(stats) => Ok(contract::success(
                 json!({
                     "session_id": args.session_id,
@@ -690,9 +696,11 @@ impl AdManagerServer {
         let started = Instant::now();
         let offset = args.offset.unwrap_or(0);
         let page_size = args.page_size.unwrap_or(100).clamp(1, 1_000);
-        match self
-            .scratchpad_sessions()
-            .query_rows(&args.session_id, &args.sql, offset, page_size)
+        let sessions = self.scratchpad_sessions().clone();
+        let session_id = args.session_id.clone();
+        let sql = args.sql.clone();
+        match scratchpad_blocking(move || sessions.query_rows(&session_id, &sql, offset, page_size))
+            .await
         {
             Ok(projection) => Ok(contract::success(
                 scratchpad_query_projection_to_json(projection, offset, page_size),
@@ -734,13 +742,16 @@ impl AdManagerServer {
         } else {
             ScratchpadIngestMode::Create
         };
-        match self.scratchpad_sessions().ingest_rows_with_mode(
-            &args.session_id,
-            &args.table_name,
-            &columns,
-            &rows,
-            ingest_mode,
-        ) {
+        let columns_response = scratchpad_ingest_columns_to_json(columns.clone());
+        let row_count = rows.len();
+        let sessions = self.scratchpad_sessions().clone();
+        let session_id = args.session_id.clone();
+        let table_name = args.table_name.clone();
+        match scratchpad_blocking(move || {
+            sessions.ingest_rows_with_mode(&session_id, &table_name, &columns, &rows, ingest_mode)
+        })
+        .await
+        {
             Ok(stats) => Ok(contract::success(
                 json!({
                     "session_id": args.session_id,
@@ -748,13 +759,13 @@ impl AdManagerServer {
                     "mode": ingest_mode_label(ingest_mode),
                     "rows_inserted": stats.rows_inserted,
                     "columns_inserted": stats.columns_inserted,
-                    "columns": scratchpad_ingest_columns_to_json(columns),
+                    "columns": columns_response,
                     "session": scratchpad_snapshot_to_json(stats.session_snapshot),
                     "upstream_summary": {
                         "network_code": args.network_code,
                         "collection": args.collection.as_str(),
                         "response_field": args.collection.response_field(),
-                        "row_count": rows.len(),
+                        "row_count": row_count,
                         "next_page_token": upstream.get("nextPageToken").and_then(Value::as_str),
                     },
                 }),
@@ -788,13 +799,16 @@ impl AdManagerServer {
         } else {
             ScratchpadIngestMode::Create
         };
-        match self.scratchpad_sessions().ingest_rows_with_mode(
-            &args.session_id,
-            &args.table_name,
-            &columns,
-            &rows,
-            ingest_mode,
-        ) {
+        let columns_response = scratchpad_ingest_columns_to_json(columns.clone());
+        let row_count = rows.len();
+        let sessions = self.scratchpad_sessions().clone();
+        let session_id = args.session_id.clone();
+        let table_name = args.table_name.clone();
+        match scratchpad_blocking(move || {
+            sessions.ingest_rows_with_mode(&session_id, &table_name, &columns, &rows, ingest_mode)
+        })
+        .await
+        {
             Ok(stats) => Ok(contract::success(
                 json!({
                     "session_id": args.session_id,
@@ -802,11 +816,11 @@ impl AdManagerServer {
                     "mode": ingest_mode_label(ingest_mode),
                     "rows_inserted": stats.rows_inserted,
                     "columns_inserted": stats.columns_inserted,
-                    "columns": scratchpad_ingest_columns_to_json(columns),
+                    "columns": columns_response,
                     "session": scratchpad_snapshot_to_json(stats.session_snapshot),
                     "upstream_summary": {
                         "result_name": args.result_name,
-                        "row_count": rows.len(),
+                        "row_count": row_count,
                         "next_page_token": upstream.get("nextPageToken").and_then(Value::as_str),
                     },
                 }),
@@ -826,32 +840,30 @@ impl AdManagerServer {
     ) -> Result<CallToolResult, McpError> {
         let started = Instant::now();
         let sample_rows = args.sample_rows_per_table.unwrap_or(10).clamp(1, 100);
-        let table_names = match args.tables {
-            Some(tables) => tables,
-            None => match self
-                .scratchpad_sessions()
-                .list_tables(&args.session_id, 100)
-            {
-                Ok(tables) => tables.into_iter().map(|table| table.name).collect(),
-                Err(err) => return Ok(contract::scratchpad_error(err, started)),
-            },
-        };
+        let sessions = self.scratchpad_sessions().clone();
+        let session_id = args.session_id.clone();
+        let requested_tables = args.tables.clone();
+        let bundle_result = scratchpad_blocking(move || {
+            let table_names = match requested_tables {
+                Some(tables) => tables,
+                None => sessions
+                    .list_tables(&session_id, 100)?
+                    .into_iter()
+                    .map(|table| table.name)
+                    .collect(),
+            };
 
-        let mut bundle = format!(
-            "# Google Ad Manager Scratchpad Evidence Bundle\n\n- Session: `{}`\n- Tables: `{}`\n- Sample rows per table: `{}`\n\n",
-            args.session_id,
-            table_names.len(),
-            sample_rows,
-        );
-        let mut summaries = Vec::new();
-        for table_name in table_names {
-            let quoted = quote_scratchpad_ident(&table_name);
-            let count_sql = format!("SELECT COUNT(*) AS row_count FROM {quoted}");
-            let count_projection =
-                match self
-                    .scratchpad_sessions()
-                    .query_rows(&args.session_id, &count_sql, 0, 1)
-                {
+            let mut bundle = format!(
+                "# Google Ad Manager Scratchpad Evidence Bundle\n\n- Session: `{}`\n- Tables: `{}`\n- Sample rows per table: `{}`\n\n",
+                session_id,
+                table_names.len(),
+                sample_rows,
+            );
+            let mut summaries = Vec::new();
+            for table_name in table_names {
+                let quoted = quote_scratchpad_ident(&table_name);
+                let count_sql = format!("SELECT COUNT(*) AS row_count FROM {quoted}");
+                let count_projection = match sessions.query_rows(&session_id, &count_sql, 0, 1) {
                     Ok(projection) => projection,
                     Err(err) => {
                         append_evidence_table_error(&mut bundle, &table_name, &err);
@@ -862,53 +874,57 @@ impl AdManagerServer {
                         continue;
                     }
                 };
-            let row_count = count_projection
-                .rows
-                .first()
-                .and_then(|row| row.get("row_count"))
-                .and_then(json_u64)
-                .unwrap_or(0);
-            let sample_sql = format!("SELECT * FROM {quoted}");
-            let sample_projection = match self.scratchpad_sessions().query_rows(
-                &args.session_id,
-                &sample_sql,
-                0,
-                sample_rows,
-            ) {
-                Ok(projection) => projection,
-                Err(err) => {
-                    append_evidence_table_error(&mut bundle, &table_name, &err);
-                    summaries.push(json!({
-                        "table_name": table_name,
-                        "row_count": row_count,
-                        "error": err.to_string(),
-                    }));
-                    continue;
-                }
-            };
+                let row_count = count_projection
+                    .rows
+                    .first()
+                    .and_then(|row| row.get("row_count"))
+                    .and_then(json_u64)
+                    .unwrap_or(0);
+                let sample_sql = format!("SELECT * FROM {quoted}");
+                let sample_projection =
+                    match sessions.query_rows(&session_id, &sample_sql, 0, sample_rows) {
+                        Ok(projection) => projection,
+                        Err(err) => {
+                            append_evidence_table_error(&mut bundle, &table_name, &err);
+                            summaries.push(json!({
+                                "table_name": table_name,
+                                "row_count": row_count,
+                                "error": err.to_string(),
+                            }));
+                            continue;
+                        }
+                    };
 
-            bundle.push_str(&format!("## `{table_name}`\n\n"));
-            bundle.push_str(&format!("- Rows: `{row_count}`\n"));
-            bundle.push_str(&format!(
-                "- Columns: `{}`\n\n",
-                sample_projection.columns.len()
-            ));
-            bundle.push_str(&markdown_table(&sample_projection));
-            bundle.push('\n');
-            summaries.push(json!({
-                "table_name": table_name,
-                "row_count": row_count,
-                "sample_rows": sample_projection.rows.len(),
-                "columns": sample_projection.columns
-                    .into_iter()
-                    .map(|column| json!({
-                        "name": column.name,
-                        "logical_type": column.logical_type,
-                        "nullable": column.nullable,
-                    }))
-                    .collect::<Vec<_>>(),
-            }));
-        }
+                bundle.push_str(&format!("## `{table_name}`\n\n"));
+                bundle.push_str(&format!("- Rows: `{row_count}`\n"));
+                bundle.push_str(&format!(
+                    "- Columns: `{}`\n\n",
+                    sample_projection.columns.len()
+                ));
+                bundle.push_str(&markdown_table(&sample_projection));
+                bundle.push('\n');
+                summaries.push(json!({
+                    "table_name": table_name,
+                    "row_count": row_count,
+                    "sample_rows": sample_projection.rows.len(),
+                    "columns": sample_projection.columns
+                        .into_iter()
+                        .map(|column| json!({
+                            "name": column.name,
+                            "logical_type": column.logical_type,
+                            "nullable": column.nullable,
+                        }))
+                        .collect::<Vec<_>>(),
+                }));
+            }
+            Ok((bundle, summaries))
+        })
+        .await;
+
+        let (bundle, summaries) = match bundle_result {
+            Ok(bundle) => bundle,
+            Err(err) => return Ok(contract::scratchpad_error(err, started)),
+        };
 
         Ok(contract::success(
             json!({
@@ -924,6 +940,20 @@ impl AdManagerServer {
 
 fn default_true() -> bool {
     true
+}
+
+async fn scratchpad_blocking<T, F>(operation: F) -> Result<T, ScratchpadError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, ScratchpadError> + Send + 'static,
+{
+    tokio::task::spawn_blocking(operation)
+        .await
+        .unwrap_or_else(|err| {
+            Err(ScratchpadError::Internal(format!(
+                "scratchpad blocking task failed: {err}"
+            )))
+        })
 }
 
 fn network_catalog_ingest_columns() -> Vec<ScratchpadIngestColumn> {
