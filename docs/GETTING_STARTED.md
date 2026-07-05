@@ -9,14 +9,36 @@ guessing resource identifiers.
 
 Enable the Google Ad Manager API on the Google Cloud project you plan to use.
 
-## 2. Authenticate
+## 2. Authenticate The Easy Way
 
-For local use, the standard path is Application Default Credentials with the
-read-only scope:
+For local use, use the built-in helper:
+
+```bash
+google-ad-manager-mcp auth login --headless --quota-project <PROJECT_ID>
+```
+
+The helper:
+
+- runs the browser-based Google Application Default Credentials flow;
+- includes the required ADC `cloud-platform` scope and the read-only Ad Manager
+  scope;
+- sets the ADC quota project when `--quota-project` is supplied;
+- verifies access with a safe `networks.list` request.
+
+Useful variants:
+
+```bash
+google-ad-manager-mcp auth login --quota-project <PROJECT_ID>
+google-ad-manager-mcp auth command --headless
+google-ad-manager-mcp auth status --verify-token
+google-ad-manager-mcp auth doctor --verify-token --json
+```
+
+If you prefer raw `gcloud`, use both scopes:
 
 ```bash
 gcloud auth application-default login \
-  --scopes=https://www.googleapis.com/auth/admanager.readonly
+  --scopes=https://www.googleapis.com/auth/cloud-platform,https://www.googleapis.com/auth/admanager.readonly
 gcloud auth application-default set-quota-project <PROJECT_ID>
 ```
 
@@ -46,6 +68,8 @@ google-ad-manager-mcp
 Useful local inspection commands:
 
 ```bash
+google-ad-manager-mcp --help
+google-ad-manager-mcp auth --help
 google-ad-manager-mcp --print-tools
 google-ad-manager-mcp --print-tool-schema > spec/tool_schema_snapshot.v1.json
 ```
@@ -62,6 +86,14 @@ For reports:
 2. `gam_report_run`
 3. `gam_report_result_rows` when pagination is needed
 
+For scratchpad analysis:
+
+1. `gam_scratchpad_open_session`
+2. `gam_scratchpad_ingest_network_catalog` or
+   `gam_scratchpad_ingest_report_result_rows`
+3. `gam_scratchpad_query`
+4. `gam_scratchpad_export_evidence_bundle`
+
 ## 5. If auth looks configured but access still fails
 
 Check these in order:
@@ -70,5 +102,13 @@ Check these in order:
 2. The Google principal actually has access to the target Ad Manager network.
 3. If you are using a service account, the network has granted that service
    account user the needed Ad Manager visibility.
-4. If you are using user ADC, the quota project is set on the ADC credential.
+4. If you are using user ADC, the ADC quota project is set and
+   `GOOGLE_AD_MANAGER_MCP_QUOTA_PROJECT` is present when the server needs an
+   `x-goog-user-project` header.
 5. Restart the MCP client if it keeps a long-lived stdio subprocess.
+
+The server sends `x-goog-user-project` only when
+`GOOGLE_AD_MANAGER_MCP_QUOTA_PROJECT` is set in the MCP server environment.
+`gcloud auth application-default set-quota-project` is still part of the easy
+ADC login path for Google tooling, but the MCP server does not parse local ADC
+credential files to discover it.

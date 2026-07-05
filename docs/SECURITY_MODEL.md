@@ -8,6 +8,7 @@
 - No generic HTTP proxy
 - No write or approval surfaces
 - No credential material in tool output
+- Bounded local scratchpad analysis only
 
 ## Credential handling
 
@@ -40,6 +41,24 @@ The server intentionally does not expose:
 - bulk export or file-write surfaces
 
 The missing tools are intentional safety boundaries, not backlog accidents.
+
+## Scratchpad safety
+
+Scratchpad tools use `mcp-toolkit-scratchpad` and DuckDB for local, bounded
+analysis of rows already returned by read-only Ad Manager tools.
+
+The scratchpad boundary is:
+
+- local to the MCP server runtime;
+- bounded by session TTL, session count, table count, row count, memory, SQL
+  payload size, and query timeout;
+- restricted to read-only SQL inspection patterns;
+- not an Ad Manager write path;
+- not a generic filesystem or external data ingestion path.
+
+If `GOOGLE_AD_MANAGER_MCP_SCRATCHPAD_ROOT_DIR` is set, it must point to an
+existing absolute directory. Otherwise the default scratchpad location is under
+the operating system temporary directory.
 
 ## Report safety
 

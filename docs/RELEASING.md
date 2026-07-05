@@ -27,17 +27,19 @@ The workflow:
 
 The release tag must match the package version exactly:
 
-- package version `0.1.0`
-- release tag `v0.1.0`
+- package version `0.1.1-alpha.0`
+- release tag `v0.1.1-alpha.0`
 
 If the tag and package version drift, the workflow fails before building.
+
+Use GitHub's prerelease flag for alpha tags.
 
 ## Canonical install paths
 
 Source install from a tagged release:
 
 ```bash
-cargo install --locked --git https://github.com/sednalabs/google-ad-manager-mcp --tag v0.1.0 google-ad-manager-mcp
+cargo install --locked --git https://github.com/sednalabs/google-ad-manager-mcp --tag v0.1.1-alpha.0 google-ad-manager-mcp
 ```
 
 Hosted release bundles:
