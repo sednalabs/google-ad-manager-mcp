@@ -221,7 +221,7 @@ jobs:
           cat > RELEASE_NOTES.md <<EOF
           google-ad-manager-mcp ${{ needs.prepare.outputs.tag_name }}
 
-          Public read-only stdio MCP server for Google Ad Manager workflows.
+          Public stdio MCP server for Google Ad Manager workflows, including guarded REST write previews.
 
           Install from source:
 

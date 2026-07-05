@@ -793,6 +793,13 @@ fn validate_resource_name(
             format!("must start with {expected_prefix}"),
         ));
     }
+    let id_segment = &trimmed[expected_prefix.len()..];
+    if id_segment.is_empty() || id_segment.contains('/') {
+        return Err(AdManagerError::invalid(
+            field,
+            "must contain exactly one resource ID segment after the prefix",
+        ));
+    }
     if trimmed.chars().any(char::is_whitespace) {
         return Err(AdManagerError::invalid(
             field,
@@ -982,5 +989,28 @@ mod tests {
         assert_eq!(submit.method, "POST");
         assert_eq!(submit.path, "networks/1234567/sites:batchSubmitForApproval");
         assert!(submit.send_adjacent);
+    }
+
+    #[test]
+    fn patch_resource_names_require_exactly_one_id_segment() {
+        let client = AdManagerClient::from_settings(&Settings::default());
+        for bad_name in [
+            "networks/1234567/reports/",
+            "networks/1234567/reports/987654/extra",
+        ] {
+            assert!(
+                client
+                    .build_rest_write_plan(
+                        "1234567",
+                        RestWriteResource::Reports,
+                        RestWriteOperation::Patch,
+                        Some(bad_name),
+                        Some("displayName"),
+                        json!({"name": bad_name, "displayName": "Delivery proof"}),
+                    )
+                    .is_err(),
+                "{bad_name} should be rejected"
+            );
+        }
     }
 }
