@@ -4,10 +4,8 @@ use std::env;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use clap::{Args, Parser, Subcommand};
-use serde_json::Value;
-
 use crate::AdManagerError;
+use clap::{Args, Parser, Subcommand};
 
 pub const DEFAULT_READONLY_SCOPE: &str = "https://www.googleapis.com/auth/admanager.readonly";
 pub const MANAGE_SCOPE: &str = "https://www.googleapis.com/auth/admanager";
@@ -395,18 +393,6 @@ pub fn adc_credentials_path() -> Option<PathBuf> {
                 .join("gcloud")
                 .join("application_default_credentials.json")
         })
-}
-
-pub fn adc_quota_project_id() -> Option<String> {
-    let path = adc_credentials_path()?;
-    let raw = std::fs::read_to_string(path).ok()?;
-    let value: Value = serde_json::from_str(&raw).ok()?;
-    value
-        .get("quota_project_id")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
 }
 
 #[cfg(test)]

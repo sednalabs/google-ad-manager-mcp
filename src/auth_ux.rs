@@ -8,7 +8,7 @@ use tokio::process::Command;
 
 use crate::config::{
     AuthCommandArgs, AuthDoctorArgs, AuthLoginArgs, AuthStatusCliArgs, AuthSubcommand,
-    GCLOUD_ADC_REQUIRED_SCOPE, Settings, adc_credentials_path, adc_quota_project_id,
+    GCLOUD_ADC_REQUIRED_SCOPE, Settings, adc_credentials_path,
 };
 use crate::contract::redact_secret_text;
 use crate::{AdManagerClient, AuthSource};
@@ -162,10 +162,7 @@ async fn run_doctor(settings: &Settings, args: &AuthDoctorArgs) -> Result<()> {
 
 async fn build_report(settings: &Settings, verify: bool) -> AuthReport {
     let client = AdManagerClient::from_settings(settings);
-    let adc_file = adc_credentials_path().map(|path| AdcFileStatus {
-        path: path.clone(),
-        present: path.is_file(),
-    });
+    let adc_file = adc_credentials_path().map(|path| AdcFileStatus { path: path.clone() });
     let quota_project = effective_quota_project(settings);
     let verification = if verify {
         match client.list_networks(Some(1), None).await {
@@ -213,7 +210,7 @@ async fn build_report(settings: &Settings, verify: bool) -> AuthReport {
     let credential_material_detected = env.google_application_credentials
         || env.service_account_path
         || env.service_account_json
-        || adc_file.as_ref().is_some_and(|file| file.present);
+        || verification.ok == Some(true);
     let next_steps = next_steps(settings, &quota_project, &verification);
 
     AuthReport {
@@ -238,13 +235,6 @@ fn effective_quota_project(settings: &Settings) -> QuotaProjectStatus {
             configured: true,
             value: Some(project.to_string()),
             source: Some("GOOGLE_AD_MANAGER_MCP_QUOTA_PROJECT_or_cli".to_string()),
-        };
-    }
-    if let Some(project) = adc_quota_project_id() {
-        return QuotaProjectStatus {
-            configured: true,
-            value: Some(project),
-            source: Some("application_default_credentials.json".to_string()),
         };
     }
     QuotaProjectStatus {
@@ -282,7 +272,7 @@ fn next_steps(
     }
     if !quota_project.configured {
         steps.push(
-            "Set an ADC quota project with `google-ad-manager-mcp auth login --quota-project PROJECT_ID` or `gcloud auth application-default set-quota-project PROJECT_ID`; the project must have the Ad Manager API enabled."
+            "Set `GOOGLE_AD_MANAGER_MCP_QUOTA_PROJECT=PROJECT_ID` in the MCP server environment; `auth login --quota-project PROJECT_ID` also sets the ADC quota project for Google tooling."
                 .to_string(),
         );
     }
@@ -332,8 +322,7 @@ fn print_human_report(report: &AuthReport) {
         None => println!("gcloud: not available"),
     }
     match &report.adc_file {
-        Some(file) if file.present => println!("ADC file: present ({})", file.path.display()),
-        Some(file) => println!("ADC file: missing ({})", file.path.display()),
+        Some(file) => println!("ADC file: conventional path ({})", file.path.display()),
         None => println!("ADC file: unknown"),
     }
     println!(
@@ -437,7 +426,6 @@ struct QuotaProjectStatus {
 #[derive(Debug, Serialize)]
 struct AdcFileStatus {
     path: PathBuf,
-    present: bool,
 }
 
 #[derive(Debug, Serialize)]

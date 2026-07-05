@@ -119,9 +119,11 @@ gcloud auth application-default login \
 gcloud auth application-default set-quota-project <PROJECT_ID>
 ```
 
-The runtime also reads `quota_project_id` from the local ADC file when
-`GOOGLE_AD_MANAGER_MCP_QUOTA_PROJECT` is not set, so the easy login command and
-the MCP server use the same quota-project source.
+Set `GOOGLE_AD_MANAGER_MCP_QUOTA_PROJECT=<PROJECT_ID>` in the MCP server
+environment when you want the server to send the `x-goog-user-project` header.
+The `gcloud auth application-default set-quota-project` command remains useful
+for ADC-aware Google tooling, but this server does not parse local credential
+files to discover it.
 
 The server never returns raw access tokens, private keys, refresh tokens, or
 whole credential files in tool responses.

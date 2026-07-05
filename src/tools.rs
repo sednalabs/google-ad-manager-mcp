@@ -14,7 +14,7 @@ use tokio::process::Command;
 
 use crate::auth_ux::{gcloud_adc_login_command, shell_join};
 use crate::client::CatalogCollection;
-use crate::config::{GCLOUD_ADC_REQUIRED_SCOPE, adc_credentials_path};
+use crate::config::GCLOUD_ADC_REQUIRED_SCOPE;
 use crate::contract;
 use crate::{AdManagerError, AdManagerServer, MANAGE_SCOPE, McpError};
 use mcp_toolkit_core::tool_inventory::{ToolOperation, ToolSearchFilter, ToolSearchResponse};
@@ -1251,7 +1251,6 @@ fn credential_material_detected(settings: &crate::Settings) -> bool {
     std::env::var_os("GOOGLE_APPLICATION_CREDENTIALS").is_some()
         || settings.service_account_json_path.is_some()
         || settings.service_account_json.is_some()
-        || adc_credentials_path().is_some_and(|path| path.is_file())
 }
 
 async fn gcloud_version() -> Option<String> {

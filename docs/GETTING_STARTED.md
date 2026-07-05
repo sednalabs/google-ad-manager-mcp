@@ -102,9 +102,13 @@ Check these in order:
 2. The Google principal actually has access to the target Ad Manager network.
 3. If you are using a service account, the network has granted that service
    account user the needed Ad Manager visibility.
-4. If you are using user ADC, the quota project is set on the ADC credential.
+4. If you are using user ADC, the ADC quota project is set and
+   `GOOGLE_AD_MANAGER_MCP_QUOTA_PROJECT` is present when the server needs an
+   `x-goog-user-project` header.
 5. Restart the MCP client if it keeps a long-lived stdio subprocess.
 
-The server reads the quota project from either
-`GOOGLE_AD_MANAGER_MCP_QUOTA_PROJECT` or the ADC file written by
-`gcloud auth application-default set-quota-project`.
+The server sends `x-goog-user-project` only when
+`GOOGLE_AD_MANAGER_MCP_QUOTA_PROJECT` is set in the MCP server environment.
+`gcloud auth application-default set-quota-project` is still part of the easy
+ADC login path for Google tooling, but the MCP server does not parse local ADC
+credential files to discover it.

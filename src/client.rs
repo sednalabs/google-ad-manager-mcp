@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 use tokio::sync::OnceCell;
 use tokio::time::sleep;
 
-use crate::config::{Settings, adc_quota_project_id};
+use crate::config::Settings;
 use crate::error::AdManagerError;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -102,11 +102,7 @@ impl AdManagerClient {
             .build()
             .expect("reqwest client should build");
 
-        let quota_project = settings
-            .quota_project
-            .clone()
-            .or_else(adc_quota_project_id)
-            .map(Arc::<str>::from);
+        let quota_project = settings.quota_project.clone().map(Arc::<str>::from);
 
         Self {
             http,
