@@ -1,14 +1,25 @@
 //! Configuration and CLI for the stdio server.
 
+use std::env;
+use std::path::PathBuf;
 use std::time::Duration;
 
-use clap::Parser;
+use clap::{Args, Parser, Subcommand};
+use serde_json::Value;
 
 use crate::AdManagerError;
 
 pub const DEFAULT_READONLY_SCOPE: &str = "https://www.googleapis.com/auth/admanager.readonly";
 pub const MANAGE_SCOPE: &str = "https://www.googleapis.com/auth/admanager";
+pub const GCLOUD_ADC_REQUIRED_SCOPE: &str = "https://www.googleapis.com/auth/cloud-platform";
 const DEFAULT_API_BASE_URL: &str = "https://admanager.googleapis.com/v1";
+const DEFAULT_SCRATCHPAD_SESSION_TTL_SECS: u64 = 900;
+const DEFAULT_SCRATCHPAD_MAX_SESSIONS: usize = 64;
+const DEFAULT_SCRATCHPAD_MAX_TABLES_PER_SESSION: usize = 32;
+const DEFAULT_SCRATCHPAD_MAX_ROWS_PER_SESSION: usize = 1_000_000;
+const DEFAULT_SCRATCHPAD_MAX_MEMORY_MB: usize = 256;
+const DEFAULT_SCRATCHPAD_QUERY_TIMEOUT_MS: u64 = 15_000;
+const DEFAULT_SCRATCHPAD_MAX_SQL_BYTES: usize = 65_536;
 
 #[derive(Debug, Clone, Parser)]
 #[command(name = "google-ad-manager-mcp")]
@@ -24,19 +35,27 @@ pub struct Cli {
     pub print_tool_schema: bool,
 
     /// OAuth scope requested from Google credentials.
-    #[arg(long, env = "GOOGLE_AD_MANAGER_MCP_SCOPE", default_value = DEFAULT_READONLY_SCOPE)]
+    #[arg(long, env = "GOOGLE_AD_MANAGER_MCP_SCOPE", global = true, default_value = DEFAULT_READONLY_SCOPE)]
     pub scope: String,
 
     /// Optional x-goog-user-project header value for quota/billing.
-    #[arg(long, env = "GOOGLE_AD_MANAGER_MCP_QUOTA_PROJECT")]
+    #[arg(long, env = "GOOGLE_AD_MANAGER_MCP_QUOTA_PROJECT", global = true)]
     pub quota_project: Option<String>,
 
     /// Optional server-specific service account JSON file path.
-    #[arg(long, env = "GOOGLE_AD_MANAGER_MCP_SERVICE_ACCOUNT_JSON_PATH")]
+    #[arg(
+        long,
+        env = "GOOGLE_AD_MANAGER_MCP_SERVICE_ACCOUNT_JSON_PATH",
+        global = true
+    )]
     pub service_account_json_path: Option<String>,
 
     /// Optional server-specific raw service account JSON.
-    #[arg(long, env = "GOOGLE_AD_MANAGER_MCP_SERVICE_ACCOUNT_JSON")]
+    #[arg(
+        long,
+        env = "GOOGLE_AD_MANAGER_MCP_SERVICE_ACCOUNT_JSON",
+        global = true
+    )]
     pub service_account_json: Option<String>,
 
     /// Upstream Ad Manager HTTP timeout in milliseconds.
@@ -66,6 +85,152 @@ pub struct Cli {
         default_value_t = 5000
     )]
     pub report_poll_initial_interval_ms: u64,
+
+    /// Scratchpad session TTL in seconds.
+    #[arg(
+        long,
+        env = "GOOGLE_AD_MANAGER_MCP_SCRATCHPAD_SESSION_TTL_SECS",
+        default_value_t = DEFAULT_SCRATCHPAD_SESSION_TTL_SECS
+    )]
+    pub scratchpad_session_ttl_secs: u64,
+
+    /// Maximum number of active scratchpad sessions.
+    #[arg(
+        long,
+        env = "GOOGLE_AD_MANAGER_MCP_SCRATCHPAD_MAX_SESSIONS",
+        default_value_t = DEFAULT_SCRATCHPAD_MAX_SESSIONS
+    )]
+    pub scratchpad_max_sessions: usize,
+
+    /// Maximum number of tables tracked per scratchpad session.
+    #[arg(
+        long,
+        env = "GOOGLE_AD_MANAGER_MCP_SCRATCHPAD_MAX_TABLES_PER_SESSION",
+        default_value_t = DEFAULT_SCRATCHPAD_MAX_TABLES_PER_SESSION
+    )]
+    pub scratchpad_max_tables_per_session: usize,
+
+    /// Maximum number of rows tracked per scratchpad session.
+    #[arg(
+        long,
+        env = "GOOGLE_AD_MANAGER_MCP_SCRATCHPAD_MAX_ROWS_PER_SESSION",
+        default_value_t = DEFAULT_SCRATCHPAD_MAX_ROWS_PER_SESSION
+    )]
+    pub scratchpad_max_rows_per_session: usize,
+
+    /// Maximum DuckDB memory limit in MB per scratchpad session connection.
+    #[arg(
+        long,
+        env = "GOOGLE_AD_MANAGER_MCP_SCRATCHPAD_MAX_MEMORY_MB",
+        default_value_t = DEFAULT_SCRATCHPAD_MAX_MEMORY_MB
+    )]
+    pub scratchpad_max_memory_mb: usize,
+
+    /// Scratchpad query timeout in milliseconds.
+    #[arg(
+        long,
+        env = "GOOGLE_AD_MANAGER_MCP_SCRATCHPAD_QUERY_TIMEOUT_MS",
+        default_value_t = DEFAULT_SCRATCHPAD_QUERY_TIMEOUT_MS
+    )]
+    pub scratchpad_query_timeout_ms: u64,
+
+    /// Maximum SQL payload size accepted by scratchpad query guardrails.
+    #[arg(
+        long,
+        env = "GOOGLE_AD_MANAGER_MCP_SCRATCHPAD_MAX_SQL_BYTES",
+        default_value_t = DEFAULT_SCRATCHPAD_MAX_SQL_BYTES
+    )]
+    pub scratchpad_max_sql_bytes: usize,
+
+    /// Optional scratchpad root directory. Defaults to the OS temp directory.
+    #[arg(long, env = "GOOGLE_AD_MANAGER_MCP_SCRATCHPAD_ROOT_DIR")]
+    pub scratchpad_root_dir: Option<PathBuf>,
+
+    /// Optional command. Omit to run the stdio MCP server.
+    #[command(subcommand)]
+    pub command: Option<CliCommand>,
+}
+
+#[derive(Debug, Clone, Subcommand)]
+pub enum CliCommand {
+    /// Run the stdio MCP server. This is also the default when no command is supplied.
+    Serve,
+    /// Login, verify, and diagnose Google Ad Manager credentials.
+    Auth(AuthCli),
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct AuthCli {
+    #[command(subcommand)]
+    pub command: AuthSubcommand,
+}
+
+#[derive(Debug, Clone, Subcommand)]
+pub enum AuthSubcommand {
+    /// Run the browser-based gcloud Application Default Credentials login flow.
+    Login(AuthLoginArgs),
+    /// Print the exact gcloud login command without running it.
+    Command(AuthCommandArgs),
+    /// Show the configured credential source and optional Ad Manager API verification result.
+    Status(AuthStatusCliArgs),
+    /// Check the local auth environment and suggest the next action.
+    Doctor(AuthDoctorArgs),
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct AuthLoginArgs {
+    /// Print a browser URL instead of launching a browser where supported by gcloud.
+    #[arg(long)]
+    pub headless: bool,
+
+    /// Optional downloaded Google OAuth client id JSON for gcloud ADC login.
+    #[arg(long)]
+    pub client_id_file: Option<PathBuf>,
+
+    /// Optional quota project to set after successful login.
+    #[arg(long)]
+    pub quota_project: Option<String>,
+
+    /// Print the command that would run, without invoking gcloud.
+    #[arg(long)]
+    pub dry_run: bool,
+
+    /// Skip post-login Ad Manager API verification.
+    #[arg(long)]
+    pub no_verify: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct AuthCommandArgs {
+    /// Include the headless browser flag in the printed gcloud command.
+    #[arg(long)]
+    pub headless: bool,
+
+    /// Optional downloaded Google OAuth client id JSON for gcloud ADC login.
+    #[arg(long)]
+    pub client_id_file: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct AuthStatusCliArgs {
+    /// Acquire a Google access token and call networks.list. The token is never printed.
+    #[arg(long = "verify-token", alias = "verify-access")]
+    pub verify_token: bool,
+
+    /// Emit machine-readable JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct AuthDoctorArgs {
+    /// Acquire a Google access token and call networks.list. The token is never printed.
+    #[arg(long = "verify-token", alias = "verify-access")]
+    pub verify_token: bool,
+
+    /// Emit machine-readable JSON.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -80,6 +245,15 @@ pub struct Settings {
     pub api_base_url: String,
     pub report_poll_timeout: Duration,
     pub report_poll_initial_interval: Duration,
+    pub scratchpad_session_ttl: Duration,
+    pub scratchpad_max_sessions: usize,
+    pub scratchpad_max_tables_per_session: usize,
+    pub scratchpad_max_rows_per_session: usize,
+    pub scratchpad_max_memory_mb: usize,
+    pub scratchpad_query_timeout: Duration,
+    pub scratchpad_max_sql_bytes: usize,
+    pub scratchpad_root_dir: PathBuf,
+    pub command: Option<CliCommand>,
 }
 
 impl Settings {
@@ -101,6 +275,48 @@ impl Settings {
                 "must start with https://",
             ));
         }
+        if cli.scratchpad_session_ttl_secs == 0 {
+            return Err(AdManagerError::invalid(
+                "scratchpad_session_ttl_secs",
+                "must be greater than zero",
+            ));
+        }
+        if cli.scratchpad_max_sessions == 0 {
+            return Err(AdManagerError::invalid(
+                "scratchpad_max_sessions",
+                "must be greater than zero",
+            ));
+        }
+        if cli.scratchpad_max_tables_per_session == 0 {
+            return Err(AdManagerError::invalid(
+                "scratchpad_max_tables_per_session",
+                "must be greater than zero",
+            ));
+        }
+        if cli.scratchpad_max_rows_per_session == 0 {
+            return Err(AdManagerError::invalid(
+                "scratchpad_max_rows_per_session",
+                "must be greater than zero",
+            ));
+        }
+        if cli.scratchpad_max_memory_mb == 0 {
+            return Err(AdManagerError::invalid(
+                "scratchpad_max_memory_mb",
+                "must be greater than zero",
+            ));
+        }
+        if cli.scratchpad_query_timeout_ms == 0 {
+            return Err(AdManagerError::invalid(
+                "scratchpad_query_timeout_ms",
+                "must be greater than zero",
+            ));
+        }
+        if cli.scratchpad_max_sql_bytes == 0 {
+            return Err(AdManagerError::invalid(
+                "scratchpad_max_sql_bytes",
+                "must be greater than zero",
+            ));
+        }
         Ok(Self {
             print_tools: cli.print_tools,
             print_tool_schema: cli.print_tool_schema,
@@ -114,6 +330,15 @@ impl Settings {
             report_poll_initial_interval: Duration::from_millis(
                 cli.report_poll_initial_interval_ms.max(250),
             ),
+            scratchpad_session_ttl: Duration::from_secs(cli.scratchpad_session_ttl_secs),
+            scratchpad_max_sessions: cli.scratchpad_max_sessions,
+            scratchpad_max_tables_per_session: cli.scratchpad_max_tables_per_session,
+            scratchpad_max_rows_per_session: cli.scratchpad_max_rows_per_session,
+            scratchpad_max_memory_mb: cli.scratchpad_max_memory_mb,
+            scratchpad_query_timeout: Duration::from_millis(cli.scratchpad_query_timeout_ms),
+            scratchpad_max_sql_bytes: cli.scratchpad_max_sql_bytes,
+            scratchpad_root_dir: cli.scratchpad_root_dir.unwrap_or_else(std::env::temp_dir),
+            command: cli.command,
         })
     }
 }
@@ -131,6 +356,15 @@ impl Default for Settings {
             api_base_url: DEFAULT_API_BASE_URL.to_string(),
             report_poll_timeout: Duration::from_millis(300_000),
             report_poll_initial_interval: Duration::from_millis(5_000),
+            scratchpad_session_ttl: Duration::from_secs(DEFAULT_SCRATCHPAD_SESSION_TTL_SECS),
+            scratchpad_max_sessions: DEFAULT_SCRATCHPAD_MAX_SESSIONS,
+            scratchpad_max_tables_per_session: DEFAULT_SCRATCHPAD_MAX_TABLES_PER_SESSION,
+            scratchpad_max_rows_per_session: DEFAULT_SCRATCHPAD_MAX_ROWS_PER_SESSION,
+            scratchpad_max_memory_mb: DEFAULT_SCRATCHPAD_MAX_MEMORY_MB,
+            scratchpad_query_timeout: Duration::from_millis(DEFAULT_SCRATCHPAD_QUERY_TIMEOUT_MS),
+            scratchpad_max_sql_bytes: DEFAULT_SCRATCHPAD_MAX_SQL_BYTES,
+            scratchpad_root_dir: std::env::temp_dir(),
+            command: None,
         }
     }
 }
@@ -149,14 +383,41 @@ fn normalize_required(field: &'static str, value: String) -> Result<String, AdMa
     Ok(trimmed)
 }
 
+pub fn adc_credentials_path() -> Option<PathBuf> {
+    if let Some(config_dir) = env::var_os("CLOUDSDK_CONFIG").filter(|value| !value.is_empty()) {
+        return Some(PathBuf::from(config_dir).join("application_default_credentials.json"));
+    }
+    env::var_os("HOME")
+        .filter(|value| !value.is_empty())
+        .map(|home| {
+            PathBuf::from(home)
+                .join(".config")
+                .join("gcloud")
+                .join("application_default_credentials.json")
+        })
+}
+
+pub fn adc_quota_project_id() -> Option<String> {
+    let path = adc_credentials_path()?;
+    let raw = std::fs::read_to_string(path).ok()?;
+    let value: Value = serde_json::from_str(&raw).ok()?;
+    value
+        .get("quota_project_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{DEFAULT_READONLY_SCOPE, Settings};
+    use super::{DEFAULT_READONLY_SCOPE, GCLOUD_ADC_REQUIRED_SCOPE, Settings};
 
     #[test]
     fn defaults_are_read_only_and_https() {
         let settings = Settings::default();
         assert_eq!(settings.scope, DEFAULT_READONLY_SCOPE);
         assert!(settings.api_base_url.starts_with("https://"));
+        assert!(GCLOUD_ADC_REQUIRED_SCOPE.ends_with("/auth/cloud-platform"));
     }
 }

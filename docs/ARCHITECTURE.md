@@ -10,7 +10,12 @@ surface, not an SDK mirror or generic upstream proxy.
 
 - `src/config.rs`
   - CLI and runtime settings
-  - scope, timeout, quota-project, and service-account configuration
+  - scope, timeout, quota-project, service-account, auth subcommand, and
+    scratchpad configuration
+- `src/auth_ux.rs`
+  - operator-facing `auth login`, `auth command`, `auth status`, and
+    `auth doctor` flows
+  - ADC quota-project detection and verification reporting
 - `src/client.rs`
   - authenticated Google Ad Manager REST adapter
   - curated collection routing
@@ -20,12 +25,14 @@ surface, not an SDK mirror or generic upstream proxy.
 - `src/contract.rs`
   - Contract V1 response envelopes
   - secret-text redaction
+  - scratchpad error envelopes
 - `src/tool_surface.rs`
   - `ToolInventory` metadata for `find_tools`
 - `src/tools.rs`
   - MCP tool argument schemas and implementations
 - `src/lib.rs`
-  - server assembly and exported tool snapshot helpers
+  - server assembly, scratchpad manager setup, and exported tool snapshot
+    helpers
 - `src/main.rs`
   - stdio entrypoint and `--print-tools` / `--print-tool-schema`
 
@@ -57,6 +64,15 @@ The initial first-class tool set is:
 5. `gam_network_catalog_list`
 6. `gam_report_run`
 7. `gam_report_result_rows`
+8. `gam_scratchpad_open_session`
+9. `gam_scratchpad_close_session`
+10. `gam_scratchpad_list_sessions`
+11. `gam_scratchpad_list_tables`
+12. `gam_scratchpad_drop_table`
+13. `gam_scratchpad_query`
+14. `gam_scratchpad_ingest_network_catalog`
+15. `gam_scratchpad_ingest_report_result_rows`
+16. `gam_scratchpad_export_evidence_bundle`
 
 `find_tools` is also exposed for deferred-loading and `tool_search` clients.
 
@@ -68,3 +84,29 @@ most for a first useful release:
 - orders
 - line items
 - saved reports
+
+## Auth UX
+
+The binary exposes auth subcommands before stdio startup:
+
+- `auth login`
+- `auth command`
+- `auth status`
+- `auth doctor`
+
+These commands are deliberately wrappers around Google Application Default
+Credentials rather than a custom token store. The login command requests both
+the `cloud-platform` ADC scope required by `gcloud` and the configured Ad
+Manager scope. Verification uses `networks.list` with a small page size, which
+proves token minting, API enablement, quota-project behavior, and Ad Manager
+network visibility without exposing tokens.
+
+## Scratchpad Boundary
+
+Scratchpad support is provided by `mcp-toolkit-scratchpad`, not by local
+server-specific DuckDB lifecycle code. The Ad Manager MCP only maps upstream
+catalog/report rows into stable scratchpad columns and keeps the full upstream
+row as `upstream_json` so beta API field drift does not destroy evidence.
+
+The scratchpad tools are analysis and evidence helpers. They do not mutate
+Google Ad Manager and do not broaden the upstream API surface.

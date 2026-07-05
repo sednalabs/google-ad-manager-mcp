@@ -33,3 +33,17 @@ STRICT_OUTDATED=1 ./scripts/dependency_governance_check.sh
 When you add a new direct dependency or make a major upgrade, include a short
 PR note that records why the crate is needed, which safer alternatives were
 considered, and how you would roll the change back.
+
+## Scratchpad dependency note
+
+`mcp-toolkit-scratchpad` is a direct dependency because this server exposes
+bounded DuckDB scratchpad sessions for local analysis and evidence bundles.
+That crate intentionally brings in DuckDB and Arrow transitively. Keeping the
+scratchpad lifecycle in the toolkit is preferred over copying DuckDB session,
+SQL policy, TTL, row-limit, and evidence-export code into each Google provider
+MCP.
+
+Rollback path: remove `mcp-toolkit-scratchpad`, remove the
+`gam_scratchpad_*` tools, and regenerate `Cargo.lock` and the tool schema
+snapshot. The core auth, network, catalog, and report tools do not depend on
+DuckDB.

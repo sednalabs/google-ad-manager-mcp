@@ -4,7 +4,7 @@
 Ad Manager workflows. It is built on `mcp-toolkit-rs` and the official Google
 Ad Manager API (Beta).
 
-The first public release focuses on the smallest useful surface:
+The current alpha focuses on a small useful surface:
 
 - inspect Google Ad Manager credential readiness without exposing secrets;
 - discover accessible Ad Manager networks;
@@ -13,7 +13,9 @@ The first public release focuses on the smallest useful surface:
   - orders
   - line items
   - saved reports
-- run saved reports and fetch paginated result rows.
+- run saved reports and fetch paginated result rows;
+- load catalog/report pages into a bounded local DuckDB scratchpad for
+  read-only analysis and evidence bundles.
 
 The server intentionally does not expose a generic HTTP proxy, arbitrary query
 surface, or default write operations.
@@ -38,7 +40,7 @@ cargo install --locked --git https://github.com/sednalabs/google-ad-manager-mcp 
 For a pinned tagged source install:
 
 ```bash
-cargo install --locked --git https://github.com/sednalabs/google-ad-manager-mcp --tag v0.1.0 google-ad-manager-mcp
+cargo install --locked --git https://github.com/sednalabs/google-ad-manager-mcp --tag v0.1.1-alpha.0 google-ad-manager-mcp
 ```
 
 The repository also publishes GitHub-hosted binary bundles through the release
@@ -55,16 +57,25 @@ The server exposes setup tools that do not return secrets:
 - `gam_auth_status`
 - `gam_auth_login_command`
 
-For local use, the normal path is:
+For local use, the easiest path is:
 
 ```bash
-gcloud auth application-default login \
-  --scopes=https://www.googleapis.com/auth/admanager.readonly
-gcloud auth application-default set-quota-project <PROJECT_ID>
+google-ad-manager-mcp auth login --headless --quota-project <PROJECT_ID>
 ```
 
-Then restart any stdio MCP client that keeps a long-lived child process and
-call:
+The helper uses Google Application Default Credentials, requests the required
+`cloud-platform` ADC scope plus the read-only Ad Manager scope, sets the ADC
+quota project when provided, and verifies access with `networks.list`.
+
+You can inspect or script auth without starting an MCP session:
+
+```bash
+google-ad-manager-mcp auth command --headless
+google-ad-manager-mcp auth status --verify-token
+google-ad-manager-mcp auth doctor --verify-token --json
+```
+
+Then restart any stdio MCP client that keeps a long-lived child process and call:
 
 ```text
 gam_auth_status { "verify_access": true }
@@ -76,6 +87,8 @@ After auth is proven:
 2. `gam_network_catalog_list`
 3. `gam_report_run`
 4. `gam_report_result_rows` when a report result has more pages
+5. `gam_scratchpad_open_session` and the `gam_scratchpad_ingest_*` tools when
+   you want local SQL analysis or a markdown evidence bundle
 
 ## Authentication
 
@@ -98,6 +111,18 @@ If you already have a service account for the Google Ad Manager SOAP API, the
 official Ad Manager Beta docs say you can reuse it after enabling the Ad
 Manager API on the Google Cloud project tied to that credential.
 
+For raw `gcloud` use, ADC user credentials need both scopes:
+
+```bash
+gcloud auth application-default login \
+  --scopes=https://www.googleapis.com/auth/cloud-platform,https://www.googleapis.com/auth/admanager.readonly
+gcloud auth application-default set-quota-project <PROJECT_ID>
+```
+
+The runtime also reads `quota_project_id` from the local ADC file when
+`GOOGLE_AD_MANAGER_MCP_QUOTA_PROJECT` is not set, so the easy login command and
+the MCP server use the same quota-project source.
+
 The server never returns raw access tokens, private keys, refresh tokens, or
 whole credential files in tool responses.
 
@@ -113,6 +138,14 @@ whole credential files in tool responses.
 | `GOOGLE_AD_MANAGER_MCP_API_BASE_URL` | `https://admanager.googleapis.com/v1` | Upstream API root |
 | `GOOGLE_AD_MANAGER_MCP_REPORT_POLL_TIMEOUT_MS` | `300000` | Default report wait timeout |
 | `GOOGLE_AD_MANAGER_MCP_REPORT_POLL_INITIAL_INTERVAL_MS` | `5000` | Initial report polling interval |
+| `GOOGLE_AD_MANAGER_MCP_SCRATCHPAD_SESSION_TTL_SECS` | `900` | Scratchpad session idle TTL |
+| `GOOGLE_AD_MANAGER_MCP_SCRATCHPAD_MAX_SESSIONS` | `64` | Maximum active scratchpad sessions |
+| `GOOGLE_AD_MANAGER_MCP_SCRATCHPAD_MAX_TABLES_PER_SESSION` | `32` | Maximum tables per scratchpad session |
+| `GOOGLE_AD_MANAGER_MCP_SCRATCHPAD_MAX_ROWS_PER_SESSION` | `1000000` | Maximum ingested rows per scratchpad session |
+| `GOOGLE_AD_MANAGER_MCP_SCRATCHPAD_MAX_MEMORY_MB` | `256` | DuckDB memory limit per scratchpad connection |
+| `GOOGLE_AD_MANAGER_MCP_SCRATCHPAD_QUERY_TIMEOUT_MS` | `15000` | Scratchpad query timeout |
+| `GOOGLE_AD_MANAGER_MCP_SCRATCHPAD_MAX_SQL_BYTES` | `65536` | Maximum SQL payload accepted by scratchpad guardrails |
+| `GOOGLE_AD_MANAGER_MCP_SCRATCHPAD_ROOT_DIR` | OS temp directory | Optional existing directory for scratchpad databases |
 
 ## Tools
 
@@ -124,6 +157,15 @@ whole credential files in tool responses.
 - `gam_network_catalog_list`
 - `gam_report_run`
 - `gam_report_result_rows`
+- `gam_scratchpad_open_session`
+- `gam_scratchpad_close_session`
+- `gam_scratchpad_list_sessions`
+- `gam_scratchpad_list_tables`
+- `gam_scratchpad_drop_table`
+- `gam_scratchpad_query`
+- `gam_scratchpad_ingest_network_catalog`
+- `gam_scratchpad_ingest_report_result_rows`
+- `gam_scratchpad_export_evidence_bundle`
 
 All tool responses use Contract V1 envelopes:
 

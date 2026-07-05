@@ -19,6 +19,7 @@
 //! * Google Ad Manager API (Beta) Authentication
 //! * Google Ad Manager API (Beta) Reports
 
+pub mod auth_ux;
 mod client;
 mod config;
 mod contract;
@@ -27,8 +28,10 @@ mod tool_surface;
 mod tools;
 
 pub use client::{AdManagerClient, AuthSource, CatalogCollection, CompletedReportRun};
-pub use config::{Cli, DEFAULT_READONLY_SCOPE, MANAGE_SCOPE, Settings};
+pub use config::{Cli, CliCommand, DEFAULT_READONLY_SCOPE, MANAGE_SCOPE, Settings};
 pub use error::AdManagerError;
+
+use std::sync::Arc;
 
 use mcp_toolkit::rmcp::{
     self, ServerHandler,
@@ -37,7 +40,11 @@ use mcp_toolkit::rmcp::{
     tool_handler,
 };
 use mcp_toolkit_core::guarded_action::GuardedActionPosture;
-use mcp_toolkit_core::tool_inventory::{ToolInventory, ToolInventoryError};
+use mcp_toolkit_core::tool_inventory::ToolInventory;
+use mcp_toolkit_scratchpad::{
+    DuckDbEngine, ScratchpadSessionConfig, ScratchpadSessionManager, SharedScratchpadEngine,
+    SharedScratchpadSessionManager,
+};
 use tool_surface::build_tool_inventory;
 
 pub type McpError = mcp_toolkit::rmcp::ErrorData;
@@ -46,6 +53,7 @@ pub type McpError = mcp_toolkit::rmcp::ErrorData;
 pub struct AdManagerServer {
     settings: Settings,
     client: AdManagerClient,
+    scratchpad_sessions: SharedScratchpadSessionManager,
     tool_router: ToolRouter<Self>,
     inventory: ToolInventory,
 }
@@ -54,15 +62,33 @@ impl AdManagerServer {
     /// Builds the stdio server from validated settings.
     ///
     /// # Errors
-    /// Returns an error when tool inventory metadata is internally inconsistent.
+    /// Returns an error when tool inventory metadata is internally inconsistent
+    /// or the scratchpad engine cannot initialize.
     ///
     /// # Security
     /// This constructor does not contact Google or read tokens. Credential
     /// access happens inside tool calls through `AdManagerClient`.
-    pub fn new(settings: Settings) -> Result<Self, ToolInventoryError> {
+    pub fn new(settings: Settings) -> anyhow::Result<Self> {
+        let scratchpad_engine: SharedScratchpadEngine = Arc::new(DuckDbEngine::new()?);
+        let scratchpad_config = ScratchpadSessionConfig::new(
+            settings.scratchpad_session_ttl,
+            settings.scratchpad_max_sessions,
+            settings.scratchpad_max_tables_per_session,
+            settings.scratchpad_max_rows_per_session,
+            settings.scratchpad_max_memory_mb,
+        )
+        .with_root_dir(settings.scratchpad_root_dir.clone())
+        .with_query_timeout(settings.scratchpad_query_timeout)
+        .with_max_sql_bytes(settings.scratchpad_max_sql_bytes);
+        let scratchpad_sessions = Arc::new(ScratchpadSessionManager::new(
+            scratchpad_engine,
+            scratchpad_config,
+        )?);
+
         Ok(Self {
             client: AdManagerClient::from_settings(&settings),
             settings,
+            scratchpad_sessions,
             tool_router: Self::tool_router_ad_manager(),
             inventory: build_tool_inventory()?,
         })
@@ -86,6 +112,10 @@ impl AdManagerServer {
 
     pub fn client(&self) -> &AdManagerClient {
         &self.client
+    }
+
+    pub fn scratchpad_sessions(&self) -> &SharedScratchpadSessionManager {
+        &self.scratchpad_sessions
     }
 
     pub fn settings(&self) -> &Settings {
