@@ -43,6 +43,11 @@ scratchpad lifecycle in the toolkit is preferred over copying DuckDB session,
 SQL policy, TTL, row-limit, and evidence-export code into each Google provider
 MCP.
 
+The `CC0-1.0` license is allowed because Arrow's hash-map path can pull in
+`tiny-keccak` through `const-random` and `ahash`. Treat any future non-
+permissive scratchpad transitive as a fresh review rather than widening the
+allowlist automatically.
+
 Rollback path: remove `mcp-toolkit-scratchpad`, remove the
 `gam_scratchpad_*` tools, and regenerate `Cargo.lock` and the tool schema
 snapshot. The core auth, network, catalog, and report tools do not depend on
