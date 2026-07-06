@@ -2,8 +2,9 @@
 
 ## Goal
 
-Get from zero to the first useful Ad Manager read or write preview without
-exposing secrets or guessing resource identifiers.
+Get from zero to the first useful Ad Manager read, write preview, or guarded
+SOAP trafficking plan without exposing secrets or guessing resource
+identifiers.
 
 ## 1. Enable the API
 
@@ -51,6 +52,11 @@ gcloud auth application-default login \
   --scopes=https://www.googleapis.com/auth/cloud-platform,https://www.googleapis.com/auth/admanager
 gcloud auth application-default set-quota-project <PROJECT_ID>
 ```
+
+Use the manage-scope login for SOAP trafficking and forecasts too. Google
+Ad Manager's legacy SOAP API requires the full
+`https://www.googleapis.com/auth/admanager` scope, even for non-mutating SOAP
+forecast/read calls.
 
 For unattended use, prefer a service account file:
 
@@ -106,12 +112,24 @@ For reports:
 2. `gam_report_run`
 3. `gam_report_result_rows` when pagination is needed
 
-For write planning:
+For REST write planning:
 
 1. `gam_trafficking_tool_matrix`
 2. `gam_rest_write_plan`
 3. `gam_rest_write_apply` only after enabling write mode, using the manage
    scope, and passing the exact confirmation token from the plan
+
+For SOAP trafficking:
+
+1. `gam_trafficking_tool_matrix`
+2. `gam_soap_trafficking_plan`
+3. `gam_soap_trafficking_apply` with the exact confirmation token from the
+   plan
+
+SOAP forecast/read operations can run without write mode enabled, but still
+need the manage scope. Mutating SOAP operations also require
+`GOOGLE_AD_MANAGER_MCP_WRITE_MODE=enabled`, `expected_impact`, and
+`rollback_note`.
 
 For scratchpad analysis:
 

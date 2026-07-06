@@ -15,9 +15,11 @@ All tools return Contract V1 envelopes: `ok/data/meta` on success and
 | `gam_network_catalog_list` | List one curated network collection: `ad_units`, `orders`, `line_items`, or `reports`. |
 | `gam_report_run` | Run a saved Ad Manager report, optionally wait, and optionally fetch the first result page. |
 | `gam_report_result_rows` | Fetch rows from a completed report result resource. |
-| `gam_trafficking_tool_matrix` | Describe REST-supported write operations and SOAP-only trafficking gaps. |
+| `gam_trafficking_tool_matrix` | Describe REST-supported writes, SOAP trafficking operations, and remaining ergonomics gaps. |
 | `gam_rest_write_plan` | Create a dry-run plan and confirmation token for an allowlisted REST write. |
 | `gam_rest_write_apply` | Apply an allowlisted REST write after runtime, scope, and confirmation gates. |
+| `gam_soap_trafficking_plan` | Create a dry-run plan and confirmation token for an allowlisted SOAP trafficking or forecast operation. |
+| `gam_soap_trafficking_apply` | Run an allowlisted SOAP trafficking or forecast operation after scope, runtime, and confirmation gates. |
 | `gam_scratchpad_open_session` | Open or refresh a bounded local DuckDB scratchpad session. |
 | `gam_scratchpad_close_session` | Close a scratchpad session and remove its local database. |
 | `gam_scratchpad_list_sessions` | List active scratchpad sessions. |
@@ -64,11 +66,13 @@ Use `gam_report_result_rows` with the returned `result_name` when:
 
 ## Write And Trafficking Tools
 
-Write tools are available as a guarded preview/apply pair:
+Write and trafficking tools are available as guarded preview/apply pairs:
 
 1. `gam_trafficking_tool_matrix`
 2. `gam_rest_write_plan`
 3. `gam_rest_write_apply`
+4. `gam_soap_trafficking_plan`
+5. `gam_soap_trafficking_apply`
 
 The default runtime mode is `preview_only`. In that mode, `gam_rest_write_plan`
 can return the exact REST request shape and confirmation token, but
@@ -95,9 +99,75 @@ discovery document. It includes inventory/supporting resources such as
 `custom_fields`, `custom_targeting_keys`, `applications`, `sites`, and related
 batch state actions.
 
-The current REST beta surface does not expose order or line-item create/update
-actions. `gam_trafficking_tool_matrix` reports those as SOAP-only gaps rather
-than presenting fake tools that would fail at apply time.
+Classic trafficking remains SOAP-shaped in Google Ad Manager. The SOAP tools
+therefore cover the production trafficking surface through a typed operation
+allowlist instead of pretending those workflows exist in REST.
+
+SOAP operations currently exposed:
+
+- `OrderService`: `create_orders`, `get_orders_by_statement`,
+  `perform_order_action`, `update_orders`
+- `LineItemService`: `create_line_items`, `get_line_items_by_statement`,
+  `perform_line_item_action`, `update_line_items`
+- `CreativeService`: `create_creatives`, `get_creatives_by_statement`,
+  `perform_creative_action`, `update_creatives`
+- `LineItemCreativeAssociationService`:
+  `create_line_item_creative_associations`,
+  `get_line_item_creative_associations_by_statement`,
+  `get_line_item_creative_association_preview_url`,
+  `get_line_item_creative_association_native_style_preview_urls`,
+  `perform_line_item_creative_association_action`,
+  `update_line_item_creative_associations`
+- `ForecastService`: `get_availability_forecast`,
+  `get_availability_forecast_by_id`, `get_delivery_forecast`,
+  `get_delivery_forecast_by_ids`, `get_traffic_data`
+
+The SOAP request shape is intentionally thin:
+
+- choose an allowlisted `operation`;
+- provide `payload_xml` as the inner operation XML only;
+- do not include a SOAP envelope, SOAP header, OAuth token, request header,
+  XML declaration, DTD, or entity declaration;
+- review the generated envelope returned by `gam_soap_trafficking_plan`;
+- call `gam_soap_trafficking_apply` with the exact matching confirmation
+  token.
+
+All live SOAP calls require
+`GOOGLE_AD_MANAGER_MCP_SCOPE=https://www.googleapis.com/auth/admanager`.
+This includes non-mutating forecast/read operations because Google Ad
+Manager's legacy SOAP API does not accept the newer read-only Ad Manager
+scope. Mutating SOAP operations additionally require
+`GOOGLE_AD_MANAGER_MCP_WRITE_MODE=enabled`, `expected_impact`, and
+`rollback_note`.
+
+Example SOAP line-item lookup plan:
+
+```json
+{
+  "request": {
+    "network_code": "1234567",
+    "operation": "get_line_items_by_statement",
+    "payload_xml": "<filterStatement><query>WHERE id = 987654</query></filterStatement>",
+    "reason": "Read the current line item before a trafficking change."
+  }
+}
+```
+
+Example SOAP line-item pause plan:
+
+```json
+{
+  "request": {
+    "network_code": "1234567",
+    "operation": "perform_line_item_action",
+    "payload_xml": "<lineItemAction xsi:type=\"PauseLineItems\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\"/><filterStatement><query>WHERE id = 987654</query></filterStatement>",
+    "reason": "Pause the line item while the campaign owner reviews delivery.",
+    "expected_impact": "Stops serving for line item 987654 until resumed.",
+    "rollback_note": "Run perform_line_item_action with ResumeLineItems for the same id.",
+    "idempotency_key": "ticket-123"
+  }
+}
+```
 
 Example dry-run plan for a saved-report patch:
 

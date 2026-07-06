@@ -12,6 +12,7 @@ pub const DEFAULT_READONLY_SCOPE: &str = "https://www.googleapis.com/auth/admana
 pub const MANAGE_SCOPE: &str = "https://www.googleapis.com/auth/admanager";
 pub const GCLOUD_ADC_REQUIRED_SCOPE: &str = "https://www.googleapis.com/auth/cloud-platform";
 const DEFAULT_API_BASE_URL: &str = "https://admanager.googleapis.com/v1";
+const DEFAULT_SOAP_BASE_URL: &str = "https://ads.google.com/apis/ads/publisher";
 const DEFAULT_WRITE_MODE: &str = "preview_only";
 const DEFAULT_SCRATCHPAD_SESSION_TTL_SECS: u64 = 900;
 const DEFAULT_SCRATCHPAD_MAX_SESSIONS: usize = 64;
@@ -69,6 +70,10 @@ pub struct Cli {
     /// Default upstream API base URL.
     #[arg(long, env = "GOOGLE_AD_MANAGER_MCP_API_BASE_URL", default_value = DEFAULT_API_BASE_URL)]
     pub api_base_url: String,
+
+    /// Default upstream Ad Manager SOAP base URL, without the version or service segment.
+    #[arg(long, env = "GOOGLE_AD_MANAGER_MCP_SOAP_BASE_URL", default_value = DEFAULT_SOAP_BASE_URL)]
+    pub soap_base_url: String,
 
     /// Runtime mode for Ad Manager write tools: read_only, preview_only, or enabled.
     #[arg(
@@ -259,6 +264,7 @@ pub struct Settings {
     pub service_account_json: Option<String>,
     pub http_timeout: Duration,
     pub api_base_url: String,
+    pub soap_base_url: String,
     pub write_mode: GuardedActionRuntimeMode,
     pub report_poll_timeout: Duration,
     pub report_poll_initial_interval: Duration,
@@ -286,10 +292,17 @@ impl Settings {
     pub fn from_cli(cli: Cli) -> Result<Self, AdManagerError> {
         let scope = normalize_required("scope", cli.scope)?;
         let api_base_url = normalize_required("api_base_url", cli.api_base_url)?;
+        let soap_base_url = normalize_required("soap_base_url", cli.soap_base_url)?;
         let write_mode = parse_write_mode(&cli.write_mode)?;
         if !api_base_url.starts_with("https://") {
             return Err(AdManagerError::invalid(
                 "api_base_url",
+                "must start with https://",
+            ));
+        }
+        if !soap_base_url.starts_with("https://") {
+            return Err(AdManagerError::invalid(
+                "soap_base_url",
                 "must start with https://",
             ));
         }
@@ -344,6 +357,7 @@ impl Settings {
             service_account_json: normalize_optional(cli.service_account_json),
             http_timeout: Duration::from_millis(cli.http_timeout_ms.max(1)),
             api_base_url,
+            soap_base_url,
             write_mode,
             report_poll_timeout: Duration::from_millis(cli.report_poll_timeout_ms.max(1)),
             report_poll_initial_interval: Duration::from_millis(
@@ -373,6 +387,7 @@ impl Default for Settings {
             service_account_json: None,
             http_timeout: Duration::from_millis(15_000),
             api_base_url: DEFAULT_API_BASE_URL.to_string(),
+            soap_base_url: DEFAULT_SOAP_BASE_URL.to_string(),
             write_mode: GuardedActionRuntimeMode::PreviewOnly,
             report_poll_timeout: Duration::from_millis(300_000),
             report_poll_initial_interval: Duration::from_millis(5_000),
@@ -455,6 +470,7 @@ mod tests {
         assert_eq!(settings.scope, DEFAULT_READONLY_SCOPE);
         assert_eq!(settings.write_mode, GuardedActionRuntimeMode::PreviewOnly);
         assert!(settings.api_base_url.starts_with("https://"));
+        assert!(settings.soap_base_url.starts_with("https://"));
         assert!(GCLOUD_ADC_REQUIRED_SCOPE.ends_with("/auth/cloud-platform"));
     }
 

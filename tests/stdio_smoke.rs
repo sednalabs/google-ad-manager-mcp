@@ -17,6 +17,8 @@ fn stdio_initializes_and_lists_tools() {
         "gam_trafficking_tool_matrix",
         "gam_rest_write_plan",
         "gam_rest_write_apply",
+        "gam_soap_trafficking_plan",
+        "gam_soap_trafficking_apply",
         "gam_scratchpad_open_session",
         "gam_scratchpad_close_session",
         "gam_scratchpad_list_sessions",
