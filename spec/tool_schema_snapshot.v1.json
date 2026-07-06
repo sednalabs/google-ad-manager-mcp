@@ -797,10 +797,10 @@
       },
       "name": "gam_scratchpad_open_session"
     },
-    {
-      "description": "Run bounded read-only DuckDB SQL against a Google Ad Manager scratchpad session.",
-      "inputSchema": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        {
+            "description": "Run bounded read-only DuckDB SQL against a Google Ad Manager scratchpad session.",
+            "inputSchema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "offset": {
             "description": "Zero-based result offset.",
@@ -834,13 +834,55 @@
           "sql"
         ],
         "type": "object"
-      },
-      "name": "gam_scratchpad_query"
-    },
-    {
-      "description": "Run an allowlisted Google Ad Manager SOAP trafficking or forecast operation after scope, runtime, and confirmation-token gates.",
-      "inputSchema": {
-        "$defs": {
+            },
+            "name": "gam_scratchpad_query"
+        },
+        {
+            "description": "Build a safe inner payload_xml fragment for common Google Ad Manager SOAP trafficking templates without calling upstream.",
+            "inputSchema": {
+                "$defs": {
+                    "SoapPayloadTemplate": {
+                        "enum": [
+                            "order_by_id",
+                            "line_item_by_id",
+                            "line_items_by_order_id",
+                            "creatives_by_advertiser_name",
+                            "licas_by_line_item_id",
+                            "lica_preview_url",
+                            "create_lica",
+                            "pause_line_item",
+                            "resume_line_item",
+                            "archive_line_item",
+                            "delivery_forecast_by_line_item_ids",
+                            "availability_forecast_by_line_item_id"
+                        ],
+                        "type": "string"
+                    }
+                },
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "properties": {
+                    "template": {
+                        "$ref": "#/$defs/SoapPayloadTemplate",
+                        "description": "Safe helper template to render into an inner SOAP payload_xml fragment."
+                    },
+                    "values": {
+                        "additionalProperties": true,
+                        "default": {},
+                        "description": "Template values such as order_id, line_item_id, creative_id, advertiser_id, name_contains, or line_item_ids.",
+                        "type": "object"
+                    }
+                },
+                "required": [
+                    "template"
+                ],
+                "type": "object"
+            },
+            "name": "gam_soap_payload_build"
+        },
+        {
+            "description": "Run an allowlisted Google Ad Manager SOAP trafficking or forecast operation after scope, runtime, and confirmation-token gates.",
+            "inputSchema": {
+                "$defs": {
           "SoapTraffickingOperation": {
             "enum": [
               "create_orders",
