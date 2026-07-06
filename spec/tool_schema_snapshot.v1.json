@@ -78,6 +78,14 @@
               "string",
               "null"
             ]
+          },
+          "shared_adc": {
+            "default": null,
+            "description": "Use the conventional shared gcloud ADC file instead of a server-specific file.",
+            "type": [
+              "boolean",
+              "null"
+            ]
           }
         },
         "type": "object"

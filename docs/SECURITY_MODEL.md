@@ -19,7 +19,14 @@ service account inputs:
 - `GOOGLE_APPLICATION_CREDENTIALS`
 - `GOOGLE_AD_MANAGER_MCP_SERVICE_ACCOUNT_JSON_PATH`
 - `GOOGLE_AD_MANAGER_MCP_SERVICE_ACCOUNT_JSON`
-- local ADC from `gcloud auth application-default login`
+- server-specific local ADC from `google-ad-manager-mcp auth login`
+- conventional shared local ADC from `gcloud auth application-default login`
+
+The local login helper uses a Google-Ad-Manager-specific gcloud config
+directory by default. This keeps its refresh token and scopes separate from
+other Google MCP servers that may run under the same OS user. Conventional
+shared local ADC remains a compatibility fallback when the server-specific ADC
+file has not been created yet.
 
 Tool responses may report whether a credential source looks configured or
 whether a low-cost access check succeeded. They must not return:

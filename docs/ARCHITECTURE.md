@@ -156,9 +156,11 @@ The binary exposes auth subcommands before stdio startup:
 - `auth doctor`
 
 These commands are deliberately wrappers around Google Application Default
-Credentials rather than a custom token store. The login command requests both
-the `cloud-platform` ADC scope required by `gcloud` and the configured Ad
-Manager scope. The `--manage-scope` flag switches the login command to
+Credentials rather than a custom token store. By default they run gcloud with a
+Google-Ad-Manager-specific `CLOUDSDK_CONFIG` directory so this server's user ADC
+file is separate from other Google MCP servers under the same OS account. The
+login command requests both the `cloud-platform` ADC scope required by `gcloud`
+and the configured Ad Manager scope. The `--manage-scope` flag switches the login command to
 `https://www.googleapis.com/auth/admanager` for operator-approved write apply
 testing without asking users to remember the raw scope string. Verification
 uses `networks.list` with a small page size, which proves token minting, API

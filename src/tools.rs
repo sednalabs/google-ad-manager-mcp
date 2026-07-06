@@ -13,12 +13,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use tokio::process::Command;
 
-use crate::auth_ux::{gcloud_adc_login_command, shell_join};
+use crate::auth_ux::{gcloud_adc_login_command, shell_join_with_cloudsdk_config};
 use crate::client::{
     CatalogCollection, DEFAULT_SOAP_API_VERSION, RestWriteOperation, RestWritePlan,
     RestWriteResource, SoapTraffickingOperation, SoapTraffickingPlan,
 };
-use crate::config::GCLOUD_ADC_REQUIRED_SCOPE;
+use crate::config::{
+    GCLOUD_ADC_REQUIRED_SCOPE, server_adc_credentials_path, server_cloudsdk_config_dir,
+};
 use crate::contract;
 use crate::{AdManagerError, AdManagerServer, MANAGE_SCOPE, McpError};
 use mcp_toolkit_core::guarded_action::{
@@ -65,6 +67,9 @@ pub struct AuthLoginCommandArgs {
     /// Request the write-capable Ad Manager manage scope instead of the current server scope.
     #[serde(default)]
     pub manage_scope: Option<bool>,
+    /// Use the conventional shared gcloud ADC file instead of a server-specific file.
+    #[serde(default)]
+    pub shared_adc: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
@@ -422,6 +427,7 @@ impl AdManagerServer {
                 "goal": "Inspect Google Ad Manager networks, inventory, delivery catalog data, saved report results, guarded REST write plans, and guarded SOAP trafficking through an MCP surface.",
                 "recommended_steps": [
                     "Run google-ad-manager-mcp auth login --headless --quota-project <PROJECT_ID> for the easiest local browser login.",
+                    "The login helper writes a Google Ad Manager-specific ADC file by default so other Google MCPs keep their own tokens and scopes.",
                     format!("The login helper requests both {GCLOUD_ADC_REQUIRED_SCOPE} and {scope}, matching gcloud ADC requirements."),
                     "Restart any stdio MCP client that keeps a long-lived child process.",
                     "Call gam_auth_status with verify_access=true.",
@@ -436,9 +442,19 @@ impl AdManagerServer {
                 ],
                 "supported_credential_sources": [
                     {
-                        "name": "Application Default Credentials",
+                        "name": "Server-specific Application Default Credentials",
+                        "env": [],
+                        "notes": "Recommended for local use through google-ad-manager-mcp auth login."
+                    },
+                    {
+                        "name": "Conventional shared Application Default Credentials",
+                        "env": [],
+                        "notes": "Available for compatibility; prefer the server-specific auth login when multiple Google MCPs share one OS user."
+                    },
+                    {
+                        "name": "Standard Google credential file",
                         "env": ["GOOGLE_APPLICATION_CREDENTIALS"],
-                        "notes": "Recommended for local use through gcloud auth application-default login."
+                        "notes": "Useful when your Google auth library supports the file type; for this server, service account files are the portable unattended choice."
                     },
                     {
                         "name": "Server-specific service account JSON path",
@@ -548,34 +564,84 @@ impl AdManagerServer {
             args.client_id_file.as_deref().map(std::path::Path::new),
             no_launch_browser,
         );
+        let headless_command = gcloud_adc_login_command(
+            requested_scope,
+            args.client_id_file.as_deref().map(std::path::Path::new),
+            true,
+        );
+        let shared_adc = args.shared_adc.unwrap_or(false);
+        let cloudsdk_config = if shared_adc {
+            None
+        } else {
+            server_cloudsdk_config_dir()
+        };
+        if !shared_adc && cloudsdk_config.is_none() {
+            return Ok(contract::error(
+                AdManagerError::invalid(
+                    "shared_adc",
+                    "failed to determine the server-specific gcloud config directory; set HOME/XDG_CONFIG_HOME on Unix or APPDATA on Windows, or pass shared_adc=true to intentionally use conventional shared ADC",
+                ),
+                started,
+            ));
+        }
+        let credential_file = if shared_adc {
+            None
+        } else {
+            server_adc_credentials_path()
+        };
         let quota_project = args
             .quota_project
             .clone()
             .or_else(|| self.settings().quota_project.clone());
         let follow_up_commands = quota_project
             .as_deref()
-            .map(|project| vec![shell_join(&google_adc_quota_project_command(project))])
+            .map(|project| {
+                vec![shell_join_with_cloudsdk_config(
+                    &google_adc_quota_project_command(project),
+                    cloudsdk_config.as_deref(),
+                )]
+            })
             .unwrap_or_default();
+        let shell_command = shell_join_with_cloudsdk_config(&command, cloudsdk_config.as_deref());
+        let headless_shell_command =
+            shell_join_with_cloudsdk_config(&headless_command, cloudsdk_config.as_deref());
+        let client_id_file_command = setup_plan.login_with_client_id_file.argv.clone();
+        let client_id_file_shell_command =
+            shell_join_with_cloudsdk_config(&client_id_file_command, cloudsdk_config.as_deref());
+        let client_id_file_headless_command =
+            setup_plan.headless_login_with_client_id_file.argv.clone();
+        let client_id_file_headless_shell_command = shell_join_with_cloudsdk_config(
+            &client_id_file_headless_command,
+            cloudsdk_config.as_deref(),
+        );
+        let quota_project_command = shell_join_with_cloudsdk_config(
+            &setup_plan.quota_project.argv,
+            cloudsdk_config.as_deref(),
+        );
         Ok(contract::success(
             json!({
                 "command": command,
-                "shell_command": shell_join(&command),
-                "headless_command": setup_plan.headless_login.argv,
-                "headless_shell_command": setup_plan.headless_login.shell.clone(),
-                "client_id_file_command": setup_plan.login_with_client_id_file.argv,
-                "client_id_file_shell_command": setup_plan.login_with_client_id_file.shell.clone(),
-                "client_id_file_headless_command": setup_plan.headless_login_with_client_id_file.argv,
-                "client_id_file_headless_shell_command": setup_plan.headless_login_with_client_id_file.shell.clone(),
-                "quota_project_command": setup_plan.quota_project.shell.clone(),
+                "shell_command": shell_command,
+                "headless_command": headless_command,
+                "headless_shell_command": headless_shell_command,
+                "client_id_file_command": client_id_file_command,
+                "client_id_file_shell_command": client_id_file_shell_command,
+                "client_id_file_headless_command": client_id_file_headless_command,
+                "client_id_file_headless_shell_command": client_id_file_headless_shell_command,
+                "quota_project_command": quota_project_command,
                 "api_enable_command": setup_plan.api_enable.as_ref().map(|command| command.shell.as_str()),
                 "adc_scopes": setup_plan.scopes.clone(),
+                "cloudsdk_config": cloudsdk_config.as_ref().map(|path| path.display().to_string()),
+                "credential_file": credential_file.as_ref().map(|path| path.display().to_string()),
+                "shared_adc": shared_adc,
                 "follow_up_commands": follow_up_commands,
                 "setup_next_steps": setup_plan.next_steps.clone(),
                 "scope": requested_scope,
                 "manage_scope": requested_scope == MANAGE_SCOPE,
                 "next_steps": setup_plan.next_steps.clone(),
                 "notes": [
-                    "This command writes Application Default Credentials on the machine where it is run.",
+                    "By default this command writes a Google Ad Manager-specific ADC file for this OS user.",
+                    "Set shared_adc=true only when you intentionally want the conventional shared gcloud ADC file.",
                     "No token or client secret is returned by this tool.",
                     format!("Use manage_scope=true or --manage-scope when you need write-capable Ad Manager credentials for operator-approved apply."),
                     "Use the client-id-file command if Google rejects the Ad Manager scope during ADC login.",
