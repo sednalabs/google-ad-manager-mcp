@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gcp_auth::{CustomServiceAccount, TokenProvider};
-use reqwest::header::{HeaderMap, HeaderValue, USER_AGENT};
+use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderValue, USER_AGENT};
 use reqwest::{Client, Method, RequestBuilder};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -13,6 +13,11 @@ use tokio::time::sleep;
 
 use crate::config::Settings;
 use crate::error::AdManagerError;
+
+pub const DEFAULT_SOAP_API_VERSION: &str = "v202605";
+const MAX_SOAP_PAYLOAD_XML_BYTES: usize = 256 * 1024;
+const MAX_SOAP_RESPONSE_XML_BYTES: usize = 200 * 1024;
+const SOAP_ENVELOPE_NAMESPACE: &str = concat!("http", "://schemas.xmlsoap.org/soap/envelope/");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -271,6 +276,213 @@ impl RestWriteOperation {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SoapTraffickingOperation {
+    CreateOrders,
+    GetOrdersByStatement,
+    PerformOrderAction,
+    UpdateOrders,
+    CreateLineItems,
+    GetLineItemsByStatement,
+    PerformLineItemAction,
+    UpdateLineItems,
+    CreateCreatives,
+    GetCreativesByStatement,
+    PerformCreativeAction,
+    UpdateCreatives,
+    CreateLineItemCreativeAssociations,
+    GetLineItemCreativeAssociationsByStatement,
+    GetLineItemCreativeAssociationPreviewUrl,
+    GetLineItemCreativeAssociationNativeStylePreviewUrls,
+    PerformLineItemCreativeAssociationAction,
+    UpdateLineItemCreativeAssociations,
+    GetAvailabilityForecast,
+    GetAvailabilityForecastById,
+    GetDeliveryForecast,
+    GetDeliveryForecastByIds,
+    GetTrafficData,
+}
+
+impl SoapTraffickingOperation {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::CreateOrders => "create_orders",
+            Self::GetOrdersByStatement => "get_orders_by_statement",
+            Self::PerformOrderAction => "perform_order_action",
+            Self::UpdateOrders => "update_orders",
+            Self::CreateLineItems => "create_line_items",
+            Self::GetLineItemsByStatement => "get_line_items_by_statement",
+            Self::PerformLineItemAction => "perform_line_item_action",
+            Self::UpdateLineItems => "update_line_items",
+            Self::CreateCreatives => "create_creatives",
+            Self::GetCreativesByStatement => "get_creatives_by_statement",
+            Self::PerformCreativeAction => "perform_creative_action",
+            Self::UpdateCreatives => "update_creatives",
+            Self::CreateLineItemCreativeAssociations => "create_line_item_creative_associations",
+            Self::GetLineItemCreativeAssociationsByStatement => {
+                "get_line_item_creative_associations_by_statement"
+            }
+            Self::GetLineItemCreativeAssociationPreviewUrl => {
+                "get_line_item_creative_association_preview_url"
+            }
+            Self::GetLineItemCreativeAssociationNativeStylePreviewUrls => {
+                "get_line_item_creative_association_native_style_preview_urls"
+            }
+            Self::PerformLineItemCreativeAssociationAction => {
+                "perform_line_item_creative_association_action"
+            }
+            Self::UpdateLineItemCreativeAssociations => "update_line_item_creative_associations",
+            Self::GetAvailabilityForecast => "get_availability_forecast",
+            Self::GetAvailabilityForecastById => "get_availability_forecast_by_id",
+            Self::GetDeliveryForecast => "get_delivery_forecast",
+            Self::GetDeliveryForecastByIds => "get_delivery_forecast_by_ids",
+            Self::GetTrafficData => "get_traffic_data",
+        }
+    }
+
+    pub fn service_name(self) -> &'static str {
+        match self {
+            Self::CreateOrders
+            | Self::GetOrdersByStatement
+            | Self::PerformOrderAction
+            | Self::UpdateOrders => "OrderService",
+            Self::CreateLineItems
+            | Self::GetLineItemsByStatement
+            | Self::PerformLineItemAction
+            | Self::UpdateLineItems => "LineItemService",
+            Self::CreateCreatives
+            | Self::GetCreativesByStatement
+            | Self::PerformCreativeAction
+            | Self::UpdateCreatives => "CreativeService",
+            Self::CreateLineItemCreativeAssociations
+            | Self::GetLineItemCreativeAssociationsByStatement
+            | Self::GetLineItemCreativeAssociationPreviewUrl
+            | Self::GetLineItemCreativeAssociationNativeStylePreviewUrls
+            | Self::PerformLineItemCreativeAssociationAction
+            | Self::UpdateLineItemCreativeAssociations => "LineItemCreativeAssociationService",
+            Self::GetAvailabilityForecast
+            | Self::GetAvailabilityForecastById
+            | Self::GetDeliveryForecast
+            | Self::GetDeliveryForecastByIds
+            | Self::GetTrafficData => "ForecastService",
+        }
+    }
+
+    pub fn soap_method(self) -> &'static str {
+        match self {
+            Self::CreateOrders => "createOrders",
+            Self::GetOrdersByStatement => "getOrdersByStatement",
+            Self::PerformOrderAction => "performOrderAction",
+            Self::UpdateOrders => "updateOrders",
+            Self::CreateLineItems => "createLineItems",
+            Self::GetLineItemsByStatement => "getLineItemsByStatement",
+            Self::PerformLineItemAction => "performLineItemAction",
+            Self::UpdateLineItems => "updateLineItems",
+            Self::CreateCreatives => "createCreatives",
+            Self::GetCreativesByStatement => "getCreativesByStatement",
+            Self::PerformCreativeAction => "performCreativeAction",
+            Self::UpdateCreatives => "updateCreatives",
+            Self::CreateLineItemCreativeAssociations => "createLineItemCreativeAssociations",
+            Self::GetLineItemCreativeAssociationsByStatement => {
+                "getLineItemCreativeAssociationsByStatement"
+            }
+            Self::GetLineItemCreativeAssociationPreviewUrl => "getPreviewUrl",
+            Self::GetLineItemCreativeAssociationNativeStylePreviewUrls => {
+                "getPreviewUrlsForNativeStyles"
+            }
+            Self::PerformLineItemCreativeAssociationAction => {
+                "performLineItemCreativeAssociationAction"
+            }
+            Self::UpdateLineItemCreativeAssociations => "updateLineItemCreativeAssociations",
+            Self::GetAvailabilityForecast => "getAvailabilityForecast",
+            Self::GetAvailabilityForecastById => "getAvailabilityForecastById",
+            Self::GetDeliveryForecast => "getDeliveryForecast",
+            Self::GetDeliveryForecastByIds => "getDeliveryForecastByIds",
+            Self::GetTrafficData => "getTrafficData",
+        }
+    }
+
+    pub fn request_hint(self) -> &'static str {
+        match self {
+            Self::CreateOrders | Self::UpdateOrders => {
+                "payload_xml must contain one or more <orders> elements"
+            }
+            Self::GetOrdersByStatement => {
+                "payload_xml must contain <filterStatement> with a PQL query"
+            }
+            Self::PerformOrderAction => {
+                "payload_xml must contain <orderAction> and <filterStatement>"
+            }
+            Self::CreateLineItems | Self::UpdateLineItems => {
+                "payload_xml must contain one or more <lineItems> elements"
+            }
+            Self::GetLineItemsByStatement => {
+                "payload_xml must contain <filterStatement> with a PQL query"
+            }
+            Self::PerformLineItemAction => {
+                "payload_xml must contain <lineItemAction> and <filterStatement>"
+            }
+            Self::CreateCreatives | Self::UpdateCreatives => {
+                "payload_xml must contain one or more <creatives> elements"
+            }
+            Self::GetCreativesByStatement => {
+                "payload_xml must contain <filterStatement> with a PQL query"
+            }
+            Self::PerformCreativeAction => {
+                "payload_xml must contain <creativeAction> and <filterStatement>"
+            }
+            Self::CreateLineItemCreativeAssociations | Self::UpdateLineItemCreativeAssociations => {
+                "payload_xml must contain one or more <lineItemCreativeAssociations> elements"
+            }
+            Self::GetLineItemCreativeAssociationsByStatement => {
+                "payload_xml must contain <filterStatement> with a PQL query"
+            }
+            Self::GetLineItemCreativeAssociationPreviewUrl => {
+                "payload_xml must contain <lineItemCreativeAssociation> or the documented preview-url request fields"
+            }
+            Self::GetLineItemCreativeAssociationNativeStylePreviewUrls => {
+                "payload_xml must contain the documented native-style preview request fields"
+            }
+            Self::PerformLineItemCreativeAssociationAction => {
+                "payload_xml must contain <lineItemCreativeAssociationAction> and <filterStatement>"
+            }
+            Self::GetAvailabilityForecast => {
+                "payload_xml must contain <lineItem> and optional <forecastOptions>"
+            }
+            Self::GetAvailabilityForecastById => {
+                "payload_xml must contain <lineItemId> and optional <forecastOptions>"
+            }
+            Self::GetDeliveryForecast => {
+                "payload_xml must contain one or more <lineItems> and optional <forecastOptions>"
+            }
+            Self::GetDeliveryForecastByIds => {
+                "payload_xml must contain one or more <lineItemIds> and optional <forecastOptions>"
+            }
+            Self::GetTrafficData => {
+                "payload_xml must contain <lineItem> and optional <forecastOptions>"
+            }
+        }
+    }
+
+    pub fn is_mutating(self) -> bool {
+        !matches!(
+            self,
+            Self::GetOrdersByStatement
+                | Self::GetLineItemsByStatement
+                | Self::GetCreativesByStatement
+                | Self::GetLineItemCreativeAssociationsByStatement
+                | Self::GetLineItemCreativeAssociationPreviewUrl
+                | Self::GetLineItemCreativeAssociationNativeStylePreviewUrls
+                | Self::GetAvailabilityForecast
+                | Self::GetAvailabilityForecastById
+                | Self::GetDeliveryForecast
+                | Self::GetDeliveryForecastByIds
+                | Self::GetTrafficData
+        )
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct RestWritePlan {
     pub resource: RestWriteResource,
@@ -293,6 +505,34 @@ pub struct RestWriteApplyResult {
     pub readback_error: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct SoapTraffickingPlan {
+    pub operation: SoapTraffickingOperation,
+    pub network_code: String,
+    pub api_version: String,
+    pub service: &'static str,
+    pub method: &'static str,
+    pub endpoint: String,
+    pub namespace: String,
+    pub payload_xml: String,
+    pub envelope_xml: String,
+    pub target: String,
+    pub mutating: bool,
+    pub destructive: bool,
+    pub send_adjacent: bool,
+    pub request_hint: &'static str,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SoapTraffickingApplyResult {
+    pub upstream_status: u16,
+    pub upstream_response_xml: String,
+    pub response_truncated: bool,
+    pub request_id: Option<String>,
+    pub response_time: Option<String>,
+    pub soap_fault: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 enum UpstreamAuthMode {
     Adc,
@@ -313,6 +553,7 @@ pub struct AdManagerClient {
     token_provider: Arc<OnceCell<Arc<dyn TokenProvider>>>,
     scope: Arc<str>,
     api_base_url: Arc<str>,
+    soap_base_url: Arc<str>,
     quota_project: Option<Arc<str>>,
 }
 
@@ -338,6 +579,7 @@ impl AdManagerClient {
             token_provider: Arc::new(OnceCell::new()),
             scope: Arc::from(settings.scope.as_str()),
             api_base_url: Arc::from(settings.api_base_url.as_str()),
+            soap_base_url: Arc::from(settings.soap_base_url.as_str()),
             quota_project,
         }
     }
@@ -611,6 +853,75 @@ impl AdManagerClient {
         })
     }
 
+    pub fn build_soap_trafficking_plan(
+        &self,
+        network_code: &str,
+        api_version: Option<&str>,
+        operation: SoapTraffickingOperation,
+        payload_xml: &str,
+    ) -> Result<SoapTraffickingPlan, AdManagerError> {
+        let network_code = validate_network_code(network_code)?;
+        let api_version = validate_soap_api_version(api_version)?;
+        let payload_xml = validate_soap_payload_xml(payload_xml)?;
+        let service = operation.service_name();
+        let method = operation.soap_method();
+        let namespace = soap_namespace(&api_version);
+        let endpoint = soap_service_url(&self.soap_base_url, &api_version, service)?;
+        let envelope_xml = build_soap_envelope(&namespace, &network_code, method, &payload_xml);
+        let impact = classify_soap_impact(operation, &payload_xml);
+        let target = format!("{service}.{method}");
+
+        Ok(SoapTraffickingPlan {
+            operation,
+            network_code,
+            api_version,
+            service,
+            method,
+            endpoint,
+            namespace,
+            payload_xml,
+            envelope_xml,
+            target,
+            mutating: impact.mutating,
+            destructive: impact.destructive,
+            send_adjacent: impact.send_adjacent,
+            request_hint: operation.request_hint(),
+        })
+    }
+
+    pub async fn execute_soap_trafficking_plan(
+        &self,
+        plan: &SoapTraffickingPlan,
+    ) -> Result<SoapTraffickingApplyResult, AdManagerError> {
+        let token = self.access_token().await?;
+        let mut request = self
+            .http
+            .request(Method::POST, plan.endpoint.as_str())
+            .bearer_auth(token)
+            .header(CONTENT_TYPE, "text/xml; charset=utf-8")
+            .header("SOAPAction", "")
+            .body(plan.envelope_xml.clone());
+        if let Some(quota_project) = &self.quota_project {
+            request = request.header("x-goog-user-project", quota_project.as_ref());
+        }
+
+        let (upstream_status, response_xml) = self.send_xml(request).await?;
+        let (upstream_response_xml, response_truncated) = clip_xml_response(response_xml);
+        let request_id = extract_xml_tag(&upstream_response_xml, "requestId");
+        let response_time = extract_xml_tag(&upstream_response_xml, "responseTime");
+        let soap_fault = extract_xml_tag(&upstream_response_xml, "faultstring")
+            .or_else(|| extract_xml_tag(&upstream_response_xml, "Fault"));
+
+        Ok(SoapTraffickingApplyResult {
+            upstream_status,
+            upstream_response_xml,
+            response_truncated,
+            request_id,
+            response_time,
+            soap_fault,
+        })
+    }
+
     async fn get_json(
         &self,
         relative_or_absolute_path: &str,
@@ -674,6 +985,13 @@ impl AdManagerClient {
         }
 
         Ok(serde_json::from_slice(&bytes)?)
+    }
+
+    async fn send_xml(&self, request: RequestBuilder) -> Result<(u16, String), AdManagerError> {
+        let response = request.send().await?;
+        let status = response.status();
+        let text = response.text().await?;
+        Ok((status.as_u16(), text))
     }
 
     async fn token_provider(&self) -> Result<Arc<dyn TokenProvider>, AdManagerError> {
@@ -848,6 +1166,293 @@ fn validate_rest_write_body(
     Ok(())
 }
 
+fn validate_soap_api_version(value: Option<&str>) -> Result<String, AdManagerError> {
+    let version = value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(DEFAULT_SOAP_API_VERSION);
+    if !version.starts_with('v')
+        || version.len() != 7
+        || !version[1..].chars().all(|ch| ch.is_ascii_digit())
+    {
+        return Err(AdManagerError::invalid(
+            "api_version",
+            "must look like v202605",
+        ));
+    }
+    Ok(version.to_string())
+}
+
+fn validate_soap_payload_xml(value: &str) -> Result<String, AdManagerError> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(AdManagerError::invalid(
+            "payload_xml",
+            "must contain the inner XML for the selected SOAP operation",
+        ));
+    }
+    if trimmed.len() > MAX_SOAP_PAYLOAD_XML_BYTES {
+        return Err(AdManagerError::invalid(
+            "payload_xml",
+            format!("must be at most {MAX_SOAP_PAYLOAD_XML_BYTES} bytes"),
+        ));
+    }
+
+    let lower = trimmed.to_ascii_lowercase();
+    let compact: String = lower
+        .chars()
+        .filter(|ch| !matches!(ch, '_' | '-' | ':' | ' ' | '\t' | '\n' | '\r'))
+        .collect();
+    for disallowed in [
+        "<?xml",
+        "<!doctype",
+        "<!entity",
+        "<soap",
+        "</soap",
+        ":envelope",
+        "requestheader",
+        "authorization:",
+        "bearer ",
+        "access_token",
+        "refresh_token",
+        "client_secret",
+        "private_key",
+    ] {
+        if lower.contains(disallowed) {
+            return Err(AdManagerError::invalid(
+                "payload_xml",
+                format!(
+                    "must be an operation payload fragment only and must not contain `{disallowed}`"
+                ),
+            ));
+        }
+    }
+    for (marker, label) in [
+        ("authorization", "authorization"),
+        ("bearer", "bearer token"),
+        ("accesstoken", "access token"),
+        ("refreshtoken", "refresh token"),
+        ("clientsecret", "client secret"),
+        ("privatekey", "private key"),
+    ] {
+        if compact.contains(marker) {
+            return Err(AdManagerError::invalid(
+                "payload_xml",
+                format!(
+                    "must be an operation payload fragment only and must not contain `{label}`"
+                ),
+            ));
+        }
+    }
+
+    Ok(trimmed.to_string())
+}
+
+fn soap_namespace(api_version: &str) -> String {
+    format!("https://www.google.com/apis/ads/publisher/{api_version}")
+}
+
+fn soap_service_url(
+    base_url: &str,
+    api_version: &str,
+    service: &str,
+) -> Result<String, AdManagerError> {
+    let base = base_url.trim();
+    if !base.starts_with("https://") {
+        return Err(AdManagerError::invalid(
+            "soap_base_url",
+            "must start with https://",
+        ));
+    }
+    if service.is_empty()
+        || !service.ends_with("Service")
+        || !service.chars().all(|ch| ch.is_ascii_alphanumeric())
+    {
+        return Err(AdManagerError::invalid(
+            "service",
+            "must be an allowlisted Ad Manager SOAP service name",
+        ));
+    }
+    Ok(format!(
+        "{}/{}/{}",
+        base.trim_end_matches('/'),
+        api_version,
+        service
+    ))
+}
+
+fn build_soap_envelope(
+    namespace: &str,
+    network_code: &str,
+    method: &str,
+    payload_xml: &str,
+) -> String {
+    let application_name = format!("google-ad-manager-mcp/{}", env!("CARGO_PKG_VERSION"));
+    format!(
+        r#"<soapenv:Envelope xmlns:soapenv="{soap_envelope_namespace}" xmlns:gam="{namespace}">
+  <soapenv:Header>
+    <gam:RequestHeader>
+      <gam:networkCode>{network_code}</gam:networkCode>
+      <gam:applicationName>{application_name}</gam:applicationName>
+    </gam:RequestHeader>
+  </soapenv:Header>
+  <soapenv:Body>
+    <{method} xmlns="{namespace}">
+{payload_xml}
+    </{method}>
+  </soapenv:Body>
+</soapenv:Envelope>"#,
+        soap_envelope_namespace = SOAP_ENVELOPE_NAMESPACE,
+        namespace = escape_xml_text(namespace),
+        network_code = escape_xml_text(network_code),
+        application_name = escape_xml_text(&application_name),
+        method = method,
+        payload_xml = indent_xml_fragment(payload_xml, 6),
+    )
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SoapImpact {
+    mutating: bool,
+    destructive: bool,
+    send_adjacent: bool,
+}
+
+fn classify_soap_impact(operation: SoapTraffickingOperation, payload_xml: &str) -> SoapImpact {
+    let mutating = operation.is_mutating();
+    if !mutating {
+        return SoapImpact {
+            mutating: false,
+            destructive: false,
+            send_adjacent: false,
+        };
+    }
+
+    let lower = payload_xml.to_ascii_lowercase();
+    let destructive = matches!(
+        operation,
+        SoapTraffickingOperation::PerformOrderAction
+            | SoapTraffickingOperation::PerformLineItemAction
+            | SoapTraffickingOperation::PerformCreativeAction
+            | SoapTraffickingOperation::PerformLineItemCreativeAssociationAction
+    ) && [
+        "delete",
+        "archive",
+        "unarchive",
+        "pause",
+        "disapprove",
+        "retract",
+        "release",
+        "deactivate",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle));
+
+    let send_adjacent = !destructive
+        && matches!(
+            operation,
+            SoapTraffickingOperation::CreateOrders
+                | SoapTraffickingOperation::UpdateOrders
+                | SoapTraffickingOperation::PerformOrderAction
+                | SoapTraffickingOperation::CreateLineItems
+                | SoapTraffickingOperation::UpdateLineItems
+                | SoapTraffickingOperation::PerformLineItemAction
+                | SoapTraffickingOperation::CreateLineItemCreativeAssociations
+                | SoapTraffickingOperation::UpdateLineItemCreativeAssociations
+                | SoapTraffickingOperation::PerformLineItemCreativeAssociationAction
+        );
+
+    SoapImpact {
+        mutating,
+        destructive,
+        send_adjacent,
+    }
+}
+
+fn indent_xml_fragment(value: &str, spaces: usize) -> String {
+    let prefix = " ".repeat(spaces);
+    value
+        .lines()
+        .map(|line| {
+            if line.trim().is_empty() {
+                String::new()
+            } else {
+                format!("{prefix}{}", line.trim_end())
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn escape_xml_text(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&apos;"),
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
+}
+
+fn clip_xml_response(value: String) -> (String, bool) {
+    if value.len() <= MAX_SOAP_RESPONSE_XML_BYTES {
+        return (value, false);
+    }
+    let mut limit = MAX_SOAP_RESPONSE_XML_BYTES;
+    while limit > 0 && !value.is_char_boundary(limit) {
+        limit -= 1;
+    }
+    let mut clipped = value;
+    clipped.truncate(limit);
+    clipped.push_str("...");
+    (clipped, true)
+}
+
+pub(crate) fn soap_error_message(result: &SoapTraffickingApplyResult) -> String {
+    if let Some(fault) = result
+        .soap_fault
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return clip_message(fault.to_string());
+    }
+    let trimmed = result.upstream_response_xml.trim();
+    if trimmed.is_empty() {
+        "no upstream SOAP response body".to_string()
+    } else {
+        clip_message(trimmed.to_string())
+    }
+}
+
+fn extract_xml_tag(value: &str, tag: &str) -> Option<String> {
+    for prefix in ["", "gam:", "soapenv:", "soap:"] {
+        let full_tag = format!("{prefix}{tag}");
+        let open = format!("<{full_tag}");
+        let close = format!("</{prefix}{tag}>");
+        for (start, _) in value.match_indices(&open) {
+            let after_tag = &value[start + open.len()..];
+            let starts_with_tag_close = after_tag.starts_with('>');
+            let starts_with_space = after_tag.chars().next().is_some_and(char::is_whitespace);
+            if !(starts_with_tag_close || starts_with_space) {
+                continue;
+            }
+            if let Some(open_end) = after_tag.find('>') {
+                let content_start = start + open.len() + open_end + 1;
+                if let Some(end) = value[content_start..].find(&close) {
+                    return Some(value[content_start..content_start + end].trim().to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
 fn validate_numeric_identifier(field: &'static str, value: &str) -> Result<String, AdManagerError> {
     let trimmed = value.trim();
     if trimmed.is_empty() || !trimmed.chars().all(|ch| ch.is_ascii_digit()) {
@@ -906,8 +1511,10 @@ fn clip_message(message: String) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        AdManagerClient, CatalogCollection, RestWriteOperation, RestWriteResource,
-        validate_operation_name, validate_report_result_name, validate_rest_write_body,
+        AdManagerClient, CatalogCollection, MAX_SOAP_RESPONSE_XML_BYTES, RestWriteOperation,
+        RestWriteResource, SOAP_ENVELOPE_NAMESPACE, SoapTraffickingOperation, classify_soap_impact,
+        clip_xml_response, extract_xml_tag, validate_operation_name, validate_report_result_name,
+        validate_rest_write_body, validate_soap_payload_xml,
     };
     use crate::Settings;
     use serde_json::json;
@@ -1012,5 +1619,108 @@ mod tests {
                 "{bad_name} should be rejected"
             );
         }
+    }
+
+    #[test]
+    fn builds_soap_trafficking_envelope_and_endpoint() {
+        let client = AdManagerClient::from_settings(&Settings::default());
+        let plan = client
+            .build_soap_trafficking_plan(
+                "1234567",
+                None,
+                SoapTraffickingOperation::GetLineItemsByStatement,
+                r#"<filterStatement><query>WHERE id = 42</query></filterStatement>"#,
+            )
+            .expect("soap plan");
+
+        assert_eq!(plan.api_version, "v202605");
+        assert_eq!(plan.service, "LineItemService");
+        assert_eq!(plan.method, "getLineItemsByStatement");
+        assert_eq!(
+            plan.endpoint,
+            "https://ads.google.com/apis/ads/publisher/v202605/LineItemService"
+        );
+        assert!(plan.envelope_xml.contains("<gam:RequestHeader>"));
+        assert!(
+            plan.envelope_xml
+                .contains("<gam:networkCode>1234567</gam:networkCode>")
+        );
+        assert!(plan.envelope_xml.contains(
+            r#"<getLineItemsByStatement xmlns="https://www.google.com/apis/ads/publisher/v202605">"#
+        ));
+        assert!(!plan.mutating);
+    }
+
+    #[test]
+    fn soap_payload_guard_rejects_envelopes_headers_and_credentials() {
+        for bad in [
+            "<?xml version=\"1.0\"?><x/>",
+            "<soapenv:Envelope></soapenv:Envelope>",
+            "<RequestHeader><networkCode>123</networkCode></RequestHeader>",
+            "<filterStatement>Authorization: Bearer secret</filterStatement>",
+            "<authorization>Bearer secret</authorization>",
+            "<accessToken>secret</accessToken>",
+            "<refreshToken>secret</refreshToken>",
+            "<clientSecret>secret</clientSecret>",
+            "<privateKey>secret</privateKey>",
+            "<!DOCTYPE x [<!ENTITY y SYSTEM \"file:///etc/passwd\">]>",
+        ] {
+            assert!(
+                validate_soap_payload_xml(bad).is_err(),
+                "{bad} should be rejected"
+            );
+        }
+        assert!(
+            validate_soap_payload_xml(
+                r#"<filterStatement><query>WHERE status = 'ACTIVE'</query></filterStatement>"#
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn soap_impact_classifies_read_send_adjacent_and_destructive() {
+        let read = classify_soap_impact(
+            SoapTraffickingOperation::GetAvailabilityForecast,
+            "<lineItemId>1</lineItemId>",
+        );
+        assert!(!read.mutating);
+        assert!(!read.send_adjacent);
+
+        let create_line_item =
+            classify_soap_impact(SoapTraffickingOperation::CreateLineItems, "<lineItems/>");
+        assert!(create_line_item.mutating);
+        assert!(create_line_item.send_adjacent);
+        assert!(!create_line_item.destructive);
+
+        let pause = classify_soap_impact(
+            SoapTraffickingOperation::PerformLineItemAction,
+            r#"<lineItemAction xsi:type="PauseLineItems"/><filterStatement/>"#,
+        );
+        assert!(pause.destructive);
+    }
+
+    #[test]
+    fn clip_xml_response_respects_utf8_boundaries() {
+        let oversized = "A".repeat(MAX_SOAP_RESPONSE_XML_BYTES - 1) + "€tail";
+        let (clipped, truncated) = clip_xml_response(oversized);
+        assert!(truncated);
+        assert!(clipped.ends_with("..."));
+        assert!(clipped.is_char_boundary(clipped.len()));
+    }
+
+    #[test]
+    fn extract_xml_tag_handles_attributes() {
+        let xml = format!(
+            r#"<soapenv:Fault xmlns:soapenv="{SOAP_ENVELOPE_NAMESPACE}"><faultstring xml:lang="en">boom</faultstring></soapenv:Fault>"#
+        );
+        assert_eq!(
+            extract_xml_tag(&xml, "faultstring").as_deref(),
+            Some("boom")
+        );
+        assert_eq!(
+            extract_xml_tag(&xml, "Fault").as_deref(),
+            Some(r#"<faultstring xml:lang="en">boom</faultstring>"#)
+        );
     }
 }

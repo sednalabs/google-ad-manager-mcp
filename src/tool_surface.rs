@@ -63,7 +63,7 @@ pub(crate) fn build_tool_inventory() -> Result<ToolInventory, ToolInventoryError
         cap(
             "gam_trafficking_tool_matrix",
             "trafficking",
-            "Describe REST-supported Ad Manager write tools and SOAP-only trafficking gaps.",
+            "Describe REST-supported Ad Manager write tools, SOAP trafficking operations, and remaining ergonomics gaps.",
             [
                 "google",
                 "ad-manager",
@@ -102,6 +102,37 @@ pub(crate) fn build_tool_inventory() -> Result<ToolInventory, ToolInventoryError
                 "mutation",
                 "operator",
                 "confirmation",
+            ],
+        )
+        .with_read_only(false)
+        .with_risk_posture(GuardedActionPosture::guarded_apply()),
+        cap(
+            "gam_soap_trafficking_plan",
+            "trafficking",
+            "Create a dry-run plan and confirmation token for an allowlisted Ad Manager SOAP trafficking or forecast operation.",
+            [
+                "google",
+                "ad-manager",
+                "soap",
+                "trafficking",
+                "orders",
+                "line-items",
+                "forecast",
+            ],
+        )
+        .with_risk_posture(GuardedActionPosture::preview()),
+        cap(
+            "gam_soap_trafficking_apply",
+            "trafficking",
+            "Run an allowlisted Ad Manager SOAP trafficking or forecast operation after scope, runtime, and confirmation gates.",
+            [
+                "google",
+                "ad-manager",
+                "soap",
+                "trafficking",
+                "apply",
+                "line-items",
+                "creative",
             ],
         )
         .with_read_only(false)
@@ -234,6 +265,26 @@ mod tests {
             results
                 .iter()
                 .any(|result| result.name == "gam_rest_write_plan")
+        );
+    }
+
+    #[test]
+    fn inventory_search_finds_soap_trafficking_tool() {
+        let inventory = build_tool_inventory().expect("inventory");
+        let results = inventory.search(
+            &ToolSearchFilter {
+                query: Some("soap line item forecast trafficking".to_string()),
+                group: Some("trafficking".to_string()),
+                read_only: None,
+                limit: Some(10),
+            },
+            ToolOperation::List,
+            &ToolInventoryPolicy::strict(),
+        );
+        assert!(
+            results
+                .iter()
+                .any(|result| result.name == "gam_soap_trafficking_plan")
         );
     }
 }

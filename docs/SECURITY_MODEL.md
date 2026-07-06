@@ -5,8 +5,8 @@
 - Public repository
 - Read tools and write previews are enabled by default
 - Live write apply is disabled by default
-- Official Google Ad Manager API (Beta) only
-- No generic HTTP proxy
+- Official Google Ad Manager REST beta and SOAP APIs only
+- No generic HTTP or SOAP proxy
 - No ambient write or approval surfaces
 - No credential material in tool output
 - Bounded local scratchpad analysis only
@@ -36,14 +36,17 @@ whether a low-cost access check succeeded. They must not return:
 The server intentionally does not expose:
 
 - arbitrary Google REST calls
+- arbitrary Google SOAP calls
 - raw OAuth token exchange helpers
 - unallowlisted generic entity creation or patch methods
 - default live mutations
 - bulk export or file-write surfaces
 
-The missing order, line-item, creative, line-item creative association, and
-forecast apply tools are intentional REST beta boundaries, not hidden generic
-proxy paths. They require a SOAP-capable follow-up layer before live use.
+Order, line-item, creative, line-item creative association, preview URL, and
+forecast SOAP operations are exposed only through a typed allowlist. Callers
+provide the inner operation XML fragment; the server owns the envelope,
+request header, endpoint, OAuth bearer header, confirmation token, and runtime
+gates.
 
 ## Write safety
 
@@ -62,10 +65,25 @@ The write surface uses a preview/apply contract:
 - apply requires `reason`, `expected_impact`, and `rollback_note`
 - create and patch operations attempt post-apply readback through the returned
   or target resource name
+- `gam_soap_trafficking_plan` builds a SOAP envelope without calling upstream
+- `gam_soap_trafficking_apply` requires the exact confirmation token returned
+  by the matching SOAP plan
+- every live SOAP call requires the manage scope because the legacy SOAP API
+  does not accept the newer Ad Manager read-only scope
+- mutating SOAP calls also require write mode enabled, expected impact, and a
+  rollback note
+- SOAP payload fragments may not include envelopes, request headers, XML
+  declarations, DTD/entity constructs, bearer tokens, refresh tokens, client
+  secrets, or private keys
 
 Batch operations return the upstream response and explicit verification
 guidance. Operators should follow with read/list tools or scratchpad evidence
 when the upstream batch response does not include a directly readable resource.
+
+SOAP apply returns bounded raw XML plus request metadata when Google includes
+it. Operators should follow mutating SOAP calls with a get-by-statement,
+forecast, report, or scratchpad evidence check appropriate to the trafficking
+change.
 
 ## Scratchpad safety
 

@@ -4,8 +4,9 @@
 //!
 //! ## Rationale
 //! This server gives MCP clients a compact, public-safe way to inspect Google
-//! Ad Manager networks, inventory, delivery catalog data, saved reports, and
-//! guarded REST write previews without exposing a generic API proxy.
+//! Ad Manager networks, inventory, delivery catalog data, saved reports,
+//! guarded REST write previews, and guarded SOAP trafficking calls without
+//! exposing a generic API proxy.
 //!
 //! ## Security Boundaries
 //! * Upstream Google credentials are used only for Ad Manager API calls.
@@ -29,8 +30,9 @@ mod tool_surface;
 mod tools;
 
 pub use client::{
-    AdManagerClient, AuthSource, CatalogCollection, CompletedReportRun, RestWriteApplyResult,
-    RestWriteOperation, RestWritePlan, RestWriteResource,
+    AdManagerClient, AuthSource, CatalogCollection, CompletedReportRun, DEFAULT_SOAP_API_VERSION,
+    RestWriteApplyResult, RestWriteOperation, RestWritePlan, RestWriteResource,
+    SoapTraffickingApplyResult, SoapTraffickingOperation, SoapTraffickingPlan,
 };
 pub use config::{Cli, CliCommand, DEFAULT_READONLY_SCOPE, MANAGE_SCOPE, Settings};
 pub use error::AdManagerError;
@@ -144,7 +146,7 @@ impl ServerHandler for AdManagerServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_instructions(
-                "Google Ad Manager MCP for networks, inventory, delivery catalog, saved reports, and guarded REST write previews.",
+                "Google Ad Manager MCP for networks, inventory, delivery catalog, saved reports, guarded REST write previews, and guarded SOAP trafficking.",
             )
     }
 }

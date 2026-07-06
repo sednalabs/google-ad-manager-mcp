@@ -1,8 +1,9 @@
 # google-ad-manager-mcp
 
 `google-ad-manager-mcp` is a public Rust stdio MCP server for Google Ad
-Manager workflows. It is built on `mcp-toolkit-rs` and the official Google Ad
-Manager API (Beta).
+Manager workflows. It is built on `mcp-toolkit-rs`, the official Google Ad
+Manager API (Beta), and the official Google Ad Manager SOAP API for classic
+trafficking operations that are not yet available through REST.
 
 The current alpha focuses on a small useful surface:
 
@@ -17,11 +18,13 @@ The current alpha focuses on a small useful surface:
 - plan allowlisted REST write operations with no upstream mutation;
 - apply allowlisted REST writes only when an operator explicitly enables write
   mode, uses the manage scope, and passes the matching confirmation token;
+- plan and run allowlisted SOAP trafficking operations for orders, line items,
+  creatives, line-item creative associations, preview URLs, and forecasts;
 - load catalog/report pages into a bounded local DuckDB scratchpad for
   read-only analysis and evidence bundles.
 
-The server intentionally does not expose a generic HTTP proxy, arbitrary query
-surface, or default live write operations.
+The server intentionally does not expose a generic HTTP/SOAP proxy, arbitrary
+query surface, or default live write operations.
 
 ## Documentation
 
@@ -31,6 +34,7 @@ surface, or default live write operations.
 - [Architecture](docs/ARCHITECTURE.md)
 - [Decision 0001: Beta REST read-only first](docs/decision-0001-beta-rest-read-only.md)
 - [Decision 0002: Guarded REST writes before SOAP trafficking](docs/decision-0002-guarded-rest-writes-before-soap-trafficking.md)
+- [Decision 0003: Guarded SOAP trafficking adapter](docs/decision-0003-guarded-soap-trafficking-adapter.md)
 - [Releasing](docs/RELEASING.md)
 
 ## Install
@@ -94,7 +98,10 @@ After auth is proven:
 5. `gam_trafficking_tool_matrix` before planning writes
 6. `gam_rest_write_plan` for dry-run write previews
 7. `gam_rest_write_apply` only in explicit operator mode
-8. `gam_scratchpad_open_session` and the `gam_scratchpad_ingest_*` tools when
+8. `gam_soap_trafficking_plan` for order, line-item, creative, LICA, preview,
+   and forecast SOAP plans
+9. `gam_soap_trafficking_apply` only after reviewing the matching SOAP plan
+10. `gam_scratchpad_open_session` and the `gam_scratchpad_ingest_*` tools when
    you want local SQL analysis or a markdown evidence bundle
 
 ## Authentication
@@ -105,7 +112,7 @@ The server defaults to the read-only Ad Manager scope:
 https://www.googleapis.com/auth/admanager.readonly
 ```
 
-Live write apply requires the manage scope:
+REST live write apply and every live SOAP call require the manage scope:
 
 ```text
 https://www.googleapis.com/auth/admanager
@@ -113,7 +120,9 @@ https://www.googleapis.com/auth/admanager
 
 Dry-run write planning does not require the manage scope because it does not
 call an upstream mutation endpoint. Applying a plan requires both the manage
-scope and `GOOGLE_AD_MANAGER_MCP_WRITE_MODE=enabled`.
+scope and `GOOGLE_AD_MANAGER_MCP_WRITE_MODE=enabled`. SOAP forecast/read calls
+also require the manage scope because the legacy SOAP API does not accept the
+newer Ad Manager read-only scope.
 
 Supported credential sources:
 
@@ -164,6 +173,7 @@ whole credential files in tool responses.
 | `GOOGLE_AD_MANAGER_MCP_SERVICE_ACCOUNT_JSON` | unset | Server-specific raw service-account JSON |
 | `GOOGLE_AD_MANAGER_MCP_HTTP_TIMEOUT_MS` | `15000` | Upstream request timeout |
 | `GOOGLE_AD_MANAGER_MCP_API_BASE_URL` | `https://admanager.googleapis.com/v1` | Upstream API root |
+| `GOOGLE_AD_MANAGER_MCP_SOAP_BASE_URL` | `https://ads.google.com/apis/ads/publisher` | Upstream SOAP API root before version/service |
 | `GOOGLE_AD_MANAGER_MCP_WRITE_MODE` | `preview_only` | Write runtime gate: `read_only`, `preview_only`, or `enabled` |
 | `GOOGLE_AD_MANAGER_MCP_REPORT_POLL_TIMEOUT_MS` | `300000` | Default report wait timeout |
 | `GOOGLE_AD_MANAGER_MCP_REPORT_POLL_INITIAL_INTERVAL_MS` | `5000` | Initial report polling interval |
@@ -189,6 +199,8 @@ whole credential files in tool responses.
 - `gam_trafficking_tool_matrix`
 - `gam_rest_write_plan`
 - `gam_rest_write_apply`
+- `gam_soap_trafficking_plan`
+- `gam_soap_trafficking_apply`
 - `gam_scratchpad_open_session`
 - `gam_scratchpad_close_session`
 - `gam_scratchpad_list_sessions`
@@ -213,14 +225,21 @@ All tool responses use Contract V1 envelopes:
 
 ## Upstream Scope
 
-This server is intentionally shaped around the official Google Ad Manager API
-(Beta) rather than the legacy SOAP API. The public v1 keeps the surface small,
-guarded, and auditable. REST beta currently exposes write methods for
-inventory/supporting resources and saved reports, but not order or line-item
-mutations. `gam_trafficking_tool_matrix` makes that boundary explicit.
+This server is intentionally shaped around curated official Google Ad Manager
+surfaces rather than broad proxy access. REST beta is used for networks,
+catalogs, saved reports, and supported REST writes. The guarded SOAP adapter is
+used for classic trafficking workflows that remain SOAP-shaped:
 
-True order, line item, creative, line-item creative association, and forecast
-apply workflows need a SOAP-capable follow-up adapter before they can be live
-write tools in this Rust server. That adapter should remain a documented,
-operator-gated boundary rather than broadening the existing surface into a
-generic proxy.
+- `OrderService`
+- `LineItemService`
+- `CreativeService`
+- `LineItemCreativeAssociationService`
+- `ForecastService`
+
+`gam_soap_trafficking_plan` wraps an allowlisted SOAP operation around an inner
+payload XML fragment and returns the exact envelope plus a confirmation token.
+`gam_soap_trafficking_apply` runs the reviewed envelope only after scope,
+runtime, and confirmation checks. Mutating SOAP operations require
+`GOOGLE_AD_MANAGER_MCP_WRITE_MODE=enabled`; non-mutating forecast/read SOAP
+operations can run without write mode enabled but still need the manage scope
+required by the legacy SOAP API.

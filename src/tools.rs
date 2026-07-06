@@ -14,7 +14,10 @@ use serde_json::{Map, Value, json};
 use tokio::process::Command;
 
 use crate::auth_ux::{gcloud_adc_login_command, shell_join};
-use crate::client::{CatalogCollection, RestWriteOperation, RestWritePlan, RestWriteResource};
+use crate::client::{
+    CatalogCollection, DEFAULT_SOAP_API_VERSION, RestWriteOperation, RestWritePlan,
+    RestWriteResource, SoapTraffickingOperation, SoapTraffickingPlan,
+};
 use crate::config::GCLOUD_ADC_REQUIRED_SCOPE;
 use crate::contract;
 use crate::{AdManagerError, AdManagerServer, MANAGE_SCOPE, McpError};
@@ -146,9 +149,41 @@ pub struct RestWriteApplyArgs {
     pub confirmation_token: String,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct SoapTraffickingRequestArgs {
+    /// Raw Ad Manager network code, for example 1234567.
+    pub network_code: String,
+    /// SOAP API version, for example v202605. Defaults to the current server default.
+    pub api_version: Option<String>,
+    /// Allowlisted Google Ad Manager SOAP trafficking or forecast operation.
+    pub operation: SoapTraffickingOperation,
+    /// Inner XML payload for the selected operation, excluding SOAP Envelope, Header, and operation wrapper.
+    pub payload_xml: String,
+    /// Human-readable reason for the proposed live SOAP call.
+    pub reason: String,
+    /// Expected advertiser, campaign, delivery, or operational impact. Required for mutating apply.
+    pub expected_impact: Option<String>,
+    /// Rollback or reversal note. Required by policy for mutating apply review.
+    pub rollback_note: Option<String>,
+    /// Optional caller-supplied idempotency or ticket reference.
+    pub idempotency_key: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SoapTraffickingPlanArgs {
+    pub request: SoapTraffickingRequestArgs,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SoapTraffickingApplyArgs {
+    pub request: SoapTraffickingRequestArgs,
+    /// Confirmation token returned by gam_soap_trafficking_plan for this exact request.
+    pub confirmation_token: String,
+}
+
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct TraffickingToolMatrixArgs {
-    /// Include SOAP-only and not-yet-exposed trafficking gaps. Defaults to true.
+    /// Include remaining high-level builder, response-modeling, and readback gaps. Defaults to true.
     pub include_gaps: Option<bool>,
 }
 
@@ -298,7 +333,7 @@ impl AdManagerServer {
         Ok(contract::success(
             json!({
                 "server": "google-ad-manager-mcp",
-                "goal": "Inspect Google Ad Manager networks, inventory, delivery catalog data, saved report results, and guarded REST write plans through an MCP surface.",
+                "goal": "Inspect Google Ad Manager networks, inventory, delivery catalog data, saved report results, guarded REST write plans, and guarded SOAP trafficking through an MCP surface.",
                 "recommended_steps": [
                     "Run google-ad-manager-mcp auth login --headless --quota-project <PROJECT_ID> for the easiest local browser login.",
                     format!("The login helper requests both {GCLOUD_ADC_REQUIRED_SCOPE} and {scope}, matching gcloud ADC requirements."),
@@ -307,8 +342,9 @@ impl AdManagerServer {
                     "Call gam_networks_list to discover the exact network code.",
                     "Call gam_network_catalog_list for ad_units, orders, line_items, or reports.",
                     "Call gam_report_run for saved reports and gam_report_result_rows for large paginated results.",
-                    "Call gam_trafficking_tool_matrix before planning writes so the REST-supported surface and SOAP-only trafficking gaps are explicit.",
+                    "Call gam_trafficking_tool_matrix before planning writes so the REST and SOAP trafficking surfaces are explicit.",
                     "Use gam_rest_write_plan for dry-run write plans; gam_rest_write_apply only works when the server is explicitly started with GOOGLE_AD_MANAGER_MCP_WRITE_MODE=enabled and the manage scope.",
+                    "Use gam_soap_trafficking_plan and gam_soap_trafficking_apply for order, line-item, creative, LICA, and forecast SOAP workflows.",
                     "For local operator apply testing, rerun auth with google-ad-manager-mcp auth login --headless --quota-project <PROJECT_ID> --manage-scope.",
                     "Use gam_scratchpad_open_session plus the gam_scratchpad_ingest_* tools when you need local joins, filtering, evidence bundles, or larger result review."
                 ],
@@ -335,12 +371,14 @@ impl AdManagerServer {
                     "gam_network_catalog_list",
                     "gam_trafficking_tool_matrix",
                     "gam_rest_write_plan",
+                    "gam_soap_trafficking_plan",
                     "gam_scratchpad_open_session"
                 ],
                 "notes": [
                     format!("Current write mode is {}. Live apply is disabled unless this is enabled.", self.settings().write_mode.as_str()),
                     "The official Google Ad Manager Beta REST API is the primary upstream surface.",
-                    "Order and line-item mutations are not exposed by the current REST beta surface and require a future SOAP-capable trafficking layer.",
+                    "The guarded SOAP layer covers production trafficking operations that are not yet available through the REST beta surface.",
+                    "SOAP live calls require the full Ad Manager manage scope, including non-mutating forecast/read calls, because the legacy SOAP API does not accept the newer read-only scope.",
                     "Saved report execution remains asynchronous; gam_report_run can wait for completion and optionally fetch the first page.",
                     "Scratchpad data stays local to the MCP server process and is bounded by session, table, row, memory, SQL-size, and query-time limits."
                 ]
@@ -437,18 +475,19 @@ impl AdManagerServer {
                 "command": command,
                 "shell_command": shell_join(&command),
                 "headless_command": setup_plan.headless_login.argv,
-                "headless_shell_command": setup_plan.headless_login.shell,
+                "headless_shell_command": setup_plan.headless_login.shell.clone(),
                 "client_id_file_command": setup_plan.login_with_client_id_file.argv,
-                "client_id_file_shell_command": setup_plan.login_with_client_id_file.shell,
+                "client_id_file_shell_command": setup_plan.login_with_client_id_file.shell.clone(),
                 "client_id_file_headless_command": setup_plan.headless_login_with_client_id_file.argv,
-                "client_id_file_headless_shell_command": setup_plan.headless_login_with_client_id_file.shell,
+                "client_id_file_headless_shell_command": setup_plan.headless_login_with_client_id_file.shell.clone(),
+                "quota_project_command": setup_plan.quota_project.shell.clone(),
+                "api_enable_command": setup_plan.api_enable.as_ref().map(|command| command.shell.as_str()),
+                "adc_scopes": setup_plan.scopes.clone(),
                 "follow_up_commands": follow_up_commands,
-                "quota_project_command": setup_plan.quota_project.shell,
-                "api_enable_command": setup_plan.api_enable.map(|command| command.shell),
-                "adc_scopes": setup_plan.scopes,
-                "setup_next_steps": setup_plan.next_steps,
+                "setup_next_steps": setup_plan.next_steps.clone(),
                 "scope": requested_scope,
                 "manage_scope": requested_scope == MANAGE_SCOPE,
+                "next_steps": setup_plan.next_steps.clone(),
                 "notes": [
                     "This command writes Application Default Credentials on the machine where it is run.",
                     "No token or client secret is returned by this tool.",
@@ -766,8 +805,162 @@ impl AdManagerServer {
     }
 
     #[tool(
+        name = "gam_soap_trafficking_plan",
+        description = "Create a dry-run plan and confirmation token for an allowlisted Google Ad Manager SOAP trafficking or forecast operation without calling upstream."
+    )]
+    async fn gam_soap_trafficking_plan(
+        &self,
+        Parameters(args): Parameters<SoapTraffickingPlanArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let started = Instant::now();
+        if let Err(err) = self
+            .settings()
+            .write_mode
+            .assert_allowed("gam_soap_trafficking_plan", GuardedActionPosture::preview())
+        {
+            return Ok(contract::error(write_action_disabled(err), started));
+        }
+
+        let plan = match build_soap_trafficking_plan(self, &args.request) {
+            Ok(plan) => plan,
+            Err(err) => return Ok(contract::error(err, started)),
+        };
+        let (plan_id, confirmation_token, fingerprint) =
+            match guarded_soap_identifiers(&args.request, &plan) {
+                Ok(value) => value,
+                Err(err) => return Ok(contract::error(err, started)),
+            };
+        let warnings = soap_trafficking_plan_warnings(
+            self.settings().write_mode,
+            self.client().scope(),
+            &args.request,
+            &plan,
+        );
+        let preview = GuardedActionPreview::new(
+            plan_id,
+            self.settings().write_mode,
+            GuardedActionPosture::preview(),
+            json!({
+                "request": args.request,
+                "soap_request": soap_trafficking_plan_to_json(&plan),
+                "confirmation_token": confirmation_token,
+                "fingerprint": fingerprint,
+                "warnings": warnings,
+                "next_step": "Review the SOAP envelope and operation impact. To run it, use credentials with https://www.googleapis.com/auth/admanager and call gam_soap_trafficking_apply with this exact request and confirmation_token. Mutating operations also require GOOGLE_AD_MANAGER_MCP_WRITE_MODE=enabled.",
+            }),
+            json!({
+                "mutation_performed": false,
+                "upstream_called": false,
+                "soap_default_api_version": DEFAULT_SOAP_API_VERSION,
+                "required_soap_scope": MANAGE_SCOPE,
+                "policy": provider_safety_contract_json(),
+            }),
+        );
+        Ok(contract::success(json!(preview), started))
+    }
+
+    #[tool(
+        name = "gam_soap_trafficking_apply",
+        description = "Run an allowlisted Google Ad Manager SOAP trafficking or forecast operation after scope, runtime, and confirmation-token gates."
+    )]
+    async fn gam_soap_trafficking_apply(
+        &self,
+        Parameters(args): Parameters<SoapTraffickingApplyArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let started = Instant::now();
+        let plan = match build_soap_trafficking_plan(self, &args.request) {
+            Ok(plan) => plan,
+            Err(err) => return Ok(contract::error(err, started)),
+        };
+        let apply_posture = soap_posture_for_plan(&plan);
+        if let Err(err) = self
+            .settings()
+            .write_mode
+            .assert_allowed("gam_soap_trafficking_apply", apply_posture)
+        {
+            return Ok(contract::error(write_action_disabled(err), started));
+        }
+        if !scope_allows_write(self.client().scope()) {
+            return Ok(contract::error(
+                AdManagerError::WriteScopeRequired {
+                    scope: self.client().scope().to_string(),
+                },
+                started,
+            ));
+        }
+        if plan.mutating
+            && let Err(err) = validate_soap_apply_context(&args.request)
+        {
+            return Ok(contract::error(err, started));
+        }
+
+        let (plan_id, expected_token, fingerprint) =
+            match guarded_soap_identifiers(&args.request, &plan) {
+                Ok(value) => value,
+                Err(err) => return Ok(contract::error(err, started)),
+            };
+        if args.confirmation_token.trim() != expected_token {
+            return Ok(contract::error(
+                AdManagerError::ConfirmationTokenMismatch,
+                started,
+            ));
+        }
+
+        let applied = match self.client().execute_soap_trafficking_plan(&plan).await {
+            Ok(value) => value,
+            Err(err) => return Ok(contract::error(err, started)),
+        };
+        if applied.upstream_status >= 400 {
+            return Ok(contract::error_with_detail(
+                AdManagerError::UpstreamApi {
+                    status: applied.upstream_status,
+                    message: crate::client::soap_error_message(&applied),
+                },
+                json!({
+                    "soap_request": soap_trafficking_plan_to_json(&plan),
+                    "upstream_status": applied.upstream_status,
+                    "upstream_response_xml": applied.upstream_response_xml,
+                    "response_truncated": applied.response_truncated,
+                    "request_id": applied.request_id,
+                    "response_time": applied.response_time,
+                    "soap_fault": applied.soap_fault,
+                }),
+                started,
+            ));
+        }
+        let apply = GuardedActionApply::new(
+            plan_id,
+            self.settings().write_mode,
+            apply_posture,
+            json!({
+                "soap_request": soap_trafficking_plan_to_json(&plan),
+                "upstream_status": applied.upstream_status,
+                "upstream_response_xml": applied.upstream_response_xml,
+                "response_truncated": applied.response_truncated,
+                "request_id": applied.request_id,
+                "response_time": applied.response_time,
+                "soap_fault": applied.soap_fault,
+            }),
+            json!({
+                "mutation_performed": plan.mutating,
+                "upstream_called": true,
+                "fingerprint": fingerprint,
+                "required_soap_scope": MANAGE_SCOPE,
+                "operator_context": {
+                    "reason": args.request.reason,
+                    "expected_impact": args.request.expected_impact,
+                    "rollback_note": args.request.rollback_note,
+                    "idempotency_key": args.request.idempotency_key,
+                },
+                "policy": provider_safety_contract_json(),
+            }),
+        );
+        Ok(contract::success(json!(apply), started))
+    }
+
+    #[tool(
         name = "gam_trafficking_tool_matrix",
-        description = "Describe the current Google Ad Manager write and trafficking surface, including REST-supported writes and SOAP-only gaps."
+        description = "Describe the current Google Ad Manager write and trafficking surface, including REST-supported writes, SOAP trafficking operations, and remaining ergonomics gaps."
     )]
     async fn gam_trafficking_tool_matrix(
         &self,
@@ -786,16 +979,23 @@ impl AdManagerServer {
                     "gam_rest_write_plan",
                     "gam_rest_write_apply"
                 ],
+                "soap_trafficking_tools": [
+                    "gam_soap_trafficking_plan",
+                    "gam_soap_trafficking_apply"
+                ],
                 "rest_beta_supported_resources": rest_supported_resource_matrix(),
+                "soap_trafficking_supported_operations": soap_trafficking_supported_operation_matrix(),
                 "trafficking_gaps": if include_gaps { trafficking_gap_matrix() } else { Value::Null },
+                "remaining_gaps": if include_gaps { trafficking_gap_matrix() } else { Value::Null },
             }),
             json!({
                 "mutation_performed": false,
                 "upstream_called": false,
                 "policy": provider_safety_contract_json(),
                 "notes": [
-                    "Google Ad Manager REST beta currently exposes write methods for inventory/supporting resources and saved reports, but not order or line-item mutations.",
-                    "Order, line item, creative, LICA, and forecast apply paths need a SOAP-capable follow-up layer before they can be live write tools in this Rust server."
+                    "Google Ad Manager REST beta exposes write methods for inventory/supporting resources and saved reports.",
+                    "The guarded SOAP tools cover order, line item, creative, line-item creative association, preview URL, and forecast operations.",
+                    "Live SOAP calls require the Ad Manager manage OAuth scope; mutating SOAP calls also require write mode enabled."
                 ],
             }),
         );
@@ -1205,11 +1405,34 @@ fn build_write_plan(
     )
 }
 
+fn build_soap_trafficking_plan(
+    server: &AdManagerServer,
+    request: &SoapTraffickingRequestArgs,
+) -> Result<SoapTraffickingPlan, AdManagerError> {
+    validate_soap_plan_context(request)?;
+    server.client().build_soap_trafficking_plan(
+        &request.network_code,
+        request.api_version.as_deref(),
+        request.operation,
+        &request.payload_xml,
+    )
+}
+
 fn validate_plan_context(request: &RestWriteRequestArgs) -> Result<(), AdManagerError> {
     if request.reason.trim().is_empty() {
         return Err(AdManagerError::invalid(
             "reason",
             "must explain why the provider write is being planned",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_soap_plan_context(request: &SoapTraffickingRequestArgs) -> Result<(), AdManagerError> {
+    if request.reason.trim().is_empty() {
+        return Err(AdManagerError::invalid(
+            "reason",
+            "must explain why the SOAP operation is being planned",
         ));
     }
     Ok(())
@@ -1243,6 +1466,34 @@ fn validate_apply_context(request: &RestWriteRequestArgs) -> Result<(), AdManage
     Ok(())
 }
 
+fn validate_soap_apply_context(request: &SoapTraffickingRequestArgs) -> Result<(), AdManagerError> {
+    if request
+        .expected_impact
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or_default()
+        .is_empty()
+    {
+        return Err(AdManagerError::invalid(
+            "expected_impact",
+            "is required before applying mutating SOAP trafficking operations",
+        ));
+    }
+    if request
+        .rollback_note
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or_default()
+        .is_empty()
+    {
+        return Err(AdManagerError::invalid(
+            "rollback_note",
+            "is required before applying mutating SOAP trafficking operations",
+        ));
+    }
+    Ok(())
+}
+
 fn write_action_disabled(err: GuardedActionError) -> AdManagerError {
     AdManagerError::WriteActionDisabled {
         message: err.to_string(),
@@ -1251,6 +1502,18 @@ fn write_action_disabled(err: GuardedActionError) -> AdManagerError {
 
 fn apply_posture_for_plan(plan: &RestWritePlan) -> GuardedActionPosture {
     if plan.destructive {
+        GuardedActionPosture::destructive()
+    } else if plan.send_adjacent {
+        GuardedActionPosture::send_adjacent()
+    } else {
+        GuardedActionPosture::guarded_apply()
+    }
+}
+
+fn soap_posture_for_plan(plan: &SoapTraffickingPlan) -> GuardedActionPosture {
+    if !plan.mutating {
+        GuardedActionPosture::no_mutation_proof()
+    } else if plan.destructive {
         GuardedActionPosture::destructive()
     } else if plan.send_adjacent {
         GuardedActionPosture::send_adjacent()
@@ -1290,6 +1553,32 @@ fn guarded_write_identifiers(
     Ok((plan_id, confirmation_token, fingerprint))
 }
 
+fn guarded_soap_identifiers(
+    request: &SoapTraffickingRequestArgs,
+    plan: &SoapTraffickingPlan,
+) -> Result<(String, String, String), AdManagerError> {
+    let target = format!(
+        "{}:{}:{}",
+        request.operation.as_str(),
+        plan.api_version,
+        plan.target
+    );
+    let seed = GuardedActionPlanSeed::new("gam_soap_trafficking", &request.network_code, &target)
+        .map_err(|err| AdManagerError::invalid("plan_seed", err.to_string()))?;
+    let fingerprint_input = json!({
+        "request": request,
+        "endpoint": plan.endpoint,
+        "namespace": plan.namespace,
+        "service": plan.service,
+        "method": plan.method,
+        "target": plan.target,
+    });
+    let fingerprint = stable_fingerprint(&fingerprint_input.to_string());
+    let plan_id = format!("{}.{}", seed.stable_plan_id(), fingerprint);
+    let confirmation_token = format!("confirm-gam-soap-{fingerprint}");
+    Ok((plan_id, confirmation_token, fingerprint))
+}
+
 fn stable_fingerprint(input: &str) -> String {
     let mut hash: u64 = 0xcbf29ce484222325;
     for byte in input.as_bytes() {
@@ -1313,6 +1602,25 @@ fn rest_write_plan_to_json(plan: &RestWritePlan) -> Value {
         "destructive": plan.destructive,
         "send_adjacent": plan.send_adjacent,
         "request_hint": plan.operation.request_hint(),
+    })
+}
+
+fn soap_trafficking_plan_to_json(plan: &SoapTraffickingPlan) -> Value {
+    json!({
+        "operation": plan.operation.as_str(),
+        "network_code": plan.network_code,
+        "api_version": plan.api_version,
+        "service": plan.service,
+        "method": plan.method,
+        "endpoint": plan.endpoint,
+        "namespace": plan.namespace,
+        "payload_xml": plan.payload_xml,
+        "envelope_xml": plan.envelope_xml,
+        "target": plan.target,
+        "mutating": plan.mutating,
+        "destructive": plan.destructive,
+        "send_adjacent": plan.send_adjacent,
+        "request_hint": plan.request_hint,
     })
 }
 
@@ -1366,6 +1674,58 @@ fn write_plan_warnings(
     warnings
 }
 
+fn soap_trafficking_plan_warnings(
+    write_mode: GuardedActionRuntimeMode,
+    scope: &str,
+    request: &SoapTraffickingRequestArgs,
+    plan: &SoapTraffickingPlan,
+) -> Vec<String> {
+    let mut warnings = Vec::new();
+    if plan.mutating && write_mode != GuardedActionRuntimeMode::Enabled {
+        warnings.push(format!(
+            "Mutating SOAP apply is disabled while GOOGLE_AD_MANAGER_MCP_WRITE_MODE is {}.",
+            write_mode.as_str()
+        ));
+    }
+    if !scope_allows_write(scope) {
+        warnings.push(format!(
+            "SOAP live calls require the Google Ad Manager manage scope: {MANAGE_SCOPE}. The legacy SOAP API does not accept the Ad Manager read-only scope."
+        ));
+    }
+    if plan.mutating
+        && request
+            .expected_impact
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or_default()
+            .is_empty()
+    {
+        warnings.push("Mutating SOAP apply requires expected_impact to be set.".to_string());
+    }
+    if plan.mutating
+        && request
+            .rollback_note
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or_default()
+            .is_empty()
+    {
+        warnings.push("Mutating SOAP apply requires rollback_note to be set.".to_string());
+    }
+    if plan.destructive {
+        warnings.push(
+            "This SOAP operation is classified as destructive from the operation payload; review the action and PQL filter carefully."
+                .to_string(),
+        );
+    } else if plan.send_adjacent {
+        warnings.push(
+            "This SOAP operation is adjacent to delivery, approval, reservation, or creative association behavior."
+                .to_string(),
+        );
+    }
+    warnings
+}
+
 fn provider_safety_contract_json() -> Value {
     json!({
         "defaults": {
@@ -1385,7 +1745,8 @@ fn provider_safety_contract_json() -> Value {
         "never_default": [
             "live mutation",
             "production campaign launch",
-            "implicit order or line-item trafficking"
+            "implicit order or line-item trafficking",
+            "generic SOAP proxying"
         ]
     })
 }
@@ -1412,31 +1773,72 @@ fn rest_supported_resource_matrix() -> Value {
     ])
 }
 
+fn soap_trafficking_supported_operation_matrix() -> Value {
+    json!([
+        {
+            "service": "OrderService",
+            "operations": ["create_orders", "get_orders_by_statement", "perform_order_action", "update_orders"],
+            "mutating_operations": ["create_orders", "perform_order_action", "update_orders"]
+        },
+        {
+            "service": "LineItemService",
+            "operations": ["create_line_items", "get_line_items_by_statement", "perform_line_item_action", "update_line_items"],
+            "mutating_operations": ["create_line_items", "perform_line_item_action", "update_line_items"]
+        },
+        {
+            "service": "CreativeService",
+            "operations": ["create_creatives", "get_creatives_by_statement", "perform_creative_action", "update_creatives"],
+            "mutating_operations": ["create_creatives", "perform_creative_action", "update_creatives"]
+        },
+        {
+            "service": "LineItemCreativeAssociationService",
+            "operations": [
+                "create_line_item_creative_associations",
+                "get_line_item_creative_associations_by_statement",
+                "get_line_item_creative_association_preview_url",
+                "get_line_item_creative_association_native_style_preview_urls",
+                "perform_line_item_creative_association_action",
+                "update_line_item_creative_associations"
+            ],
+            "mutating_operations": [
+                "create_line_item_creative_associations",
+                "perform_line_item_creative_association_action",
+                "update_line_item_creative_associations"
+            ]
+        },
+        {
+            "service": "ForecastService",
+            "operations": [
+                "get_availability_forecast",
+                "get_availability_forecast_by_id",
+                "get_delivery_forecast",
+                "get_delivery_forecast_by_ids",
+                "get_traffic_data"
+            ],
+            "mutating_operations": []
+        }
+    ])
+}
+
 fn trafficking_gap_matrix() -> Value {
     json!([
         {
-            "surface": "orders",
-            "rest_beta": "list/get only",
-            "needed_for": ["create order", "update order", "approve/order lifecycle"],
-            "follow_up": "SOAP-capable order trafficking layer"
+            "surface": "high_level_builders",
+            "status": "not hand-modeled",
+            "impact": "operators must provide the official SOAP payload XML for each typed operation",
+            "follow_up": "add ergonomic builders/templates for common order, line item, creative, LICA, and forecast payloads"
         },
         {
-            "surface": "line_items",
-            "rest_beta": "list/get only",
-            "needed_for": ["create line item", "update line item", "pause/resume/archive", "targeting changes", "budget and schedule changes"],
-            "follow_up": "SOAP-capable LineItemService layer"
+            "surface": "typed_soap_response_models",
+            "status": "raw bounded XML response",
+            "impact": "agents can execute end-to-end but must inspect XML response fields directly",
+            "follow_up": "parse common rval/update result/page response shapes into structured JSON alongside raw XML"
         },
         {
-            "surface": "creatives",
-            "rest_beta": "not exposed in current server/discovery slice",
-            "needed_for": ["create creative", "update creative", "associate creative with line item"],
-            "follow_up": "SOAP-capable creative and LICA layer"
-        },
-        {
-            "surface": "forecasts",
-            "rest_beta": "not exposed as a write/apply method in current server",
-            "needed_for": ["availability checks before apply", "delivery risk proof"],
-            "follow_up": "forecast read/proof layer before live line-item apply"
+            "surface": "post_apply_readback_automation",
+            "status": "manual follow-up operation",
+            "impact": "mutating SOAP apply returns upstream response; operators should run get-by-statement or forecast checks for delivery proof",
+            "follow_up": "support optional readback_request payloads on SOAP apply"
         }
     ])
 }
@@ -1752,9 +2154,25 @@ fn escape_markdown_cell(value: &str) -> String {
 
 fn auth_next_steps(scope: &str, access_checked: bool) -> Vec<String> {
     let setup_plan = ad_manager_provider_auth_config(scope).adc_setup_plan();
+    let suggested_login = if scope == MANAGE_SCOPE {
+        "google-ad-manager-mcp auth login --headless --manage-scope --quota-project <PROJECT_ID>"
+            .to_string()
+    } else if scope == crate::DEFAULT_READONLY_SCOPE {
+        "google-ad-manager-mcp auth login --headless --quota-project <PROJECT_ID>".to_string()
+    } else {
+        format!(
+            "google-ad-manager-mcp --scope {scope} auth login --headless --quota-project <PROJECT_ID>"
+        )
+    };
     let mut steps = vec![
-        format!("Run `{}` if no credential source is configured. This helper requests both {GCLOUD_ADC_REQUIRED_SCOPE} and {scope}.", setup_plan.headless_login.shell),
-        format!("If Google reports a quota-project problem, run `{}` and enable {AD_MANAGER_PROVIDER_API_SERVICE} on that project.", setup_plan.quota_project.shell),
+        format!(
+            "Run `{suggested_login}` if no credential source is configured, or run `{}`. This helper requests both {GCLOUD_ADC_REQUIRED_SCOPE} and {scope}.",
+            setup_plan.headless_login.shell,
+        ),
+        format!(
+            "If Google reports a quota-project problem, run `{}` and enable {AD_MANAGER_PROVIDER_API_SERVICE} on that project.",
+            setup_plan.quota_project.shell
+        ),
         "Restart stdio MCP clients that keep long-lived server child processes after changing credentials or environment.".to_string(),
     ];
     if let Some(command) = setup_plan.api_enable {

@@ -47,6 +47,23 @@ pub fn error(err: AdManagerError, started: Instant) -> CallToolResult {
     }))
 }
 
+pub fn error_with_detail(err: AdManagerError, detail: Value, started: Instant) -> CallToolResult {
+    CallToolResult::structured(json!({
+        "ok": false,
+        "error": {
+            "code": err.code(),
+            "reason": err.reason(),
+            "message": redact_secret_text(&err.to_string()),
+            "category": err.category(),
+            "hint": err.hint(),
+            "detail": redact_secret_value(detail),
+        },
+        "meta": {
+            "elapsed_ms": elapsed_ms(started),
+        }
+    }))
+}
+
 pub fn scratchpad_error(err: ScratchpadError, started: Instant) -> CallToolResult {
     CallToolResult::structured(json!({
         "ok": false,
@@ -77,6 +94,24 @@ pub fn redact_secret_text(input: &str) -> String {
         }
     }
     out
+}
+
+pub fn redact_secret_value(value: Value) -> Value {
+    match value {
+        Value::String(text) => Value::String(redact_secret_text(&text)),
+        Value::Array(values) => Value::Array(
+            values
+                .into_iter()
+                .map(redact_secret_value)
+                .collect::<Vec<_>>(),
+        ),
+        Value::Object(map) => Value::Object(
+            map.into_iter()
+                .map(|(key, value)| (key, redact_secret_value(value)))
+                .collect::<Map<_, _>>(),
+        ),
+        other => other,
+    }
 }
 
 fn elapsed_ms(started: Instant) -> u64 {

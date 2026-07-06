@@ -111,7 +111,7 @@ impl AdManagerError {
                 "The current REST beta API does not expose this trafficking mutation; use the tool matrix to see the SOAP follow-up boundary."
             }
             Self::ConfirmationTokenMismatch => {
-                "Rerun gam_rest_write_plan and copy the returned confirmation_token into gam_rest_write_apply."
+                "Rerun the matching plan tool and copy the returned confirmation_token into the matching apply tool."
             }
             Self::ReportRunTimeout { .. } => {
                 "Retry with a longer timeout or poll later with gam_report_result_rows once the run completes."

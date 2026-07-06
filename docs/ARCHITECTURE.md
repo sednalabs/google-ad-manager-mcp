@@ -19,9 +19,11 @@ surface, not an SDK mirror or generic upstream proxy.
   - ADC quota-project detection and verification reporting
 - `src/client.rs`
   - authenticated Google Ad Manager REST adapter
+  - authenticated Google Ad Manager SOAP envelope and request adapter
   - curated collection routing
   - saved report run and result polling helpers
   - allowlisted REST write planning and execution helpers
+  - allowlisted SOAP trafficking planning and execution helpers
 - `src/error.rs`
   - stable error categories and hints
 - `src/contract.rs`
@@ -40,7 +42,9 @@ surface, not an SDK mirror or generic upstream proxy.
 
 ## Upstream boundary
 
-The public v1 uses only the official Ad Manager Beta REST surface:
+The public v1 uses curated official Ad Manager surfaces:
+
+REST beta:
 
 - `networks.list`
 - `networks/<code>/adUnits.list`
@@ -54,11 +58,20 @@ The public v1 uses only the official Ad Manager Beta REST surface:
   labels, teams, contacts, custom fields, custom targeting keys, applications,
   sites, ad spots, and related batch state actions
 
-No SOAP adapter is included in this release. Current REST beta does not expose
-order or line-item mutations, creative mutations, line-item creative
-associations, or forecast apply workflows. Those should land behind a separate
-SOAP-capable adapter boundary instead of leaking SOAP semantics into the REST
-tool surface.
+SOAP v202605 by default:
+
+- `OrderService`
+- `LineItemService`
+- `CreativeService`
+- `LineItemCreativeAssociationService`
+- `ForecastService`
+
+The SOAP adapter is intentionally typed by operation but thin on object
+modeling. It accepts inner operation XML fragments, wraps them in a
+server-owned SOAP envelope and `RequestHeader`, authenticates with the existing
+Google credential chain, and returns bounded raw XML plus request metadata.
+It does not expose arbitrary SOAP services, arbitrary SOAP methods, caller
+supplied envelopes, caller supplied headers, or bearer-token handling.
 
 ## Tool design
 
@@ -74,15 +87,17 @@ The initial first-class tool set is:
 8. `gam_trafficking_tool_matrix`
 9. `gam_rest_write_plan`
 10. `gam_rest_write_apply`
-11. `gam_scratchpad_open_session`
-12. `gam_scratchpad_close_session`
-13. `gam_scratchpad_list_sessions`
-14. `gam_scratchpad_list_tables`
-15. `gam_scratchpad_drop_table`
-16. `gam_scratchpad_query`
-17. `gam_scratchpad_ingest_network_catalog`
-18. `gam_scratchpad_ingest_report_result_rows`
-19. `gam_scratchpad_export_evidence_bundle`
+11. `gam_soap_trafficking_plan`
+12. `gam_soap_trafficking_apply`
+13. `gam_scratchpad_open_session`
+14. `gam_scratchpad_close_session`
+15. `gam_scratchpad_list_sessions`
+16. `gam_scratchpad_list_tables`
+17. `gam_scratchpad_drop_table`
+18. `gam_scratchpad_query`
+19. `gam_scratchpad_ingest_network_catalog`
+20. `gam_scratchpad_ingest_report_result_rows`
+21. `gam_scratchpad_export_evidence_bundle`
 
 `find_tools` is also exposed for deferred-loading and `tool_search` clients.
 
@@ -101,6 +116,22 @@ typed allowlists rather than exposing arbitrary HTTP. Planning is a no-mutation
 preview; apply requires explicit runtime enablement, the manage OAuth scope, a
 matching confirmation token, operator context, and post-apply readback where the
 upstream response exposes a resource name.
+
+The deliberately grouped SOAP tools are `gam_soap_trafficking_plan` and
+`gam_soap_trafficking_apply`. They cover classic trafficking and forecast
+workflows through an operation enum:
+
+- orders
+- line items
+- creatives
+- line-item creative associations
+- preview URLs
+- forecasts
+
+SOAP plans are no-mutation previews. SOAP apply always requires the full Ad
+Manager manage scope because the legacy SOAP API does not support the newer
+read-only scope. Mutating SOAP apply also requires explicit write-mode
+enablement and operator context.
 
 ## Auth UX
 

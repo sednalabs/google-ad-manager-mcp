@@ -2,7 +2,8 @@
 
 ## Status
 
-Accepted
+Accepted. The SOAP follow-up described here is implemented by
+[Decision 0003](decision-0003-guarded-soap-trafficking-adapter.md).
 
 ## Context
 
@@ -37,8 +38,9 @@ shape, a stable plan id, and a confirmation token. The apply tool requires:
 - expected impact
 - rollback or reversal notes
 
-SOAP-only trafficking workflows stay outside this release and must land behind
-a separate SOAP-capable adapter boundary.
+At the time of this REST-write release, SOAP-only trafficking workflows stayed
+outside the release and were required to land behind a separate SOAP-capable
+adapter boundary. That follow-up is now captured in Decision 0003.
 
 ## Consequences
 
@@ -46,13 +48,14 @@ a separate SOAP-capable adapter boundary.
 
 - Users can plan writes immediately without risking live mutation.
 - Operators get one consistent apply contract instead of many bespoke gates.
-- The tool surface honestly reports REST-supported writes and SOAP-only gaps.
+- The tool surface honestly reports REST-supported writes and SOAP-only gaps
+  until the SOAP adapter lands.
 - Future SOAP work has a documented boundary rather than leaking into REST
   helpers.
 
 ### Trade-offs
 
-- Order and line-item mutation tools are still not live apply tools in this
+- Order and line-item mutation tools are not live apply tools in this REST-only
   release.
 - Generic REST write planning requires users to provide the official REST
   request JSON body for the selected operation.
