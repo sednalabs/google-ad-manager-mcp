@@ -17,6 +17,7 @@ use crate::error::AdManagerError;
 pub const DEFAULT_SOAP_API_VERSION: &str = "v202605";
 const MAX_SOAP_PAYLOAD_XML_BYTES: usize = 256 * 1024;
 const MAX_SOAP_RESPONSE_XML_BYTES: usize = 200 * 1024;
+const SOAP_ENVELOPE_NAMESPACE: &str = concat!("http", "://schemas.xmlsoap.org/soap/envelope/");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -1280,7 +1281,7 @@ fn build_soap_envelope(
 ) -> String {
     let application_name = format!("google-ad-manager-mcp/{}", env!("CARGO_PKG_VERSION"));
     format!(
-        r#"<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:gam="{namespace}">
+        r#"<soapenv:Envelope xmlns:soapenv="{soap_envelope_namespace}" xmlns:gam="{namespace}">
   <soapenv:Header>
     <gam:RequestHeader>
       <gam:networkCode>{network_code}</gam:networkCode>
@@ -1293,6 +1294,7 @@ fn build_soap_envelope(
     </{method}>
   </soapenv:Body>
 </soapenv:Envelope>"#,
+        soap_envelope_namespace = SOAP_ENVELOPE_NAMESPACE,
         namespace = escape_xml_text(namespace),
         network_code = escape_xml_text(network_code),
         application_name = escape_xml_text(&application_name),
@@ -1393,20 +1395,33 @@ fn clip_xml_response(value: String) -> (String, bool) {
     if value.len() <= MAX_SOAP_RESPONSE_XML_BYTES {
         return (value, false);
     }
+    let mut limit = MAX_SOAP_RESPONSE_XML_BYTES;
+    while limit > 0 && !value.is_char_boundary(limit) {
+        limit -= 1;
+    }
     let mut clipped = value;
-    clipped.truncate(MAX_SOAP_RESPONSE_XML_BYTES);
+    clipped.truncate(limit);
     clipped.push_str("...");
     (clipped, true)
 }
 
 fn extract_xml_tag(value: &str, tag: &str) -> Option<String> {
     for prefix in ["", "gam:", "soapenv:", "soap:"] {
-        let open = format!("<{prefix}{tag}>");
+        let full_tag = format!("{prefix}{tag}");
+        let open = format!("<{full_tag}");
         let close = format!("</{prefix}{tag}>");
-        if let Some(start) = value.find(&open) {
-            let content_start = start + open.len();
-            if let Some(end) = value[content_start..].find(&close) {
-                return Some(value[content_start..content_start + end].trim().to_string());
+        for (start, _) in value.match_indices(&open) {
+            let after_tag = &value[start + open.len()..];
+            let starts_with_tag_close = after_tag.starts_with('>');
+            let starts_with_space = after_tag.chars().next().is_some_and(char::is_whitespace);
+            if !(starts_with_tag_close || starts_with_space) {
+                continue;
+            }
+            if let Some(open_end) = after_tag.find('>') {
+                let content_start = start + open.len() + open_end + 1;
+                if let Some(end) = value[content_start..].find(&close) {
+                    return Some(value[content_start..content_start + end].trim().to_string());
+                }
             }
         }
     }
@@ -1652,5 +1667,24 @@ mod tests {
             r#"<lineItemAction xsi:type="PauseLineItems"/><filterStatement/>"#,
         );
         assert!(pause.destructive);
+    }
+
+    #[test]
+    fn clip_xml_response_respects_utf8_boundaries() {
+        let oversized = "A".repeat(MAX_SOAP_RESPONSE_XML_BYTES - 1) + "€tail";
+        let (clipped, truncated) = clip_xml_response(oversized);
+        assert!(truncated);
+        assert!(clipped.ends_with("..."));
+        assert!(clipped.is_char_boundary(clipped.len()));
+    }
+
+    #[test]
+    fn extract_xml_tag_handles_attributes() {
+        let xml = r#"<soapenv:Fault xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"><faultstring xml:lang="en">boom</faultstring></soapenv:Fault>"#;
+        assert_eq!(extract_xml_tag(xml, "faultstring").as_deref(), Some("boom"));
+        assert_eq!(
+            extract_xml_tag(xml, "Fault").as_deref(),
+            Some(r#"<faultstring xml:lang="en">boom</faultstring>"#)
+        );
     }
 }
