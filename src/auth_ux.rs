@@ -3,15 +3,22 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
+use mcp_toolkit_auth::provider_auth::{
+    GoogleProviderAuthConfig, GoogleProviderAuthFailureKind, classify_google_provider_auth_error,
+    format_provider_auth_command, google_adc_quota_project_command,
+};
 use serde::Serialize;
 use tokio::process::Command;
 
 use crate::config::{
-    AuthCommandArgs, AuthDoctorArgs, AuthLoginArgs, AuthStatusCliArgs, AuthSubcommand,
-    GCLOUD_ADC_REQUIRED_SCOPE, Settings, adc_credentials_path,
+    AuthCommandArgs, AuthDoctorArgs, AuthLoginArgs, AuthStatusCliArgs, AuthSubcommand, Settings,
+    adc_credentials_path,
 };
 use crate::contract::redact_secret_text;
 use crate::{AdManagerClient, AuthSource, MANAGE_SCOPE};
+
+const AD_MANAGER_API_NAME: &str = "Google Ad Manager API";
+const AD_MANAGER_API_SERVICE: &str = "admanager.googleapis.com";
 
 pub async fn run_auth_command(settings: &Settings, command: &AuthSubcommand) -> Result<()> {
     match command {
@@ -27,38 +34,16 @@ pub(crate) fn gcloud_adc_login_command(
     client_id_file: Option<&Path>,
     headless: bool,
 ) -> Vec<String> {
-    let mut command = vec![
-        "gcloud".to_string(),
-        "auth".to_string(),
-        "application-default".to_string(),
-        "login".to_string(),
-        format!("--scopes={}", adc_login_scopes(scope).join(",")),
-    ];
-    if headless {
-        command.push("--no-launch-browser".to_string());
-    }
     if let Some(path) = client_id_file {
-        command.push(format!("--client-id-file={}", path.display()));
+        ad_manager_provider_auth_config(scope)
+            .adc_login_command_with_client_id_file(headless, &path.display().to_string())
+    } else {
+        ad_manager_provider_auth_config(scope).adc_login_command(headless)
     }
-    command
 }
 
 pub(crate) fn shell_join(parts: &[String]) -> String {
-    parts
-        .iter()
-        .map(|part| {
-            if !part.is_empty()
-                && part
-                    .chars()
-                    .all(|ch| ch.is_ascii_alphanumeric() || "-_=:/.,+".contains(ch))
-            {
-                part.clone()
-            } else {
-                format!("'{}'", part.replace('\'', "'\"'\"'"))
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
+    format_provider_auth_command(parts)
 }
 
 async fn run_login(settings: &Settings, args: &AuthLoginArgs) -> Result<()> {
@@ -367,30 +352,22 @@ fn yes_no(value: bool) -> &'static str {
 }
 
 fn gcloud_set_quota_project_command(project: &str) -> Vec<String> {
-    vec![
-        "gcloud".to_string(),
-        "auth".to_string(),
-        "application-default".to_string(),
-        "set-quota-project".to_string(),
-        project.to_string(),
-    ]
-}
-
-fn adc_login_scopes(scope: &str) -> Vec<String> {
-    let mut scopes = vec![GCLOUD_ADC_REQUIRED_SCOPE.to_string()];
-    for scope in scope
-        .split([',', ' ', '\n', '\t'])
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        if !scopes.iter().any(|existing| existing == scope) {
-            scopes.push(scope.to_string());
-        }
-    }
-    scopes
+    google_adc_quota_project_command(project)
 }
 
 fn mentions_quota_project(error: &str) -> bool {
+    let diagnostic = classify_google_provider_auth_error(
+        403,
+        error,
+        &ad_manager_provider_auth_config(MANAGE_SCOPE),
+    );
+    if matches!(
+        diagnostic.kind,
+        GoogleProviderAuthFailureKind::MissingQuotaProject
+            | GoogleProviderAuthFailureKind::ApiDisabled
+    ) {
+        return true;
+    }
     let lower = error.to_ascii_lowercase();
     lower.contains("quota project")
         || lower.contains("x-goog-user-project")
@@ -399,10 +376,32 @@ fn mentions_quota_project(error: &str) -> bool {
 }
 
 fn mentions_scope(error: &str) -> bool {
+    let diagnostic = classify_google_provider_auth_error(
+        403,
+        error,
+        &ad_manager_provider_auth_config(MANAGE_SCOPE),
+    );
+    if diagnostic.kind == GoogleProviderAuthFailureKind::MissingScope {
+        return true;
+    }
     let lower = error.to_ascii_lowercase();
     lower.contains("insufficient authentication scopes")
         || lower.contains("insufficientpermission")
         || lower.contains("forbidden")
+}
+
+fn ad_manager_provider_auth_config(scope: &str) -> GoogleProviderAuthConfig {
+    GoogleProviderAuthConfig::new(AD_MANAGER_API_NAME, split_scopes(scope))
+        .with_api_service_name(AD_MANAGER_API_SERVICE)
+}
+
+fn split_scopes(scope: &str) -> Vec<String> {
+    scope
+        .split([',', ' ', '\n', '\t'])
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 #[derive(Debug, Serialize)]
@@ -467,8 +466,8 @@ mod tests {
         assert!(rendered.contains("application-default login"));
         assert!(rendered.contains("cloud-platform"));
         assert!(rendered.contains("admanager.readonly"));
-        assert!(rendered.contains("--no-launch-browser"));
-        assert!(rendered.contains("--client-id-file="));
+        assert!(rendered.contains("--no-browser"));
+        assert!(rendered.contains("--client-id-file"));
         assert!(rendered.contains("/tmp/client id.json"));
     }
 

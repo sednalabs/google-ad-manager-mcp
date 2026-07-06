@@ -3,6 +3,7 @@ use std::time::Instant;
 use mcp_toolkit::rmcp::handler::server::wrapper::Parameters;
 use mcp_toolkit::rmcp::model::CallToolResult;
 use mcp_toolkit::rmcp::{self, tool, tool_router};
+use mcp_toolkit_auth::provider_auth::{GoogleProviderAuthConfig, google_adc_quota_project_command};
 use mcp_toolkit_scratchpad::{
     ScratchpadIngestColumn, ScratchpadIngestMode, ScratchpadQueryProjection, ScratchpadSessionInfo,
     ScratchpadSessionSnapshot, ScratchpadTableInfo, run_scratchpad_blocking,
@@ -22,6 +23,9 @@ use mcp_toolkit_core::guarded_action::{
     GuardedActionPosture, GuardedActionPreview, GuardedActionRuntimeMode,
 };
 use mcp_toolkit_core::tool_inventory::{ToolOperation, ToolSearchFilter, ToolSearchResponse};
+
+const AD_MANAGER_PROVIDER_API_NAME: &str = "Google Ad Manager API";
+const AD_MANAGER_PROVIDER_API_SERVICE: &str = "admanager.googleapis.com";
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct GetStartedArgs {}
@@ -414,6 +418,7 @@ impl AdManagerServer {
         } else {
             self.client().scope()
         };
+        let setup_plan = ad_manager_provider_auth_config(requested_scope).adc_setup_plan();
         let command = gcloud_adc_login_command(
             requested_scope,
             args.client_id_file.as_deref().map(std::path::Path::new),
@@ -425,23 +430,31 @@ impl AdManagerServer {
             .or_else(|| self.settings().quota_project.clone());
         let follow_up_commands = quota_project
             .as_deref()
-            .map(|project| {
-                vec![format!(
-                    "gcloud auth application-default set-quota-project {project}"
-                )]
-            })
+            .map(|project| vec![shell_join(&google_adc_quota_project_command(project))])
             .unwrap_or_default();
         Ok(contract::success(
             json!({
                 "command": command,
                 "shell_command": shell_join(&command),
+                "headless_command": setup_plan.headless_login.argv,
+                "headless_shell_command": setup_plan.headless_login.shell,
+                "client_id_file_command": setup_plan.login_with_client_id_file.argv,
+                "client_id_file_shell_command": setup_plan.login_with_client_id_file.shell,
+                "client_id_file_headless_command": setup_plan.headless_login_with_client_id_file.argv,
+                "client_id_file_headless_shell_command": setup_plan.headless_login_with_client_id_file.shell,
                 "follow_up_commands": follow_up_commands,
+                "quota_project_command": setup_plan.quota_project.shell,
+                "api_enable_command": setup_plan.api_enable.map(|command| command.shell),
+                "adc_scopes": setup_plan.scopes,
+                "setup_next_steps": setup_plan.next_steps,
                 "scope": requested_scope,
                 "manage_scope": requested_scope == MANAGE_SCOPE,
                 "notes": [
                     "This command writes Application Default Credentials on the machine where it is run.",
                     "No token or client secret is returned by this tool.",
                     format!("Use manage_scope=true or --manage-scope when you need write-capable Ad Manager credentials for operator-approved apply."),
+                    "Use the client-id-file command if Google rejects the Ad Manager scope during ADC login.",
+                    "For unattended deployments, prefer service-account or workload identity credentials over local user ADC.",
                 ]
             }),
             started,
@@ -1738,15 +1751,37 @@ fn escape_markdown_cell(value: &str) -> String {
 }
 
 fn auth_next_steps(scope: &str, access_checked: bool) -> Vec<String> {
+    let setup_plan = ad_manager_provider_auth_config(scope).adc_setup_plan();
     let mut steps = vec![
-        format!("Run google-ad-manager-mcp auth login --headless --quota-project <PROJECT_ID> if no credential source is configured. This helper requests both {GCLOUD_ADC_REQUIRED_SCOPE} and {scope}."),
+        format!("Run `{}` if no credential source is configured. This helper requests both {GCLOUD_ADC_REQUIRED_SCOPE} and {scope}.", setup_plan.headless_login.shell),
+        format!("If Google reports a quota-project problem, run `{}` and enable {AD_MANAGER_PROVIDER_API_SERVICE} on that project.", setup_plan.quota_project.shell),
         "Restart stdio MCP clients that keep long-lived server child processes after changing credentials or environment.".to_string(),
     ];
+    if let Some(command) = setup_plan.api_enable {
+        steps.push(format!(
+            "Enable the Google Ad Manager API with `{}` if the quota project has not used it before.",
+            command.shell
+        ));
+    }
     if !access_checked {
         steps.push("Call gam_auth_status with verify_access=true when you are ready to prove Ad Manager access.".to_string());
     }
     steps.push("Call gam_networks_list to discover the exact network code before using gam_network_catalog_list or gam_report_run.".to_string());
     steps
+}
+
+fn ad_manager_provider_auth_config(scope: &str) -> GoogleProviderAuthConfig {
+    GoogleProviderAuthConfig::new(AD_MANAGER_PROVIDER_API_NAME, split_scopes(scope))
+        .with_api_service_name(AD_MANAGER_PROVIDER_API_SERVICE)
+}
+
+fn split_scopes(scope: &str) -> Vec<String> {
+    scope
+        .split([',', ' ', '\n', '\t'])
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 fn credential_material_detected(settings: &crate::Settings) -> bool {
@@ -1767,4 +1802,22 @@ async fn gcloud_version() -> Option<String> {
     String::from_utf8(output.stdout)
         .ok()
         .and_then(|stdout| stdout.lines().next().map(str::trim).map(str::to_string))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::split_scopes;
+
+    #[test]
+    fn split_scopes_accepts_common_delimiters() {
+        assert_eq!(
+            split_scopes("scope.a, scope.b\tscope.c\nscope.d"),
+            vec![
+                "scope.a".to_string(),
+                "scope.b".to_string(),
+                "scope.c".to_string(),
+                "scope.d".to_string(),
+            ]
+        );
+    }
 }

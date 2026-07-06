@@ -34,6 +34,23 @@ When you add a new direct dependency or make a major upgrade, include a short
 PR note that records why the crate is needed, which safer alternatives were
 considered, and how you would roll the change back.
 
+## Auth dependency note
+
+`mcp-toolkit-auth` is a direct dependency because this server delegates Google
+ADC command construction, shell rendering, setup-plan generation, and common
+Google auth error classification to the shared toolkit instead of maintaining
+provider-specific copies.
+
+The toolkit auth stack currently brings in OAuth/browser-login dependencies
+including `reqwest` 0.13 and the platform-verifier WebPKI root bundle. The
+`CDLA-Permissive-2.0` exception for `webpki-root-certs` matches the existing
+exception for `webpki-roots`; keep both package-scoped rather than widening the
+global license allowlist.
+
+Rollback path: remove `mcp-toolkit-auth`, restore local gcloud command and
+diagnostic helpers, regenerate `Cargo.lock`, and keep the MCP auth tool output
+compatible with the documented setup flow.
+
 ## Scratchpad dependency note
 
 `mcp-toolkit-scratchpad` is a direct dependency because this server exposes

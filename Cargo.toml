@@ -14,6 +14,7 @@ anyhow = "1.0.102"
 clap = { version = "4.5.60", features = ["derive", "env"] }
 gcp_auth = "0.12.6"
 mcp-toolkit = { version = "0.1.0", git = "https://github.com/sednalabs/mcp-toolkit-rs", rev = "8f3ffd1c197fe111449e46e06314f690ed1ccfdc", package = "mcp-toolkit", features = ["server-stdio"] }
+mcp-toolkit-auth = { version = "0.1.0", git = "https://github.com/sednalabs/mcp-toolkit-rs", rev = "8f3ffd1c197fe111449e46e06314f690ed1ccfdc", package = "mcp-toolkit-auth" }
 mcp-toolkit-core = { version = "0.1.0", git = "https://github.com/sednalabs/mcp-toolkit-rs", rev = "8f3ffd1c197fe111449e46e06314f690ed1ccfdc", package = "mcp-toolkit-core" }
 mcp-toolkit-observability = { version = "0.1.0", git = "https://github.com/sednalabs/mcp-toolkit-rs", rev = "8f3ffd1c197fe111449e46e06314f690ed1ccfdc", package = "mcp-toolkit-observability", features = ["tracing-bridge"] }
 mcp-toolkit-scratchpad = { version = "0.1.0", git = "https://github.com/sednalabs/mcp-toolkit-rs", rev = "8f3ffd1c197fe111449e46e06314f690ed1ccfdc", package = "mcp-toolkit-scratchpad", features = ["tokio"] }
