@@ -1771,8 +1771,17 @@ fn auth_next_steps(scope: &str, access_checked: bool) -> Vec<String> {
 }
 
 fn ad_manager_provider_auth_config(scope: &str) -> GoogleProviderAuthConfig {
-    GoogleProviderAuthConfig::new(AD_MANAGER_PROVIDER_API_NAME, vec![scope.to_string()])
+    GoogleProviderAuthConfig::new(AD_MANAGER_PROVIDER_API_NAME, split_scopes(scope))
         .with_api_service_name(AD_MANAGER_PROVIDER_API_SERVICE)
+}
+
+fn split_scopes(scope: &str) -> Vec<String> {
+    scope
+        .split([',', ' ', '\n', '\t'])
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 fn credential_material_detected(settings: &crate::Settings) -> bool {
@@ -1793,4 +1802,22 @@ async fn gcloud_version() -> Option<String> {
     String::from_utf8(output.stdout)
         .ok()
         .and_then(|stdout| stdout.lines().next().map(str::trim).map(str::to_string))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::split_scopes;
+
+    #[test]
+    fn split_scopes_accepts_common_delimiters() {
+        assert_eq!(
+            split_scopes("scope.a, scope.b\tscope.c\nscope.d"),
+            vec![
+                "scope.a".to_string(),
+                "scope.b".to_string(),
+                "scope.c".to_string(),
+                "scope.d".to_string(),
+            ]
+        );
+    }
 }
