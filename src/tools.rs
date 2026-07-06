@@ -2188,6 +2188,7 @@ fn split_scopes(scope: &str) -> Vec<String> {
         .map(str::to_string)
         .collect()
 }
+
 fn credential_material_detected(settings: &crate::Settings) -> bool {
     std::env::var_os("GOOGLE_APPLICATION_CREDENTIALS").is_some()
         || settings.service_account_json_path.is_some()
