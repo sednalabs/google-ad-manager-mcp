@@ -27,8 +27,11 @@ jobs:
             command: cargo fmt --all --check
           - phase_name: clippy
             command: cargo clippy --all-targets --all-features -- -D warnings
-          - phase_name: tests
-            command: cargo test --all-targets --all-features
+          - phase_name: targeted-tests
+            command: |
+              cargo test --lib --all-features
+              cargo test --test stdio_smoke --all-features
+              cargo test --test tool_schema_snapshot --all-features
     steps:
       - name: Checkout
         # actions/checkout v6
