@@ -48,6 +48,11 @@ provide the inner operation XML fragment; the server owns the envelope,
 request header, endpoint, OAuth bearer header, confirmation token, and runtime
 gates.
 
+`gam_soap_payload_build` is not a write path and does not call Google. It
+renders a bounded allowlist of common inner SOAP payload fragments from
+validated IDs or safe name fragments, then directs callers to
+`gam_soap_trafficking_plan`.
+
 ## Write safety
 
 The write surface uses a preview/apply contract:
@@ -65,6 +70,8 @@ The write surface uses a preview/apply contract:
 - apply requires `reason`, `expected_impact`, and `rollback_note`
 - create and patch operations attempt post-apply readback through the returned
   or target resource name
+- `gam_soap_payload_build` performs no upstream call and produces only inner
+  payload XML for the guarded SOAP plan/apply tools
 - `gam_soap_trafficking_plan` builds a SOAP envelope without calling upstream
 - `gam_soap_trafficking_apply` requires the exact confirmation token returned
   by the matching SOAP plan

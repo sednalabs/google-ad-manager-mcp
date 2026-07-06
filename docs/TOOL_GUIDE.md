@@ -18,6 +18,7 @@ All tools return Contract V1 envelopes: `ok/data/meta` on success and
 | `gam_trafficking_tool_matrix` | Describe REST-supported writes, SOAP trafficking operations, and remaining ergonomics gaps. |
 | `gam_rest_write_plan` | Create a dry-run plan and confirmation token for an allowlisted REST write. |
 | `gam_rest_write_apply` | Apply an allowlisted REST write after runtime, scope, and confirmation gates. |
+| `gam_soap_payload_build` | Build a safe inner SOAP `payload_xml` fragment for common trafficking templates without calling upstream. |
 | `gam_soap_trafficking_plan` | Create a dry-run plan and confirmation token for an allowlisted SOAP trafficking or forecast operation. |
 | `gam_soap_trafficking_apply` | Run an allowlisted SOAP trafficking or forecast operation after scope, runtime, and confirmation gates. |
 | `gam_scratchpad_open_session` | Open or refresh a bounded local DuckDB scratchpad session. |
@@ -71,8 +72,9 @@ Write and trafficking tools are available as guarded preview/apply pairs:
 1. `gam_trafficking_tool_matrix`
 2. `gam_rest_write_plan`
 3. `gam_rest_write_apply`
-4. `gam_soap_trafficking_plan`
-5. `gam_soap_trafficking_apply`
+4. `gam_soap_payload_build`
+5. `gam_soap_trafficking_plan`
+6. `gam_soap_trafficking_apply`
 
 The default runtime mode is `preview_only`. In that mode, `gam_rest_write_plan`
 can return the exact REST request shape and confirmation token, but
@@ -103,6 +105,26 @@ Classic trafficking remains SOAP-shaped in Google Ad Manager. The SOAP tools
 therefore cover the production trafficking surface through a typed operation
 allowlist instead of pretending those workflows exist in REST.
 
+`gam_soap_payload_build` is a no-upstream-call helper for the most common inner
+SOAP `payload_xml` fragments. It returns the matching SOAP operation, generated
+payload XML, warnings, and the next `gam_soap_trafficking_plan` request shape.
+It is intentionally a template renderer, not a live GAM operation.
+
+Payload templates currently exposed:
+
+- `order_by_id`
+- `line_item_by_id`
+- `line_items_by_order_id`
+- `creatives_by_advertiser_name`
+- `licas_by_line_item_id`
+- `lica_preview_url`
+- `create_lica`
+- `pause_line_item`
+- `resume_line_item`
+- `archive_line_item`
+- `delivery_forecast_by_line_item_ids`
+- `availability_forecast_by_line_item_id`
+
 SOAP operations currently exposed:
 
 - `OrderService`: `create_orders`, `get_orders_by_statement`,
@@ -131,6 +153,19 @@ The SOAP request shape is intentionally thin:
 - review the generated envelope returned by `gam_soap_trafficking_plan`;
 - call `gam_soap_trafficking_apply` with the exact matching confirmation
   token.
+
+Example SOAP payload builder call:
+
+```json
+{
+  "template": "line_items_by_order_id",
+  "values": {
+    "order_id": "123456789"
+  }
+}
+```
+
+The returned `payload_xml` can be copied into `gam_soap_trafficking_plan`.
 
 All live SOAP calls require
 `GOOGLE_AD_MANAGER_MCP_SCOPE=https://www.googleapis.com/auth/admanager`.
