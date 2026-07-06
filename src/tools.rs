@@ -888,10 +888,8 @@ impl AdManagerServer {
                 started,
             ));
         }
-        if plan.mutating {
-            if let Err(err) = validate_soap_apply_context(&args.request) {
-                return Ok(contract::error(err, started));
-            }
+        if plan.mutating && let Err(err) = validate_soap_apply_context(&args.request) {
+            return Ok(contract::error(err, started));
         }
 
         let (plan_id, expected_token, fingerprint) =
