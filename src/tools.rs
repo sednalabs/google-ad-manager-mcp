@@ -2154,12 +2154,25 @@ fn escape_markdown_cell(value: &str) -> String {
 
 fn auth_next_steps(scope: &str, access_checked: bool) -> Vec<String> {
     let setup_plan = ad_manager_provider_auth_config(scope).adc_setup_plan();
+    let suggested_login = if scope == MANAGE_SCOPE {
+        "google-ad-manager-mcp auth login --headless --manage-scope --quota-project <PROJECT_ID>"
+            .to_string()
+    } else if scope == crate::DEFAULT_READONLY_SCOPE {
+        "google-ad-manager-mcp auth login --headless --quota-project <PROJECT_ID>".to_string()
+    } else {
+        format!(
+            "google-ad-manager-mcp --scope {scope} auth login --headless --quota-project <PROJECT_ID>"
+        )
+    };
     let mut steps = vec![
         format!(
-            "Run `google-ad-manager-mcp auth login --headless --quota-project <PROJECT_ID>` if no credential source is configured, or run `{}`. This helper requests both {GCLOUD_ADC_REQUIRED_SCOPE} and {scope}.",
-            setup_plan.headless_login.shell
+            "Run `{suggested_login}` if no credential source is configured, or run `{}`. This helper requests both {GCLOUD_ADC_REQUIRED_SCOPE} and {scope}.",
+            setup_plan.headless_login.shell,
         ),
-        format!("If Google reports a quota-project problem, run `{}` and enable {AD_MANAGER_PROVIDER_API_SERVICE} on that project.", setup_plan.quota_project.shell),
+        format!(
+            "If Google reports a quota-project problem, run `{}` and enable {AD_MANAGER_PROVIDER_API_SERVICE} on that project.",
+            setup_plan.quota_project.shell
+        ),
         "Restart stdio MCP clients that keep long-lived server child processes after changing credentials or environment.".to_string(),
     ];
     if let Some(command) = setup_plan.api_enable {

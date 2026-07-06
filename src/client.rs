@@ -1199,6 +1199,10 @@ fn validate_soap_payload_xml(value: &str) -> Result<String, AdManagerError> {
     }
 
     let lower = trimmed.to_ascii_lowercase();
+    let compact: String = lower
+        .chars()
+        .filter(|ch| !matches!(ch, '_' | '-' | ':' | ' ' | '\t' | '\n' | '\r'))
+        .collect();
     for disallowed in [
         "<?xml",
         "<!doctype",
@@ -1219,6 +1223,23 @@ fn validate_soap_payload_xml(value: &str) -> Result<String, AdManagerError> {
                 "payload_xml",
                 format!(
                     "must be an operation payload fragment only and must not contain `{disallowed}`"
+                ),
+            ));
+        }
+    }
+    for (marker, label) in [
+        ("authorization", "authorization"),
+        ("bearer", "bearer token"),
+        ("accesstoken", "access token"),
+        ("refreshtoken", "refresh token"),
+        ("clientsecret", "client secret"),
+        ("privatekey", "private key"),
+    ] {
+        if compact.contains(marker) {
+            return Err(AdManagerError::invalid(
+                "payload_xml",
+                format!(
+                    "must be an operation payload fragment only and must not contain `{label}`"
                 ),
             ));
         }
@@ -1637,6 +1658,11 @@ mod tests {
             "<soapenv:Envelope></soapenv:Envelope>",
             "<RequestHeader><networkCode>123</networkCode></RequestHeader>",
             "<filterStatement>Authorization: Bearer secret</filterStatement>",
+            "<authorization>Bearer secret</authorization>",
+            "<accessToken>secret</accessToken>",
+            "<refreshToken>secret</refreshToken>",
+            "<clientSecret>secret</clientSecret>",
+            "<privateKey>secret</privateKey>",
             "<!DOCTYPE x [<!ENTITY y SYSTEM \"file:///etc/passwd\">]>",
         ] {
             assert!(
