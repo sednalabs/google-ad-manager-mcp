@@ -1804,16 +1804,16 @@ fn required_safe_name_fragment(
     }
     if trimmed
         .chars()
-        .any(|ch| matches!(ch, '%' | '_' | '\'' | '"' | ';' | '<' | '>' | '\n' | '\r'))
+        .any(|ch| matches!(ch, '%' | '_' | '"' | ';' | '<' | '>' | '\n' | '\r'))
     {
         return Err(AdManagerError::invalid(
             field,
-            "must not contain PQL wildcard, quote, XML, semicolon, or newline characters",
+            "must not contain PQL wildcard, double quote, XML, semicolon, or newline characters",
         ));
     }
     if !trimmed.chars().all(|ch| {
         ch.is_ascii_alphanumeric()
-            || matches!(ch, ' ' | '-' | '/' | '(' | ')' | '.' | ':' | '+' | '&')
+            || matches!(ch, ' ' | '-' | '/' | '(' | ')' | '.' | ':' | '+' | '&' | '\'')
     }) {
         return Err(AdManagerError::invalid(
             field,
