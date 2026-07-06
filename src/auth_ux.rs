@@ -1,5 +1,6 @@
 //! Operator-facing authentication helpers.
 
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
@@ -12,7 +13,8 @@ use tokio::process::Command;
 
 use crate::config::{
     AuthCommandArgs, AuthDoctorArgs, AuthLoginArgs, AuthStatusCliArgs, AuthSubcommand, Settings,
-    adc_credentials_path,
+    adc_credentials_path, conventional_adc_credentials_path, server_adc_credentials_path,
+    server_cloudsdk_config_dir,
 };
 use crate::contract::redact_secret_text;
 use crate::{AdManagerClient, AuthSource, MANAGE_SCOPE};
@@ -49,12 +51,25 @@ pub(crate) fn shell_join(parts: &[String]) -> String {
 async fn run_login(settings: &Settings, args: &AuthLoginArgs) -> Result<()> {
     let scope = selected_login_scope(settings, args.manage_scope);
     let command = gcloud_adc_login_command(&scope, args.client_id_file.as_deref(), args.headless);
+    let cloudsdk_config = require_login_cloudsdk_config(args.shared_adc)?;
     println!("Starting Google Ad Manager login using Application Default Credentials.");
     println!("Scope: {scope}");
-    println!("Command: {}", shell_join(&command));
+    println!(
+        "Credential file: {}",
+        adc_login_target_description(args.shared_adc)
+    );
+    println!(
+        "Command: {}",
+        shell_join_with_cloudsdk_config(&command, cloudsdk_config.as_deref())
+    );
     println!(
         "Tip: ADC login includes the required cloud-platform scope because gcloud requires it for local ADC user credentials."
     );
+    if !args.shared_adc {
+        println!(
+            "Tip: this login uses a Google Ad Manager-specific ADC file so other Google MCPs keep their own tokens and scopes."
+        );
+    }
     println!(
         "Tip: use --quota-project PROJECT_ID so the server can send x-goog-user-project for the project where the Ad Manager API is enabled."
     );
@@ -68,8 +83,16 @@ async fn run_login(settings: &Settings, args: &AuthLoginArgs) -> Result<()> {
         return Ok(());
     }
 
-    let status = Command::new(&command[0])
-        .args(&command[1..])
+    if let Some(dir) = cloudsdk_config.as_deref() {
+        fs::create_dir_all(dir).context("failed to create server-specific gcloud config dir")?;
+    }
+
+    let mut login = Command::new(&command[0]);
+    login.args(&command[1..]);
+    if let Some(dir) = cloudsdk_config.as_deref() {
+        login.env("CLOUDSDK_CONFIG", dir);
+    }
+    let status = login
         .status()
         .await
         .context("failed to run gcloud ADC login")?;
@@ -85,10 +108,14 @@ async fn run_login(settings: &Settings, args: &AuthLoginArgs) -> Result<()> {
         let set_quota_command = gcloud_set_quota_project_command(&quota_project);
         println!(
             "Setting ADC quota project: {}",
-            shell_join(&set_quota_command)
+            shell_join_with_cloudsdk_config(&set_quota_command, cloudsdk_config.as_deref())
         );
-        let status = Command::new(&set_quota_command[0])
-            .args(&set_quota_command[1..])
+        let mut quota = Command::new(&set_quota_command[0]);
+        quota.args(&set_quota_command[1..]);
+        if let Some(dir) = cloudsdk_config.as_deref() {
+            quota.env("CLOUDSDK_CONFIG", dir);
+        }
+        let status = quota
             .status()
             .await
             .context("failed to run gcloud ADC quota-project command")?;
@@ -115,9 +142,19 @@ async fn run_login(settings: &Settings, args: &AuthLoginArgs) -> Result<()> {
 fn print_login_command(settings: &Settings, args: &AuthCommandArgs) -> Result<()> {
     let scope = selected_login_scope(settings, args.manage_scope);
     let command = gcloud_adc_login_command(&scope, args.client_id_file.as_deref(), args.headless);
-    println!("{}", shell_join(&command));
+    let cloudsdk_config = require_login_cloudsdk_config(args.shared_adc)?;
+    println!(
+        "{}",
+        shell_join_with_cloudsdk_config(&command, cloudsdk_config.as_deref())
+    );
     if let Some(project) = settings.quota_project.as_deref() {
-        println!("{}", shell_join(&gcloud_set_quota_project_command(project)));
+        println!(
+            "{}",
+            shell_join_with_cloudsdk_config(
+                &gcloud_set_quota_project_command(project),
+                cloudsdk_config.as_deref(),
+            )
+        );
     }
     Ok(())
 }
@@ -152,7 +189,7 @@ async fn run_doctor(settings: &Settings, args: &AuthDoctorArgs) -> Result<()> {
 
 async fn build_report(settings: &Settings, verify: bool) -> AuthReport {
     let client = AdManagerClient::from_settings(settings);
-    let adc_file = adc_credentials_path().map(|path| AdcFileStatus { path: path.clone() });
+    let adc_file = selected_adc_file_status();
     let quota_project = effective_quota_project(settings);
     let verification = if verify {
         match client.list_networks(Some(1), None).await {
@@ -312,7 +349,12 @@ fn print_human_report(report: &AuthReport) {
         None => println!("gcloud: not available"),
     }
     match &report.adc_file {
-        Some(file) => println!("ADC file: conventional path ({})", file.path.display()),
+        Some(file) => println!(
+            "ADC file: {} {} ({})",
+            file.kind,
+            file.role,
+            file.path.display()
+        ),
         None => println!("ADC file: unknown"),
     }
     println!(
@@ -353,6 +395,71 @@ fn yes_no(value: bool) -> &'static str {
 
 fn gcloud_set_quota_project_command(project: &str) -> Vec<String> {
     google_adc_quota_project_command(project)
+}
+
+fn login_cloudsdk_config_dir(shared_adc: bool) -> Option<PathBuf> {
+    if shared_adc {
+        None
+    } else {
+        server_cloudsdk_config_dir()
+    }
+}
+
+fn require_login_cloudsdk_config(shared_adc: bool) -> Result<Option<PathBuf>> {
+    let cloudsdk_config = login_cloudsdk_config_dir(shared_adc);
+    if !shared_adc && cloudsdk_config.is_none() {
+        return Err(anyhow!(
+            "failed to determine the server-specific gcloud config directory; set HOME/XDG_CONFIG_HOME on Unix or APPDATA on Windows, or pass --shared-adc to intentionally use conventional shared ADC"
+        ));
+    }
+    Ok(cloudsdk_config)
+}
+
+fn adc_login_target_description(shared_adc: bool) -> String {
+    if shared_adc {
+        return conventional_adc_credentials_path()
+            .map(|path| format!("shared gcloud ADC ({})", path.display()))
+            .unwrap_or_else(|| "shared gcloud ADC".to_string());
+    }
+    server_adc_credentials_path()
+        .map(|path| format!("server-specific ADC ({})", path.display()))
+        .unwrap_or_else(|| "server-specific ADC".to_string())
+}
+
+pub(crate) fn shell_join_with_cloudsdk_config(
+    parts: &[String],
+    cloudsdk_config: Option<&Path>,
+) -> String {
+    if let Some(dir) = cloudsdk_config {
+        let assignment = format!(
+            "CLOUDSDK_CONFIG={}",
+            shell_join(&[dir.display().to_string()])
+        );
+        let command = shell_join(parts);
+        if command.is_empty() {
+            assignment
+        } else {
+            format!("{assignment} {command}")
+        }
+    } else {
+        shell_join(parts)
+    }
+}
+
+fn selected_adc_file_status() -> Option<AdcFileStatus> {
+    server_adc_credentials_path()
+        .map(|path| AdcFileStatus {
+            kind: "server-specific",
+            role: "preferred",
+            path,
+        })
+        .or_else(|| {
+            adc_credentials_path().map(|path| AdcFileStatus {
+                kind: "shared",
+                role: "fallback",
+                path,
+            })
+        })
 }
 
 fn mentions_quota_project(error: &str) -> bool {
@@ -429,6 +536,8 @@ struct QuotaProjectStatus {
 
 #[derive(Debug, Serialize)]
 struct AdcFileStatus {
+    kind: &'static str,
+    role: &'static str,
     path: PathBuf,
 }
 
@@ -453,7 +562,7 @@ struct VerificationReport {
 mod tests {
     use std::path::Path;
 
-    use super::{gcloud_adc_login_command, shell_join};
+    use super::{gcloud_adc_login_command, shell_join, shell_join_with_cloudsdk_config};
 
     #[test]
     fn adc_login_command_includes_cloud_platform_and_ad_manager_scope() {
@@ -475,5 +584,17 @@ mod tests {
     fn shell_join_quotes_empty_args() {
         let command = vec!["a".to_string(), String::new(), "b".to_string()];
         assert_eq!(shell_join(&command), "a '' b");
+    }
+
+    #[test]
+    fn shell_join_with_cloudsdk_config_prefixes_login_environment() {
+        let command = gcloud_adc_login_command(
+            "https://www.googleapis.com/auth/admanager.readonly",
+            None,
+            true,
+        );
+        let rendered = shell_join_with_cloudsdk_config(&command, Some(Path::new("/tmp/gam adc")));
+        assert!(rendered.starts_with("CLOUDSDK_CONFIG='/tmp/gam adc' gcloud auth"));
+        assert!(rendered.contains("admanager.readonly"));
     }
 }

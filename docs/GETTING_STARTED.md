@@ -21,6 +21,8 @@ google-ad-manager-mcp auth login --headless --quota-project <PROJECT_ID>
 The helper:
 
 - runs the browser-based Google Application Default Credentials flow;
+- writes a Google-Ad-Manager-specific ADC file by default so other Google MCPs
+  keep their own tokens and scopes;
 - includes the required ADC `cloud-platform` scope and the read-only Ad Manager
   scope;
 - sets the ADC quota project when `--quota-project` is supplied;
@@ -31,26 +33,32 @@ Useful variants:
 ```bash
 google-ad-manager-mcp auth login --quota-project <PROJECT_ID>
 google-ad-manager-mcp auth login --headless --quota-project <PROJECT_ID> --manage-scope
+google-ad-manager-mcp auth login --headless --quota-project <PROJECT_ID> --shared-adc
 google-ad-manager-mcp auth command --headless
 google-ad-manager-mcp auth command --headless --manage-scope
 google-ad-manager-mcp auth status --verify-token
 google-ad-manager-mcp auth doctor --verify-token --json
 ```
 
-If you prefer raw `gcloud`, use both scopes:
+If you prefer raw `gcloud`, set `CLOUDSDK_CONFIG` to the server-specific config
+directory and use both scopes:
 
 ```bash
-gcloud auth application-default login \
+CLOUDSDK_CONFIG="$HOME/.config/google-ad-manager-mcp/gcloud" \
+  gcloud auth application-default login \
   --scopes=https://www.googleapis.com/auth/cloud-platform,https://www.googleapis.com/auth/admanager.readonly
-gcloud auth application-default set-quota-project <PROJECT_ID>
+CLOUDSDK_CONFIG="$HOME/.config/google-ad-manager-mcp/gcloud" \
+  gcloud auth application-default set-quota-project <PROJECT_ID>
 ```
 
 For operator-approved write testing, use the manage scope instead:
 
 ```bash
-gcloud auth application-default login \
+CLOUDSDK_CONFIG="$HOME/.config/google-ad-manager-mcp/gcloud" \
+  gcloud auth application-default login \
   --scopes=https://www.googleapis.com/auth/cloud-platform,https://www.googleapis.com/auth/admanager
-gcloud auth application-default set-quota-project <PROJECT_ID>
+CLOUDSDK_CONFIG="$HOME/.config/google-ad-manager-mcp/gcloud" \
+  gcloud auth application-default set-quota-project <PROJECT_ID>
 ```
 
 Use the manage-scope login for SOAP trafficking and forecasts too. Google
@@ -149,7 +157,7 @@ Check these in order:
 2. The Google principal actually has access to the target Ad Manager network.
 3. If you are using a service account, the network has granted that service
    account user the needed Ad Manager visibility.
-4. If you are using user ADC, the ADC quota project is set and
+4. If you are using user ADC, the server-specific ADC quota project is set and
    `GOOGLE_AD_MANAGER_MCP_QUOTA_PROJECT` is present when the server needs an
    `x-goog-user-project` header.
 5. Restart the MCP client if it keeps a long-lived stdio subprocess.
@@ -157,5 +165,5 @@ Check these in order:
 The server sends `x-goog-user-project` only when
 `GOOGLE_AD_MANAGER_MCP_QUOTA_PROJECT` is set in the MCP server environment.
 `gcloud auth application-default set-quota-project` is still part of the easy
-ADC login path for Google tooling, but the MCP server does not parse local ADC
-credential files to discover it.
+ADC login path for Google tooling. The auth helper applies it to the
+server-specific ADC file by default.

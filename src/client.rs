@@ -1,9 +1,14 @@
 //! Thin authenticated adapter for Google Ad Manager REST APIs.
 
+use std::io::ErrorKind;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gcp_auth::{CustomServiceAccount, TokenProvider};
+use mcp_toolkit_auth::upstream_oauth::{
+    RefreshTokenProvider, UpstreamOAuthError, google_authorized_user_adc_from_file,
+};
 use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderValue, USER_AGENT};
 use reqwest::{Client, Method, RequestBuilder};
 use serde::{Deserialize, Serialize};
@@ -23,6 +28,7 @@ const SOAP_ENVELOPE_NAMESPACE: &str = concat!("http", "://schemas.xmlsoap.org/so
 #[serde(rename_all = "snake_case")]
 pub enum AuthSource {
     GoogleDefaultProviderChain,
+    GoogleAuthorizedUserAdcFileOrDefaultProviderChain,
     ServiceAccountJsonPath,
     ServiceAccountJsonEnv,
 }
@@ -31,6 +37,9 @@ impl AuthSource {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::GoogleDefaultProviderChain => "google_default_provider_chain",
+            Self::GoogleAuthorizedUserAdcFileOrDefaultProviderChain => {
+                "google_authorized_user_adc_file_or_default_provider_chain"
+            }
             Self::ServiceAccountJsonPath => "service_account_json_path",
             Self::ServiceAccountJsonEnv => "service_account_json_env",
         }
@@ -536,6 +545,7 @@ pub struct SoapTraffickingApplyResult {
 #[derive(Debug, Clone)]
 enum UpstreamAuthMode {
     Adc,
+    AuthorizedUserAdcFile(PathBuf),
     ServiceAccountJsonPath(String),
     ServiceAccountJsonEnv(String),
 }
@@ -551,6 +561,7 @@ pub struct AdManagerClient {
     http: Client,
     auth_mode: UpstreamAuthMode,
     token_provider: Arc<OnceCell<Arc<dyn TokenProvider>>>,
+    oauth_token_provider: Arc<OnceCell<Arc<RefreshTokenProvider>>>,
     scope: Arc<str>,
     api_base_url: Arc<str>,
     soap_base_url: Arc<str>,
@@ -577,6 +588,7 @@ impl AdManagerClient {
             http,
             auth_mode: select_auth_mode(settings).expect("auth mode should build"),
             token_provider: Arc::new(OnceCell::new()),
+            oauth_token_provider: Arc::new(OnceCell::new()),
             scope: Arc::from(settings.scope.as_str()),
             api_base_url: Arc::from(settings.api_base_url.as_str()),
             soap_base_url: Arc::from(settings.soap_base_url.as_str()),
@@ -587,6 +599,9 @@ impl AdManagerClient {
     pub fn auth_source(&self) -> AuthSource {
         match &self.auth_mode {
             UpstreamAuthMode::Adc => AuthSource::GoogleDefaultProviderChain,
+            UpstreamAuthMode::AuthorizedUserAdcFile(_) => {
+                AuthSource::GoogleAuthorizedUserAdcFileOrDefaultProviderChain
+            }
             UpstreamAuthMode::ServiceAccountJsonPath(_) => AuthSource::ServiceAccountJsonPath,
             UpstreamAuthMode::ServiceAccountJsonEnv(_) => AuthSource::ServiceAccountJsonEnv,
         }
@@ -1002,6 +1017,10 @@ impl AdManagerClient {
                     UpstreamAuthMode::Adc => gcp_auth::provider()
                         .await
                         .map_err(|err| AdManagerError::AuthBootstrap(err.to_string())),
+                    UpstreamAuthMode::AuthorizedUserAdcFile(_) => Err(AdManagerError::AuthBootstrap(
+                        "authorized-user ADC files are handled by the refresh-token provider"
+                            .to_string(),
+                    )),
                     UpstreamAuthMode::ServiceAccountJsonPath(path) => {
                         let provider: Arc<dyn TokenProvider> =
                             Arc::new(CustomServiceAccount::from_file(path).map_err(|err| {
@@ -1028,7 +1047,52 @@ impl AdManagerClient {
         Ok(provider.clone())
     }
 
+    async fn oauth_token_provider(
+        &self,
+    ) -> Result<Option<Arc<RefreshTokenProvider>>, AdManagerError> {
+        if let Some(provider) = self.oauth_token_provider.get() {
+            return Ok(Some(provider.clone()));
+        }
+
+        let UpstreamAuthMode::AuthorizedUserAdcFile(path) = &self.auth_mode else {
+            return Err(AdManagerError::AuthBootstrap(
+                "authorized-user ADC provider requested for a non-ADC auth mode".to_string(),
+            ));
+        };
+
+        let scopes = vec![self.scope.as_ref().to_string()];
+        let adc = match google_authorized_user_adc_from_file(path, scopes) {
+            Ok(adc) => adc,
+            Err(err) if google_adc_file_missing(&err) => return Ok(None),
+            Err(err) => {
+                return Err(AdManagerError::AuthBootstrap(format!(
+                    "failed to load authorized-user ADC at '{}': {err}",
+                    path.display()
+                )));
+            }
+        };
+        let provider = RefreshTokenProvider::new(adc.into_refresh_config())
+            .map(Arc::new)
+            .map_err(|err| AdManagerError::AuthBootstrap(err.to_string()))?;
+        let _ = self.oauth_token_provider.set(provider.clone());
+        Ok(Some(provider))
+    }
+
     async fn access_token(&self) -> Result<String, AdManagerError> {
+        let preferred_oauth_provider =
+            if matches!(&self.auth_mode, UpstreamAuthMode::AuthorizedUserAdcFile(_)) {
+                self.oauth_token_provider().await?
+            } else {
+                None
+            };
+        if let Some(provider) = preferred_oauth_provider {
+            let token = provider
+                .access_token()
+                .await
+                .map_err(|err| AdManagerError::AuthBootstrap(err.to_string()))?;
+            return Ok(token.expose_secret().to_string());
+        }
+
         let provider = self.token_provider().await?;
         let token = provider
             .token(&[self.scope.as_ref()])
@@ -1059,7 +1123,22 @@ fn select_auth_mode(settings: &Settings) -> Result<UpstreamAuthMode, AdManagerEr
         return Ok(UpstreamAuthMode::ServiceAccountJsonPath(path.to_string()));
     }
 
+    if std::env::var_os("GOOGLE_APPLICATION_CREDENTIALS").is_some() {
+        return Ok(UpstreamAuthMode::Adc);
+    }
+
+    if let Some(path) = crate::config::server_adc_credentials_path() {
+        return Ok(UpstreamAuthMode::AuthorizedUserAdcFile(path));
+    }
+
     Ok(UpstreamAuthMode::Adc)
+}
+
+fn google_adc_file_missing(err: &UpstreamOAuthError) -> bool {
+    matches!(
+        err,
+        UpstreamOAuthError::Io { source, .. } if source.kind() == ErrorKind::NotFound
+    )
 }
 
 fn absolute_api_url(

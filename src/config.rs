@@ -215,6 +215,10 @@ pub struct AuthLoginArgs {
     /// Skip post-login Ad Manager API verification.
     #[arg(long)]
     pub no_verify: bool,
+
+    /// Use the conventional shared gcloud ADC file instead of a server-specific file.
+    #[arg(long)]
+    pub shared_adc: bool,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -230,6 +234,10 @@ pub struct AuthCommandArgs {
     /// Request the write-capable Ad Manager manage scope instead of the configured scope.
     #[arg(long, alias = "write-scope")]
     pub manage_scope: bool,
+
+    /// Print commands for the conventional shared gcloud ADC file.
+    #[arg(long)]
+    pub shared_adc: bool,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -433,6 +441,18 @@ fn parse_write_mode(value: &str) -> Result<GuardedActionRuntimeMode, AdManagerEr
 }
 
 pub fn adc_credentials_path() -> Option<PathBuf> {
+    server_adc_credentials_path().or_else(conventional_adc_credentials_path)
+}
+
+pub fn server_adc_credentials_path() -> Option<PathBuf> {
+    server_cloudsdk_config_dir().map(|path| path.join("application_default_credentials.json"))
+}
+
+pub fn server_cloudsdk_config_dir() -> Option<PathBuf> {
+    config_root().map(|root| root.join("google-ad-manager-mcp").join("gcloud"))
+}
+
+pub fn conventional_adc_credentials_path() -> Option<PathBuf> {
     if let Some(config_dir) = env::var_os("CLOUDSDK_CONFIG").filter(|value| !value.is_empty()) {
         return Some(PathBuf::from(config_dir).join("application_default_credentials.json"));
     }
@@ -455,6 +475,26 @@ pub fn adc_credentials_path() -> Option<PathBuf> {
                     .join(".config")
                     .join("gcloud")
                     .join("application_default_credentials.json")
+            })
+    }
+}
+
+fn config_root() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        env::var_os("APPDATA")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+    }
+    #[cfg(not(windows))]
+    {
+        env::var_os("XDG_CONFIG_HOME")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| {
+                env::var_os("HOME")
+                    .filter(|value| !value.is_empty())
+                    .map(|home| PathBuf::from(home).join(".config"))
             })
     }
 }
