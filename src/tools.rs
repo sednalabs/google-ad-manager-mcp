@@ -888,7 +888,9 @@ impl AdManagerServer {
                 started,
             ));
         }
-        if plan.mutating && let Err(err) = validate_soap_apply_context(&args.request) {
+        if plan.mutating
+            && let Err(err) = validate_soap_apply_context(&args.request)
+        {
             return Ok(contract::error(err, started));
         }
 
