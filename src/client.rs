@@ -1688,9 +1688,9 @@ mod tests {
         let xml = format!(
             r#"<soapenv:Fault xmlns:soapenv="{SOAP_ENVELOPE_NAMESPACE}"><faultstring xml:lang="en">boom</faultstring></soapenv:Fault>"#
         );
-        assert_eq!(extract_xml_tag(xml, "faultstring").as_deref(), Some("boom"));
+        assert_eq!(extract_xml_tag(&xml, "faultstring").as_deref(), Some("boom"));
         assert_eq!(
-            extract_xml_tag(xml, "Fault").as_deref(),
+            extract_xml_tag(&xml, "Fault").as_deref(),
             Some(r#"<faultstring xml:lang="en">boom</faultstring>"#)
         );
     }
