@@ -122,8 +122,10 @@ For REST write planning:
 For SOAP trafficking:
 
 1. `gam_trafficking_tool_matrix`
-2. `gam_soap_trafficking_plan`
-3. `gam_soap_trafficking_apply` with the exact confirmation token from the
+2. `gam_soap_payload_build` when one of the supported templates matches the
+   operation
+3. `gam_soap_trafficking_plan`
+4. `gam_soap_trafficking_apply` with the exact confirmation token from the
    plan
 
 SOAP forecast/read operations can run without write mode enabled, but still

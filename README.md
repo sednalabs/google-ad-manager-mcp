@@ -18,6 +18,8 @@ The current alpha focuses on a small useful surface:
 - plan allowlisted REST write operations with no upstream mutation;
 - apply allowlisted REST writes only when an operator explicitly enables write
   mode, uses the manage scope, and passes the matching confirmation token;
+- build safe inner SOAP `payload_xml` fragments for common trafficking
+  templates without calling upstream;
 - plan and run allowlisted SOAP trafficking operations for orders, line items,
   creatives, line-item creative associations, preview URLs, and forecasts;
 - load catalog/report pages into a bounded local DuckDB scratchpad for
@@ -98,10 +100,11 @@ After auth is proven:
 5. `gam_trafficking_tool_matrix` before planning writes
 6. `gam_rest_write_plan` for dry-run write previews
 7. `gam_rest_write_apply` only in explicit operator mode
-8. `gam_soap_trafficking_plan` for order, line-item, creative, LICA, preview,
+8. `gam_soap_payload_build` to generate common SOAP payload fragments
+9. `gam_soap_trafficking_plan` for order, line-item, creative, LICA, preview,
    and forecast SOAP plans
-9. `gam_soap_trafficking_apply` only after reviewing the matching SOAP plan
-10. `gam_scratchpad_open_session` and the `gam_scratchpad_ingest_*` tools when
+10. `gam_soap_trafficking_apply` only after reviewing the matching SOAP plan
+11. `gam_scratchpad_open_session` and the `gam_scratchpad_ingest_*` tools when
    you want local SQL analysis or a markdown evidence bundle
 
 ## Authentication
@@ -199,6 +202,7 @@ whole credential files in tool responses.
 - `gam_trafficking_tool_matrix`
 - `gam_rest_write_plan`
 - `gam_rest_write_apply`
+- `gam_soap_payload_build`
 - `gam_soap_trafficking_plan`
 - `gam_soap_trafficking_apply`
 - `gam_scratchpad_open_session`

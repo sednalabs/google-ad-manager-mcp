@@ -107,6 +107,21 @@ pub(crate) fn build_tool_inventory() -> Result<ToolInventory, ToolInventoryError
         .with_read_only(false)
         .with_risk_posture(GuardedActionPosture::guarded_apply()),
         cap(
+            "gam_soap_payload_build",
+            "trafficking",
+            "Build a safe inner SOAP payload_xml fragment for common Ad Manager trafficking templates.",
+            [
+                "google",
+                "ad-manager",
+                "soap",
+                "payload",
+                "xml",
+                "template",
+                "builder",
+            ],
+        )
+        .with_risk_posture(GuardedActionPosture::no_mutation_proof()),
+        cap(
             "gam_soap_trafficking_plan",
             "trafficking",
             "Create a dry-run plan and confirmation token for an allowlisted Ad Manager SOAP trafficking or forecast operation.",

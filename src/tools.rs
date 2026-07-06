@@ -181,6 +181,92 @@ pub struct SoapTraffickingApplyArgs {
     pub confirmation_token: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SoapPayloadTemplate {
+    OrderById,
+    LineItemById,
+    LineItemsByOrderId,
+    CreativesByAdvertiserName,
+    LicasByLineItemId,
+    LicaPreviewUrl,
+    CreateLica,
+    PauseLineItem,
+    ResumeLineItem,
+    ArchiveLineItem,
+    DeliveryForecastByLineItemIds,
+    AvailabilityForecastByLineItemId,
+}
+
+impl SoapPayloadTemplate {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::OrderById => "order_by_id",
+            Self::LineItemById => "line_item_by_id",
+            Self::LineItemsByOrderId => "line_items_by_order_id",
+            Self::CreativesByAdvertiserName => "creatives_by_advertiser_name",
+            Self::LicasByLineItemId => "licas_by_line_item_id",
+            Self::LicaPreviewUrl => "lica_preview_url",
+            Self::CreateLica => "create_lica",
+            Self::PauseLineItem => "pause_line_item",
+            Self::ResumeLineItem => "resume_line_item",
+            Self::ArchiveLineItem => "archive_line_item",
+            Self::DeliveryForecastByLineItemIds => "delivery_forecast_by_line_item_ids",
+            Self::AvailabilityForecastByLineItemId => "availability_forecast_by_line_item_id",
+        }
+    }
+
+    fn operation(self) -> SoapTraffickingOperation {
+        match self {
+            Self::OrderById => SoapTraffickingOperation::GetOrdersByStatement,
+            Self::LineItemById | Self::LineItemsByOrderId => {
+                SoapTraffickingOperation::GetLineItemsByStatement
+            }
+            Self::CreativesByAdvertiserName => SoapTraffickingOperation::GetCreativesByStatement,
+            Self::LicasByLineItemId => {
+                SoapTraffickingOperation::GetLineItemCreativeAssociationsByStatement
+            }
+            Self::LicaPreviewUrl => {
+                SoapTraffickingOperation::GetLineItemCreativeAssociationPreviewUrl
+            }
+            Self::CreateLica => SoapTraffickingOperation::CreateLineItemCreativeAssociations,
+            Self::PauseLineItem | Self::ResumeLineItem | Self::ArchiveLineItem => {
+                SoapTraffickingOperation::PerformLineItemAction
+            }
+            Self::DeliveryForecastByLineItemIds => {
+                SoapTraffickingOperation::GetDeliveryForecastByIds
+            }
+            Self::AvailabilityForecastByLineItemId => {
+                SoapTraffickingOperation::GetAvailabilityForecastById
+            }
+        }
+    }
+
+    fn required_values(self) -> &'static [&'static str] {
+        match self {
+            Self::OrderById | Self::LineItemsByOrderId => &["order_id"],
+            Self::LineItemById
+            | Self::LicasByLineItemId
+            | Self::PauseLineItem
+            | Self::ResumeLineItem
+            | Self::ArchiveLineItem
+            | Self::AvailabilityForecastByLineItemId => &["line_item_id"],
+            Self::CreativesByAdvertiserName => &["advertiser_id", "name_contains"],
+            Self::LicaPreviewUrl | Self::CreateLica => &["line_item_id", "creative_id"],
+            Self::DeliveryForecastByLineItemIds => &["line_item_ids"],
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SoapPayloadBuildArgs {
+    /// Safe helper template to render into an inner SOAP payload_xml fragment.
+    pub template: SoapPayloadTemplate,
+    /// Template values such as order_id, line_item_id, creative_id, advertiser_id, name_contains, or line_item_ids.
+    #[serde(default)]
+    pub values: Map<String, Value>,
+}
+
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct TraffickingToolMatrixArgs {
     /// Include remaining high-level builder, response-modeling, and readback gaps. Defaults to true.
@@ -805,6 +891,21 @@ impl AdManagerServer {
     }
 
     #[tool(
+        name = "gam_soap_payload_build",
+        description = "Build a safe inner payload_xml fragment for common Google Ad Manager SOAP trafficking templates without calling upstream."
+    )]
+    async fn gam_soap_payload_build(
+        &self,
+        Parameters(args): Parameters<SoapPayloadBuildArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let started = Instant::now();
+        match build_soap_payload_template(args.template, &args.values) {
+            Ok(built) => Ok(contract::success(built, started)),
+            Err(err) => Ok(contract::error(err, started)),
+        }
+    }
+
+    #[tool(
         name = "gam_soap_trafficking_plan",
         description = "Create a dry-run plan and confirmation token for an allowlisted Google Ad Manager SOAP trafficking or forecast operation without calling upstream."
     )]
@@ -979,6 +1080,7 @@ impl AdManagerServer {
                     "gam_rest_write_plan",
                     "gam_rest_write_apply"
                 ],
+                "soap_payload_builder": "gam_soap_payload_build",
                 "soap_trafficking_tools": [
                     "gam_soap_trafficking_plan",
                     "gam_soap_trafficking_apply"
@@ -1418,6 +1520,109 @@ fn build_soap_trafficking_plan(
     )
 }
 
+fn build_soap_payload_template(
+    template: SoapPayloadTemplate,
+    values: &Map<String, Value>,
+) -> Result<Value, AdManagerError> {
+    let operation = template.operation();
+    let mut warnings = Vec::new();
+    let payload_xml = match template {
+        SoapPayloadTemplate::OrderById => {
+            let order_id = required_id(values, "order_id")?;
+            pql_payload(&format!("WHERE id = {order_id}"))
+        }
+        SoapPayloadTemplate::LineItemById => {
+            let line_item_id = required_id(values, "line_item_id")?;
+            pql_payload(&format!("WHERE id = {line_item_id}"))
+        }
+        SoapPayloadTemplate::LineItemsByOrderId => {
+            let order_id = required_id(values, "order_id")?;
+            pql_payload(&format!("WHERE orderId = {order_id} ORDER BY id ASC"))
+        }
+        SoapPayloadTemplate::CreativesByAdvertiserName => {
+            let advertiser_id = required_id(values, "advertiser_id")?;
+            let name_contains = required_safe_name_fragment(values, "name_contains")?;
+            let pql_name = escape_pql_single_quoted_like_fragment(&name_contains);
+            pql_payload(&format!(
+                "WHERE advertiserId = {advertiser_id} AND name LIKE '%{pql_name}%' ORDER BY id ASC"
+            ))
+        }
+        SoapPayloadTemplate::LicasByLineItemId => {
+            let line_item_id = required_id(values, "line_item_id")?;
+            pql_payload(&format!(
+                "WHERE lineItemId = {line_item_id} ORDER BY creativeId ASC"
+            ))
+        }
+        SoapPayloadTemplate::LicaPreviewUrl => {
+            let line_item_id = required_id(values, "line_item_id")?;
+            let creative_id = required_id(values, "creative_id")?;
+            format!(
+                "<lineItemCreativeAssociation>\n  <lineItemId>{line_item_id}</lineItemId>\n  <creativeId>{creative_id}</creativeId>\n</lineItemCreativeAssociation>"
+            )
+        }
+        SoapPayloadTemplate::CreateLica => {
+            warnings.push(
+                "This payload creates a line-item creative association when applied through gam_soap_trafficking_apply."
+                    .to_string(),
+            );
+            let line_item_id = required_id(values, "line_item_id")?;
+            let creative_id = required_id(values, "creative_id")?;
+            format!(
+                "<lineItemCreativeAssociations>\n  <lineItemId>{line_item_id}</lineItemId>\n  <creativeId>{creative_id}</creativeId>\n</lineItemCreativeAssociations>"
+            )
+        }
+        SoapPayloadTemplate::PauseLineItem => {
+            warnings.push(
+                "This payload pauses delivery for the matching line item when applied.".to_string(),
+            );
+            line_item_action_payload("PauseLineItems", required_id(values, "line_item_id")?)
+        }
+        SoapPayloadTemplate::ResumeLineItem => {
+            warnings.push(
+                "This payload resumes delivery for the matching line item when applied."
+                    .to_string(),
+            );
+            line_item_action_payload("ResumeLineItems", required_id(values, "line_item_id")?)
+        }
+        SoapPayloadTemplate::ArchiveLineItem => {
+            warnings.push(
+                "This payload archives the matching line item when applied; use only with explicit operator approval."
+                    .to_string(),
+            );
+            line_item_action_payload("ArchiveLineItems", required_id(values, "line_item_id")?)
+        }
+        SoapPayloadTemplate::DeliveryForecastByLineItemIds => {
+            let line_item_ids = required_id_list(values, "line_item_ids", 50)?;
+            line_item_ids
+                .into_iter()
+                .map(|line_item_id| format!("<lineItemIds>{line_item_id}</lineItemIds>"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+        SoapPayloadTemplate::AvailabilityForecastByLineItemId => {
+            let line_item_id = required_id(values, "line_item_id")?;
+            format!("<lineItemId>{line_item_id}</lineItemId>")
+        }
+    };
+
+    Ok(json!({
+        "template": template.as_str(),
+        "operation": operation.as_str(),
+        "payload_xml": payload_xml,
+        "warnings": warnings,
+        "required_values": template.required_values(),
+        "next_tool": "gam_soap_trafficking_plan",
+        "next_request_shape": {
+            "network_code": "<network code>",
+            "operation": operation.as_str(),
+            "payload_xml": payload_xml,
+            "reason": "<why this SOAP operation is being planned>"
+        },
+        "mutation_performed": false,
+        "upstream_called": false,
+    }))
+}
+
 fn validate_plan_context(request: &RestWriteRequestArgs) -> Result<(), AdManagerError> {
     if request.reason.trim().is_empty() {
         return Err(AdManagerError::invalid(
@@ -1492,6 +1697,152 @@ fn validate_soap_apply_context(request: &SoapTraffickingRequestArgs) -> Result<(
         ));
     }
     Ok(())
+}
+
+fn pql_payload(query: &str) -> String {
+    format!(
+        "<filterStatement>\n  <query>{}</query>\n</filterStatement>",
+        escape_xml_text(query)
+    )
+}
+
+fn line_item_action_payload(action: &str, line_item_id: u64) -> String {
+    format!(
+        "<lineItemAction xsi:type=\"{action}\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\"/>\n<filterStatement>\n  <query>WHERE id = {line_item_id}</query>\n</filterStatement>"
+    )
+}
+
+fn required_id(values: &Map<String, Value>, field: &'static str) -> Result<u64, AdManagerError> {
+    let value = values.get(field).ok_or_else(|| {
+        AdManagerError::invalid(field, "is required for this SOAP payload template")
+    })?;
+    parse_positive_id(field, value)
+}
+
+fn required_id_list(
+    values: &Map<String, Value>,
+    field: &'static str,
+    max_len: usize,
+) -> Result<Vec<u64>, AdManagerError> {
+    let value = values.get(field).ok_or_else(|| {
+        AdManagerError::invalid(field, "is required for this SOAP payload template")
+    })?;
+    let Value::Array(items) = value else {
+        return Err(AdManagerError::invalid(
+            field,
+            "must be an array of positive numeric IDs",
+        ));
+    };
+    if items.is_empty() {
+        return Err(AdManagerError::invalid(
+            field,
+            "must contain at least one positive numeric ID",
+        ));
+    }
+    if items.len() > max_len {
+        return Err(AdManagerError::invalid(
+            field,
+            format!("must contain at most {max_len} IDs"),
+        ));
+    }
+
+    let mut ids = Vec::with_capacity(items.len());
+    for item in items {
+        let id = parse_positive_id(field, item)?;
+        if ids.contains(&id) {
+            return Err(AdManagerError::invalid(
+                field,
+                format!("must not contain duplicate ID {id}"),
+            ));
+        }
+        ids.push(id);
+    }
+    Ok(ids)
+}
+
+fn parse_positive_id(field: &'static str, value: &Value) -> Result<u64, AdManagerError> {
+    let parsed = match value {
+        Value::Number(number) => number.as_u64(),
+        Value::String(text) => {
+            let trimmed = text.trim();
+            if trimmed.is_empty() || !trimmed.chars().all(|ch| ch.is_ascii_digit()) {
+                None
+            } else {
+                trimmed.parse::<u64>().ok()
+            }
+        }
+        _ => None,
+    };
+    match parsed {
+        Some(id) if id > 0 => Ok(id),
+        _ => Err(AdManagerError::invalid(
+            field,
+            "must be a positive numeric ID",
+        )),
+    }
+}
+
+fn required_safe_name_fragment(
+    values: &Map<String, Value>,
+    field: &'static str,
+) -> Result<String, AdManagerError> {
+    let value = values.get(field).ok_or_else(|| {
+        AdManagerError::invalid(field, "is required for this SOAP payload template")
+    })?;
+    let Some(text) = value.as_str() else {
+        return Err(AdManagerError::invalid(
+            field,
+            "must be a short string without PQL wildcard characters",
+        ));
+    };
+    let trimmed = text.trim();
+    if trimmed.is_empty() || trimmed.len() > 80 {
+        return Err(AdManagerError::invalid(
+            field,
+            "must be between 1 and 80 characters",
+        ));
+    }
+    if trimmed
+        .chars()
+        .any(|ch| matches!(ch, '%' | '_' | '"' | ';' | '<' | '>' | '\n' | '\r'))
+    {
+        return Err(AdManagerError::invalid(
+            field,
+            "must not contain PQL wildcard, double quote, XML, semicolon, or newline characters",
+        ));
+    }
+    if !trimmed.chars().all(|ch| {
+        ch.is_ascii_alphanumeric()
+            || matches!(
+                ch,
+                ' ' | '-' | '/' | '(' | ')' | '.' | ':' | '+' | '&' | '\''
+            )
+    }) {
+        return Err(AdManagerError::invalid(
+            field,
+            "contains unsupported characters for a safe PQL LIKE fragment",
+        ));
+    }
+    Ok(trimmed.to_string())
+}
+
+fn escape_pql_single_quoted_like_fragment(input: &str) -> String {
+    input.replace('\'', "''")
+}
+
+fn escape_xml_text(input: &str) -> String {
+    let mut escaped = String::with_capacity(input.len());
+    for ch in input.chars() {
+        match ch {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&apos;"),
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
 }
 
 fn write_action_disabled(err: GuardedActionError) -> AdManagerError {
@@ -1824,9 +2175,9 @@ fn trafficking_gap_matrix() -> Value {
     json!([
         {
             "surface": "high_level_builders",
-            "status": "not hand-modeled",
-            "impact": "operators must provide the official SOAP payload XML for each typed operation",
-            "follow_up": "add ergonomic builders/templates for common order, line item, creative, LICA, and forecast payloads"
+            "status": "partial payload templates",
+            "impact": "operators can generate common read, LICA, action, and forecast payload_xml fragments; full order, line item, and creative builders are still manual",
+            "follow_up": "add richer typed builders for common order, line item, creative, and forecast payloads after validating real campaign traffic"
         },
         {
             "surface": "typed_soap_response_models",
@@ -2224,7 +2575,11 @@ async fn gcloud_version() -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::split_scopes;
+    use super::*;
+
+    fn values(value: Value) -> Map<String, Value> {
+        value.as_object().expect("object").clone()
+    }
 
     #[test]
     fn split_scopes_accepts_common_delimiters() {
@@ -2237,5 +2592,87 @@ mod tests {
                 "scope.d".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn soap_payload_builder_renders_line_items_by_order_id() {
+        let built = build_soap_payload_template(
+            SoapPayloadTemplate::LineItemsByOrderId,
+            &values(json!({ "order_id": "12345" })),
+        )
+        .expect("payload");
+
+        assert_eq!(built["operation"], "get_line_items_by_statement");
+        assert_eq!(
+            built["payload_xml"],
+            "<filterStatement>\n  <query>WHERE orderId = 12345 ORDER BY id ASC</query>\n</filterStatement>"
+        );
+        assert_eq!(built["next_tool"], "gam_soap_trafficking_plan");
+        assert_eq!(built["mutation_performed"], false);
+        assert_eq!(built["upstream_called"], false);
+    }
+
+    #[test]
+    fn soap_payload_builder_renders_create_lica_with_warning() {
+        let built = build_soap_payload_template(
+            SoapPayloadTemplate::CreateLica,
+            &values(json!({
+                "line_item_id": 12345,
+                "creative_id": "67890"
+            })),
+        )
+        .expect("payload");
+
+        assert_eq!(built["operation"], "create_line_item_creative_associations");
+        assert_eq!(
+            built["payload_xml"],
+            "<lineItemCreativeAssociations>\n  <lineItemId>12345</lineItemId>\n  <creativeId>67890</creativeId>\n</lineItemCreativeAssociations>"
+        );
+        assert!(
+            built["warnings"]
+                .as_array()
+                .expect("warnings")
+                .iter()
+                .any(|warning| warning.as_str().unwrap_or_default().contains("creates"))
+        );
+    }
+
+    #[test]
+    fn soap_payload_builder_rejects_unsafe_like_fragment() {
+        let err = build_soap_payload_template(
+            SoapPayloadTemplate::CreativesByAdvertiserName,
+            &values(json!({
+                "advertiser_id": 12345,
+                "name_contains": "NEXTGEN%' OR id > 0 OR name LIKE '%"
+            })),
+        )
+        .expect_err("unsafe fragment should fail");
+
+        assert!(matches!(
+            err,
+            AdManagerError::InvalidInput {
+                field: "name_contains",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn soap_payload_builder_rejects_duplicate_forecast_ids() {
+        let err = build_soap_payload_template(
+            SoapPayloadTemplate::DeliveryForecastByLineItemIds,
+            &values(json!({
+                "line_item_ids": [12345, "12345"]
+            })),
+        )
+        .expect_err("duplicate ids should fail");
+
+        assert!(matches!(
+            err,
+            AdManagerError::InvalidInput {
+                field: "line_item_ids",
+                ..
+            }
+        ));
     }
 }

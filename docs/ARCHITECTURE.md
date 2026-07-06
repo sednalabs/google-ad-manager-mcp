@@ -33,7 +33,8 @@ surface, not an SDK mirror or generic upstream proxy.
 - `src/tool_surface.rs`
   - `ToolInventory` metadata for `find_tools`
 - `src/tools.rs`
-  - MCP tool argument schemas and implementations
+  - MCP tool argument schemas, SOAP payload template rendering, and
+    implementations
 - `src/lib.rs`
   - server assembly, scratchpad manager setup, and exported tool snapshot
     helpers
@@ -73,6 +74,12 @@ Google credential chain, and returns bounded raw XML plus request metadata.
 It does not expose arbitrary SOAP services, arbitrary SOAP methods, caller
 supplied envelopes, caller supplied headers, or bearer-token handling.
 
+Common SOAP payload fragments are rendered by `gam_soap_payload_build`. That
+helper does not call upstream and does not broaden the SOAP boundary; it only
+turns validated template inputs such as line item IDs, order IDs, creative IDs,
+and safe name fragments into inner `payload_xml` for the allowlisted SOAP
+operations.
+
 ## Tool design
 
 The initial first-class tool set is:
@@ -87,17 +94,18 @@ The initial first-class tool set is:
 8. `gam_trafficking_tool_matrix`
 9. `gam_rest_write_plan`
 10. `gam_rest_write_apply`
-11. `gam_soap_trafficking_plan`
-12. `gam_soap_trafficking_apply`
-13. `gam_scratchpad_open_session`
-14. `gam_scratchpad_close_session`
-15. `gam_scratchpad_list_sessions`
-16. `gam_scratchpad_list_tables`
-17. `gam_scratchpad_drop_table`
-18. `gam_scratchpad_query`
-19. `gam_scratchpad_ingest_network_catalog`
-20. `gam_scratchpad_ingest_report_result_rows`
-21. `gam_scratchpad_export_evidence_bundle`
+11. `gam_soap_payload_build`
+12. `gam_soap_trafficking_plan`
+13. `gam_soap_trafficking_apply`
+14. `gam_scratchpad_open_session`
+15. `gam_scratchpad_close_session`
+16. `gam_scratchpad_list_sessions`
+17. `gam_scratchpad_list_tables`
+18. `gam_scratchpad_drop_table`
+19. `gam_scratchpad_query`
+20. `gam_scratchpad_ingest_network_catalog`
+21. `gam_scratchpad_ingest_report_result_rows`
+22. `gam_scratchpad_export_evidence_bundle`
 
 `find_tools` is also exposed for deferred-loading and `tool_search` clients.
 
@@ -132,6 +140,11 @@ SOAP plans are no-mutation previews. SOAP apply always requires the full Ad
 Manager manage scope because the legacy SOAP API does not support the newer
 read-only scope. Mutating SOAP apply also requires explicit write-mode
 enablement and operator context.
+
+`gam_soap_payload_build` is a no-mutation helper that sits before those tools.
+It renders bounded, validated templates for common read, line-item action,
+LICA, preview, and forecast-by-ID payloads. Full order, line item, and creative
+object construction remains intentionally outside the first helper slice.
 
 ## Auth UX
 
