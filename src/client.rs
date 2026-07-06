@@ -991,19 +991,6 @@ impl AdManagerClient {
         let response = request.send().await?;
         let status = response.status();
         let text = response.text().await?;
-
-        if !status.is_success() {
-            let message = text.trim().to_string();
-            return Err(AdManagerError::UpstreamApi {
-                status: status.as_u16(),
-                message: if message.is_empty() {
-                    "no upstream SOAP response body".to_string()
-                } else {
-                    clip_message(message)
-                },
-            });
-        }
-
         Ok((status.as_u16(), text))
     }
 
@@ -1405,6 +1392,23 @@ fn clip_xml_response(value: String) -> (String, bool) {
     (clipped, true)
 }
 
+pub(crate) fn soap_error_message(result: &SoapTraffickingApplyResult) -> String {
+    if let Some(fault) = result
+        .soap_fault
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return clip_message(fault.to_string());
+    }
+    let trimmed = result.upstream_response_xml.trim();
+    if trimmed.is_empty() {
+        "no upstream SOAP response body".to_string()
+    } else {
+        clip_message(trimmed.to_string())
+    }
+}
+
 fn extract_xml_tag(value: &str, tag: &str) -> Option<String> {
     for prefix in ["", "gam:", "soapenv:", "soap:"] {
         let full_tag = format!("{prefix}{tag}");
@@ -1486,9 +1490,10 @@ fn clip_message(message: String) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        AdManagerClient, CatalogCollection, RestWriteOperation, RestWriteResource,
-        SoapTraffickingOperation, classify_soap_impact, validate_operation_name,
-        validate_report_result_name, validate_rest_write_body, validate_soap_payload_xml,
+        AdManagerClient, CatalogCollection, MAX_SOAP_RESPONSE_XML_BYTES, RestWriteOperation,
+        RestWriteResource, SOAP_ENVELOPE_NAMESPACE, SoapTraffickingOperation, classify_soap_impact,
+        clip_xml_response, extract_xml_tag, validate_operation_name, validate_report_result_name,
+        validate_rest_write_body, validate_soap_payload_xml,
     };
     use crate::Settings;
     use serde_json::json;
@@ -1680,7 +1685,9 @@ mod tests {
 
     #[test]
     fn extract_xml_tag_handles_attributes() {
-        let xml = r#"<soapenv:Fault xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"><faultstring xml:lang="en">boom</faultstring></soapenv:Fault>"#;
+        let xml = format!(
+            r#"<soapenv:Fault xmlns:soapenv="{SOAP_ENVELOPE_NAMESPACE}"><faultstring xml:lang="en">boom</faultstring></soapenv:Fault>"#
+        );
         assert_eq!(extract_xml_tag(xml, "faultstring").as_deref(), Some("boom"));
         assert_eq!(
             extract_xml_tag(xml, "Fault").as_deref(),

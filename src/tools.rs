@@ -910,6 +910,24 @@ impl AdManagerServer {
             Ok(value) => value,
             Err(err) => return Ok(contract::error(err, started)),
         };
+        if applied.upstream_status >= 400 {
+            return Ok(contract::error_with_detail(
+                AdManagerError::UpstreamApi {
+                    status: applied.upstream_status,
+                    message: crate::client::soap_error_message(&applied),
+                },
+                json!({
+                    "soap_request": soap_trafficking_plan_to_json(&plan),
+                    "upstream_status": applied.upstream_status,
+                    "upstream_response_xml": applied.upstream_response_xml,
+                    "response_truncated": applied.response_truncated,
+                    "request_id": applied.request_id,
+                    "response_time": applied.response_time,
+                    "soap_fault": applied.soap_fault,
+                }),
+                started,
+            ));
+        }
         let apply = GuardedActionApply::new(
             plan_id,
             self.settings().write_mode,
@@ -967,6 +985,7 @@ impl AdManagerServer {
                 ],
                 "rest_beta_supported_resources": rest_supported_resource_matrix(),
                 "soap_trafficking_supported_operations": soap_trafficking_supported_operation_matrix(),
+                "trafficking_gaps": if include_gaps { trafficking_gap_matrix() } else { Value::Null },
                 "remaining_gaps": if include_gaps { trafficking_gap_matrix() } else { Value::Null },
             }),
             json!({
