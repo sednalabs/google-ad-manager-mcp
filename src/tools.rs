@@ -1813,7 +1813,10 @@ fn required_safe_name_fragment(
     }
     if !trimmed.chars().all(|ch| {
         ch.is_ascii_alphanumeric()
-            || matches!(ch, ' ' | '-' | '/' | '(' | ')' | '.' | ':' | '+' | '&' | '\'')
+            || matches!(
+                ch,
+                ' ' | '-' | '/' | '(' | ')' | '.' | ':' | '+' | '&' | '\''
+            )
     }) {
         return Err(AdManagerError::invalid(
             field,
