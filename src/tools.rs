@@ -1659,11 +1659,12 @@ fn build_soap_payload_template(
         }
         SoapPayloadTemplate::DeliveryForecastByLineItemIds => {
             let line_item_ids = required_id_list(values, "line_item_ids", 50)?;
-            line_item_ids
+            let line_item_ids_xml = line_item_ids
                 .into_iter()
                 .map(|line_item_id| format!("<lineItemIds>{line_item_id}</lineItemIds>"))
                 .collect::<Vec<_>>()
-                .join("\n")
+                .join("\n");
+            format!("{line_item_ids_xml}\n<forecastOptions />")
         }
         SoapPayloadTemplate::AvailabilityForecastByLineItemId => {
             let line_item_id = required_id(values, "line_item_id")?;
@@ -2700,6 +2701,23 @@ mod tests {
                 .expect("warnings")
                 .iter()
                 .any(|warning| warning.as_str().unwrap_or_default().contains("creates"))
+        );
+    }
+
+    #[test]
+    fn soap_payload_builder_renders_delivery_forecast_options() {
+        let built = build_soap_payload_template(
+            SoapPayloadTemplate::DeliveryForecastByLineItemIds,
+            &values(json!({
+                "line_item_ids": [12345, "67890"]
+            })),
+        )
+        .expect("payload");
+
+        assert_eq!(built["operation"], "get_delivery_forecast_by_ids");
+        assert_eq!(
+            built["payload_xml"],
+            "<lineItemIds>12345</lineItemIds>\n<lineItemIds>67890</lineItemIds>\n<forecastOptions />"
         );
     }
 

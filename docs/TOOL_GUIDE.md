@@ -125,6 +125,10 @@ Payload templates currently exposed:
 - `delivery_forecast_by_line_item_ids`
 - `availability_forecast_by_line_item_id`
 
+The delivery-forecast template emits repeated `<lineItemIds>` elements plus an
+empty `<forecastOptions />` argument, which Ad Manager SOAP expects even when
+no optional forecast controls are being set.
+
 SOAP operations currently exposed:
 
 - `OrderService`: `create_orders`, `get_orders_by_statement`,
