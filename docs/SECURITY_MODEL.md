@@ -87,11 +87,11 @@ The write surface uses a preview/apply contract:
 - mutating SOAP calls also require write mode enabled, expected impact, and a
   rollback note
 - `gam_yield_group_exclusions_preview` reads the current yield group and binds
-  the confirmation token to the readback fingerprint and requested exact
-  ad-unit exclusions
+  the confirmation token to the readback fingerprint, requested ad-unit
+  exclusions, and descendant-safe update payload
 - `gam_yield_group_exclusions_apply` re-reads before apply, calls
-  `updateYieldGroups` only when exclusions are missing, and re-reads after
-  apply before reporting success
+  `updateYieldGroups` only when requested exclusions are missing or not already
+  `includeDescendants=true`, and re-reads after apply before reporting success
 - SOAP payload fragments may not include envelopes, request headers, XML
   declarations, DTD/entity constructs, bearer tokens, refresh tokens, client
   secrets, or private keys
@@ -107,8 +107,8 @@ change.
 
 Yield-group exclusion apply is the exception to the generic SOAP readback gap:
 it performs the matching post-apply yield-group readback itself and fails
-closed when the requested exact ad-unit IDs are not proven in
-`excludedAdUnits`.
+closed when the requested ad-unit IDs are not proven in `excludedAdUnits` with
+`includeDescendants=true`.
 
 ## Scratchpad safety
 

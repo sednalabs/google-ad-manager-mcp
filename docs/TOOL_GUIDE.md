@@ -22,8 +22,8 @@ All tools return Contract V1 envelopes: `ok/data/meta` on success and
 | `gam_soap_payload_build` | Build a safe inner SOAP `payload_xml` fragment for common trafficking templates without calling upstream. |
 | `gam_soap_trafficking_plan` | Create a dry-run plan and confirmation token for an allowlisted SOAP trafficking or forecast operation. |
 | `gam_soap_trafficking_apply` | Run an allowlisted SOAP trafficking or forecast operation after scope, runtime, and confirmation gates. |
-| `gam_yield_group_exclusions_preview` | Read one yield group and preview adding exact ad-unit IDs to `excludedAdUnits` without mutating GAM. |
-| `gam_yield_group_exclusions_apply` | Apply a previewed yield-group exact exclusion update after write-mode, confirmation, and readback gates. |
+| `gam_yield_group_exclusions_preview` | Read one yield group and preview descendant-safe ad-unit IDs in `excludedAdUnits` without mutating GAM. |
+| `gam_yield_group_exclusions_apply` | Apply a previewed yield-group descendant-safe exclusion update after write-mode, confirmation, and readback gates. |
 | `gam_scratchpad_open_session` | Open or refresh a bounded local DuckDB scratchpad session. |
 | `gam_scratchpad_close_session` | Close a scratchpad session and remove its local database. |
 | `gam_scratchpad_list_sessions` | List active scratchpad sessions. |
@@ -240,7 +240,7 @@ scope. Mutating SOAP operations additionally require
 
 ## `gam_yield_group_exclusions_preview` And `gam_yield_group_exclusions_apply`
 
-These tools provide a typed, guarded path for adding exact ad-unit exclusions
+These tools provide a typed, guarded path for adding descendant-safe ad-unit exclusions
 to an existing `YieldGroupService` yield group. They are intentionally separate
 from the generic SOAP tools because a safe update must preserve the current
 yield-group object and prove readback.
@@ -261,22 +261,24 @@ The preview tool:
   `YieldGroupService.getYieldGroupsByStatement`;
 - preserves existing yield-group targeting, including targeted ad units,
   existing excluded ad units, and targeted placement ids;
-- adds only missing exact `excludedAdUnits` entries with
-  `includeDescendants=false`;
+- adds missing `excludedAdUnits` entries, or repairs requested existing entries,
+  with `includeDescendants=true` because GAM can reject self-only inventory-unit
+  exclusions with
+  `InventoryTargetingError.SELF_ONLY_INVENTORY_UNIT_NOT_ALLOWED`;
 - refuses to exclude an ad unit that the same yield group directly targets;
 - binds the confirmation token to the current readback fingerprint and the
-  requested exact ad-unit IDs.
+  requested ad-unit IDs and descendant-safe update payload.
 
 `gam_yield_group_exclusions_apply` requires the same request, the exact
 preview confirmation token, the manage scope, write mode enabled,
 `expected_impact`, and `rollback_note`. Before applying it re-reads the yield
 group and rebuilds the payload. If the readback changed, the old confirmation
 token no longer matches. After `updateYieldGroups`, it re-reads the yield group
-and reports success only when every requested exact ad-unit ID is present in
-`excludedAdUnits`.
+and reports success only when every requested ad-unit ID is present in
+`excludedAdUnits` with `includeDescendants=true`.
 
-If every requested ad-unit ID is already excluded, the apply path returns a
-no-op proof and does not call `updateYieldGroups`.
+If every requested ad-unit ID is already excluded with `includeDescendants=true`,
+the apply path returns a no-op proof and does not call `updateYieldGroups`.
 
 Example SOAP line-item lookup plan:
 

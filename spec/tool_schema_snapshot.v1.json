@@ -1213,7 +1213,7 @@
       "name": "gam_trafficking_tool_matrix"
     },
     {
-      "description": "Apply a previewed YieldGroupService exact ad-unit exclusion update after write-mode, manage-scope, confirmation-token, and readback gates.",
+      "description": "Apply a previewed YieldGroupService descendant-safe ad-unit exclusion update after write-mode, manage-scope, confirmation-token, and readback gates.",
       "inputSchema": {
         "$defs": {
           "YieldGroupExclusionRequestArgs": {
@@ -1226,7 +1226,7 @@
                 ]
               },
               "excluded_ad_unit_ids": {
-                "description": "Exact ad-unit IDs to add to YieldGroupService InventoryTargeting.excludedAdUnits.",
+                "description": "Ad-unit IDs to ensure in YieldGroupService InventoryTargeting.excludedAdUnits. Requested entries are written descendant-safe with includeDescendants=true.",
                 "items": {
                   "type": "string"
                 },
@@ -1299,7 +1299,7 @@
       "name": "gam_yield_group_exclusions_apply"
     },
     {
-      "description": "Read one YieldGroupService yield group and preview adding exact ad-unit IDs to InventoryTargeting.excludedAdUnits without mutating Google Ad Manager.",
+      "description": "Read one YieldGroupService yield group and preview descendant-safe ad-unit IDs in InventoryTargeting.excludedAdUnits without mutating Google Ad Manager.",
       "inputSchema": {
         "$defs": {
           "YieldGroupExclusionRequestArgs": {
@@ -1312,7 +1312,7 @@
                 ]
               },
               "excluded_ad_unit_ids": {
-                "description": "Exact ad-unit IDs to add to YieldGroupService InventoryTargeting.excludedAdUnits.",
+                "description": "Ad-unit IDs to ensure in YieldGroupService InventoryTargeting.excludedAdUnits. Requested entries are written descendant-safe with includeDescendants=true.",
                 "items": {
                   "type": "string"
                 },

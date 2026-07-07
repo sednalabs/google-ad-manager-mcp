@@ -22,7 +22,7 @@ The current alpha focuses on a small useful surface:
   templates without calling upstream;
 - plan and run allowlisted SOAP trafficking operations for orders, line items,
   creatives, line-item creative associations, preview URLs, and forecasts;
-- preview and apply exact ad-unit exclusions to a readback-proven yield group
+- preview and apply descendant-safe ad-unit exclusions to a readback-proven yield group
   with confirmation-token and post-apply readback gates;
 - load catalog/report pages and parsed SOAP line-item delivery readbacks into a
   bounded local DuckDB scratchpad for read-only analysis and evidence bundles.
@@ -112,7 +112,7 @@ After auth is proven:
 10. `gam_soap_trafficking_plan` for order, line-item, creative, LICA, preview,
    and forecast SOAP plans
 11. `gam_soap_trafficking_apply` only after reviewing the matching SOAP plan
-12. `gam_yield_group_exclusions_preview` when exact ad-unit exclusions should
+12. `gam_yield_group_exclusions_preview` when descendant-safe ad-unit exclusions should
    be added to an existing yield group without changing line-item targeting
 13. `gam_yield_group_exclusions_apply` only with write mode enabled, the
    manage scope, the exact confirmation token, and post-apply readback proof
@@ -280,7 +280,8 @@ operations can run without write mode enabled but still need the manage scope
 required by the legacy SOAP API.
 
 `gam_yield_group_exclusions_preview` and
-`gam_yield_group_exclusions_apply` provide the typed path for exact
+`gam_yield_group_exclusions_apply` provide the typed path for descendant-safe
 YieldGroupService ad-unit exclusions. They preserve current yield-group
-targeting, add only missing `excludedAdUnits` entries, and require post-apply
-readback before reporting success.
+targeting, add or repair only requested `excludedAdUnits` entries with
+`includeDescendants=true`, and require post-apply readback before reporting
+success.

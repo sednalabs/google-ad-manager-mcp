@@ -143,12 +143,12 @@ need the manage scope. Mutating SOAP operations also require
 `GOOGLE_AD_MANAGER_MCP_WRITE_MODE=enabled`, `expected_impact`, and
 `rollback_note`.
 
-For exact yield-group ad-unit exclusions:
+For descendant-safe yield-group ad-unit exclusions:
 
 1. `gam_exchange_protection_probe` or `gam_soap_payload_build` plus
    `gam_soap_trafficking_*` to identify the yield group and current targeting
 2. `gam_yield_group_exclusions_preview` with the yield group id and exact
-   ad-unit IDs to add to `excludedAdUnits`
+   ad-unit IDs to ensure in `excludedAdUnits` with `includeDescendants=true`
 3. `gam_yield_group_exclusions_apply` only after enabling write mode, using the
    manage scope, and passing the exact confirmation token from the preview
 

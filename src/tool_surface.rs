@@ -172,7 +172,7 @@ pub(crate) fn build_tool_inventory() -> Result<ToolInventory, ToolInventoryError
         cap(
             "gam_yield_group_exclusions_preview",
             "trafficking",
-            "Read one YieldGroupService yield group and preview exact ad-unit exclusions for open-bidding or mediation eligibility.",
+            "Read one YieldGroupService yield group and preview descendant-safe ad-unit exclusions for open-bidding or mediation eligibility.",
             [
                 "google",
                 "ad-manager",
@@ -187,7 +187,7 @@ pub(crate) fn build_tool_inventory() -> Result<ToolInventory, ToolInventoryError
         cap(
             "gam_yield_group_exclusions_apply",
             "trafficking",
-            "Apply a previewed YieldGroupService exact ad-unit exclusion update after gates and readback proof.",
+            "Apply a previewed YieldGroupService descendant-safe ad-unit exclusion update after gates and readback proof.",
             [
                 "google",
                 "ad-manager",

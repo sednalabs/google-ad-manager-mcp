@@ -130,12 +130,12 @@ states for capped, blocked, or unsupported protection surfaces instead of
 turning missing API coverage into a clean result.
 
 `gam_yield_group_exclusions_preview` and
-`gam_yield_group_exclusions_apply` are the typed mutation path for exact
+`gam_yield_group_exclusions_apply` are the typed mutation path for descendant-safe
 YieldGroupService ad-unit exclusions. They read the current yield group,
-preserve the existing yield-group targeting object, add only missing exact
-`excludedAdUnits` entries, and require post-apply readback before reporting an
-applied state. They deliberately do not make `updateYieldGroups` a generic SOAP
-operation.
+preserve the existing yield-group targeting object, add or repair only requested
+`excludedAdUnits` entries with `includeDescendants=true`, and require post-apply
+readback before reporting an applied state. They deliberately do not make
+`updateYieldGroups` a generic SOAP operation.
 
 The deliberately grouped write tools are `gam_rest_write_plan` and
 `gam_rest_write_apply`. They cover the current REST beta write surface through
