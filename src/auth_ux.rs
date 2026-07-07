@@ -691,9 +691,16 @@ fn service_account_json_env_status(raw_json: &str) -> CredentialSourceStatus {
 }
 
 fn google_application_credentials_status(path: PathBuf) -> CredentialSourceStatus {
-    match google_authorized_user_adc_metadata_from_file(&path) {
-        Ok(Some(_metadata)) => {
-            return CredentialSourceStatus {
+    match CustomServiceAccount::from_file(path.display().to_string()) {
+        Ok(_) => CredentialSourceStatus {
+            config_valid: true,
+            config_issue: None,
+            credential_material_detected: true,
+            repair_step: None,
+            adc_file: None,
+        },
+        Err(service_account_err) => match google_authorized_user_adc_metadata_from_file(&path) {
+            Ok(Some(_metadata)) => CredentialSourceStatus {
                 config_valid: false,
                 config_issue: Some(format!(
                     "GOOGLE_APPLICATION_CREDENTIALS points to an authorized-user ADC file at {}; google-ad-manager-mcp only supports service-account credentials on GOOGLE_APPLICATION_CREDENTIALS",
@@ -705,46 +712,22 @@ fn google_application_credentials_status(path: PathBuf) -> CredentialSourceStatu
                         .to_string()
                 ),
                 adc_file: None,
-            };
-        }
-        Ok(None) | Err(UpstreamOAuthError::UnsupportedGoogleAdcCredentialType) => {}
-        Err(err) => {
-            return CredentialSourceStatus {
-                config_valid: false,
-                config_issue: Some(redact_secret_text(&format!(
-                    "failed to load GOOGLE_APPLICATION_CREDENTIALS as authorized-user ADC at {}: {err}",
-                    path.display()
-                ))),
-                credential_material_detected: true,
-                repair_step: Some(
-                    "Fix `GOOGLE_APPLICATION_CREDENTIALS` so it points to a readable supported credentials file, or unset it to use another credential source."
-                        .to_string(),
-                ),
-                adc_file: None,
-            };
-        }
-    }
-
-    match CustomServiceAccount::from_file(path.display().to_string()) {
-        Ok(_) => CredentialSourceStatus {
-            config_valid: true,
-            config_issue: None,
-            credential_material_detected: true,
-            repair_step: None,
-            adc_file: None,
-        },
-        Err(err) => CredentialSourceStatus {
-            config_valid: false,
-            config_issue: Some(redact_secret_text(&format!(
-                "failed to load GOOGLE_APPLICATION_CREDENTIALS at {}: {err}",
-                path.display()
-            ))),
-            credential_material_detected: true,
-            repair_step: Some(
-                "Fix `GOOGLE_APPLICATION_CREDENTIALS` so it points to a readable credentials file, or unset it to use another credential source."
-                    .to_string(),
-            ),
-            adc_file: None,
+            },
+            Ok(None) | Err(UpstreamOAuthError::UnsupportedGoogleAdcCredentialType) | Err(_) => {
+                CredentialSourceStatus {
+                    config_valid: false,
+                    config_issue: Some(redact_secret_text(&format!(
+                        "failed to load GOOGLE_APPLICATION_CREDENTIALS at {}: {service_account_err}",
+                        path.display()
+                    ))),
+                    credential_material_detected: true,
+                    repair_step: Some(
+                        "Fix `GOOGLE_APPLICATION_CREDENTIALS` so it points to a readable credentials file, or unset it to use another credential source."
+                            .to_string(),
+                    ),
+                    adc_file: None,
+                }
+            }
         },
     }
 }
@@ -909,6 +892,8 @@ struct CredentialSourceStatus {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use std::os::unix::fs::symlink;
     use std::fs;
     use std::path::Path;
     use std::path::PathBuf;
@@ -919,6 +904,41 @@ mod tests {
         shell_join, shell_join_with_cloudsdk_config,
     };
     use crate::Settings;
+
+    const TEST_SERVICE_ACCOUNT_PRIVATE_KEY: &str = "-----BEGIN PRIVATE KEY-----\n\
+MIICdQIBADANBgkqhkiG9w0BAQEFAASCAl8wggJbAgEAAoGBAPnRvYZzxdotNxOS\n\
+kDEYigDqPmk/+JTMpLBSvzQ55uASv5fsPUYNb+Pje+KwrVfEqq/tI/Nz4mOgKeV2\n\
+xGD7XhUzvuFLWNflfp0R93MI1qKC+onD7q0WsakpH0miXjHj6yZ7rHVne3E5o3ip\n\
+LNuP/q89l6UcjBkMfgfs/osRUi+zAgMBAAECgYA4AREf5yxfsOs79AtnNj0Z32mG\n\
+ZtTvZsE01hgPOTvM1+cjw84oujJvQDwxobH6jxhEwEDi/wOtmeZKjsmPhEqevMpi\n\
+9DjLL3w3k3pRwoddRnERWpQTV/37YJ3VGczKji6tQKTFm8H6NQt/Cs2MAwayQdU2\n\
+jF/QdL7ysv0WjUyIQQJBAP9zK99X/+0TEWQAYk6EKwu0oEfqZVWO2crPEEhQ2mvB\n\
+CiXQ2Lg1LFScGCDNVQdgh5t5D77NmVWxyxDJ/XOrRukCQQD6W3b/NZ19NG5Xk5XE\n\
+IUNwnGkbddqtHA9x8nNYw7wPqoD9p6XgI83eKzNCPzTWfiQjoJAuTvfLKPIKayte\n\
+uxg7Aj8h7Snmf8l9swqcPXDQ/Ly60UJ4Sqkqs845IUcIU7SumvS+EP63eFhq5FBQ\n\
+CvVABZH9FBcDQEsdFn/huvHuatECQA0Tf+iehUZH2ceLNtRSpHIaSUcc5boK8CeU\n\
+cT/eoVD0J96Xxgsp85O6D+hS4tCdMAgIV9+DUl/zGIlAxbgh74cCQQDesPGAE2ZG\n\
+QO/f5L4azuE8yAB9ob3w4K9ZovtbjqTUz7vW4SRwDNXgXW/hCungTLb5hVpfYxPf\n\
+rFCaohNaJ5PK\n\
+-----END PRIVATE KEY-----\n";
+
+    fn test_service_account_json() -> String {
+        format!(
+            r#"{{
+  "type": "service_account",
+  "project_id": "test-project",
+  "private_key_id": "test-key-id",
+  "private_key": {private_key:?},
+  "client_email": "test-service-account@example.iam.gserviceaccount.com",
+  "client_id": "123456789012345678901",
+  "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+  "token_uri": "https://oauth2.googleapis.com/token",
+  "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+  "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/test-service-account%40example.iam.gserviceaccount.com"
+}}"#,
+            private_key = TEST_SERVICE_ACCOUNT_PRIVATE_KEY,
+        )
+    }
 
     #[test]
     fn adc_login_command_includes_cloud_platform_and_ad_manager_scope() {
@@ -1000,6 +1020,27 @@ mod tests {
         );
 
         let _ = fs::remove_file(path);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn google_application_credentials_accepts_runtime_compatible_service_account_symlink() {
+        let target = unique_test_file("google-application-credentials-service-account", "json");
+        let link =
+            unique_test_file("google-application-credentials-service-account-link", "json");
+        fs::create_dir_all(target.parent().expect("test file parent")).expect("create test dir");
+        fs::write(&target, test_service_account_json()).expect("write service-account json");
+        symlink(&target, &link).expect("create symlink");
+
+        let status = google_application_credentials_status(link.clone());
+
+        assert!(status.config_valid);
+        assert!(status.config_issue.is_none());
+        assert!(status.credential_material_detected);
+        assert!(status.repair_step.is_none());
+
+        let _ = fs::remove_file(link);
+        let _ = fs::remove_file(target);
     }
 
     fn unique_test_file(label: &str, extension: &str) -> PathBuf {
