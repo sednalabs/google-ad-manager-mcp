@@ -1248,10 +1248,10 @@ fn validate_network_code(value: &str) -> Result<String, AdManagerError> {
     if trimmed.is_empty() {
         return Err(AdManagerError::invalid("network_code", "must not be empty"));
     }
-    if trimmed.contains('/') || trimmed.chars().any(char::is_whitespace) {
+    if !trimmed.bytes().all(|byte| byte.is_ascii_digit()) {
         return Err(AdManagerError::invalid(
             "network_code",
-            "must be the raw Ad Manager network code, for example 1234567",
+            "must be the raw numeric Ad Manager network code, for example 1234567",
         ));
     }
     Ok(trimmed.to_string())
@@ -1284,13 +1284,28 @@ fn validate_resource_name(
             "must contain exactly one resource ID segment after the prefix",
         ));
     }
-    if trimmed.chars().any(char::is_whitespace) {
-        return Err(AdManagerError::invalid(
-            field,
-            "must not contain whitespace",
-        ));
-    }
+    validate_rest_resource_id_segment(field, id_segment)?;
     Ok(trimmed.to_string())
+}
+
+fn validate_rest_resource_id_segment(
+    field: &'static str,
+    value: &str,
+) -> Result<(), AdManagerError> {
+    if value.bytes().all(is_safe_rest_resource_id_byte) {
+        return Ok(());
+    }
+    Err(AdManagerError::invalid(
+        field,
+        "must use a single URL-safe resource ID segment containing only ASCII letters, digits, '.', '_' or '-'",
+    ))
+}
+
+fn is_safe_rest_resource_id_byte(byte: u8) -> bool {
+    matches!(
+        byte,
+        b'0'..=b'9' | b'a'..=b'z' | b'A'..=b'Z' | b'.' | b'_' | b'-'
+    )
 }
 
 fn validate_rest_write_body(
@@ -1872,6 +1887,15 @@ pub(crate) fn soap_error_message(result: &SoapTraffickingApplyResult) -> String 
     }
 }
 
+pub(crate) fn soap_apply_failed(result: &SoapTraffickingApplyResult) -> bool {
+    result.upstream_status >= 400
+        || result
+            .soap_fault
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|value| !value.is_empty())
+}
+
 fn extract_xml_tag(value: &str, tag: &str) -> Option<String> {
     for prefix in ["", "gam:", "soapenv:", "soap:"] {
         let full_tag = format!("{prefix}{tag}");
@@ -2144,6 +2168,52 @@ mod tests {
     }
 
     #[test]
+    fn rest_write_paths_reject_unsafe_network_codes_and_resource_segments() {
+        let client = AdManagerClient::from_settings(&Settings::default());
+        for bad_network_code in ["1234567?alt=json", "123 4567", "1234567/extra"] {
+            assert!(
+                client
+                    .build_rest_write_plan(
+                        bad_network_code,
+                        RestWriteResource::Reports,
+                        RestWriteOperation::Patch,
+                        Some("networks/1234567/reports/987654"),
+                        Some("displayName"),
+                        json!({
+                            "name": "networks/1234567/reports/987654",
+                            "displayName": "Delivery proof"
+                        }),
+                    )
+                    .is_err(),
+                "{bad_network_code} should be rejected"
+            );
+        }
+
+        for bad_resource_name in [
+            "networks/1234567/reports/987654?alt=json",
+            "networks/1234567/reports/987654#fragment",
+            "networks/1234567/reports/987%32654",
+        ] {
+            assert!(
+                client
+                    .build_rest_write_plan(
+                        "1234567",
+                        RestWriteResource::Reports,
+                        RestWriteOperation::Patch,
+                        Some(bad_resource_name),
+                        Some("displayName"),
+                        json!({
+                            "name": bad_resource_name,
+                            "displayName": "Delivery proof"
+                        }),
+                    )
+                    .is_err(),
+                "{bad_resource_name} should be rejected"
+            );
+        }
+    }
+
+    #[test]
     fn patch_body_name_must_exactly_match_resource_name() {
         let client = AdManagerClient::from_settings(&Settings::default());
         let err = client
@@ -2315,6 +2385,35 @@ mod tests {
             )
             .is_ok()
         );
+    }
+
+    #[test]
+    fn soap_apply_failed_when_fault_present_even_with_2xx_status() {
+        let result = SoapTraffickingApplyResult {
+            upstream_status: 200,
+            upstream_response_xml: "<Fault><faultstring>bad request</faultstring></Fault>"
+                .to_string(),
+            response_truncated: false,
+            request_id: None,
+            response_time: None,
+            soap_fault: Some("bad request".to_string()),
+        };
+
+        assert!(soap_apply_failed(&result));
+    }
+
+    #[test]
+    fn soap_apply_succeeds_when_2xx_and_no_fault_is_present() {
+        let result = SoapTraffickingApplyResult {
+            upstream_status: 200,
+            upstream_response_xml: "<ok />".to_string(),
+            response_truncated: false,
+            request_id: Some("req-1".to_string()),
+            response_time: Some("123".to_string()),
+            soap_fault: None,
+        };
+
+        assert!(!soap_apply_failed(&result));
     }
 
     #[test]
