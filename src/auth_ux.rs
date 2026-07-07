@@ -4,6 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
+use gcp_auth::CustomServiceAccount;
 use mcp_toolkit_auth::provider_auth::{
     GoogleProviderAuthConfig, GoogleProviderAuthFailureKind, classify_google_provider_auth_error,
     format_provider_auth_command, google_adc_quota_project_command,
@@ -197,7 +198,6 @@ async fn run_doctor(settings: &Settings, args: &AuthDoctorArgs) -> Result<()> {
 
 async fn build_report(settings: &Settings, verify: bool) -> AuthReport {
     let client = AdManagerClient::from_settings(settings);
-    let adc_file = selected_adc_file_status(settings);
     let env = EnvStatus {
         google_application_credentials: std::env::var_os("GOOGLE_APPLICATION_CREDENTIALS")
             .is_some(),
@@ -207,7 +207,8 @@ async fn build_report(settings: &Settings, verify: bool) -> AuthReport {
         shared_adc: settings.shared_adc,
     };
     let uses_local_user_adc = uses_local_user_adc(&env);
-    let quota_project = effective_quota_project(settings, adc_file.as_ref(), &env);
+    let credential_status = credential_source_status(settings, uses_local_user_adc);
+    let quota_project = effective_quota_project(settings, credential_status.adc_file.as_ref(), &env);
     let verification = if verify {
         match client.list_networks(Some(1), None).await {
             Ok(payload) => VerificationReport {
@@ -238,30 +239,20 @@ async fn build_report(settings: &Settings, verify: bool) -> AuthReport {
         }
     };
 
-    let config_valid = if uses_local_user_adc {
-        adc_file
-            .as_ref()
-            .is_some_and(|file| file.present && file.usable != Some(false))
-    } else {
-        true
-    };
+    let config_valid = credential_status.config_valid;
     let ready = match verification.ok {
         Some(true) => "yes",
         Some(false) => "no",
         None => "not_verified",
     }
     .to_string();
-    let credential_material_detected = env.google_application_credentials
-        || env.service_account_path
-        || env.service_account_json
-        || adc_file.as_ref().is_some_and(|file| file.present)
-        || verification.ok == Some(true);
+    let credential_material_detected =
+        credential_status.credential_material_detected || verification.ok == Some(true);
     let next_steps = next_steps(
         settings,
         &quota_project,
         &verification,
-        adc_file.as_ref(),
-        &env,
+        &credential_status,
     );
 
     AuthReport {
@@ -269,10 +260,11 @@ async fn build_report(settings: &Settings, verify: bool) -> AuthReport {
         scope: settings.scope.clone(),
         credential_source: client.auth_source(),
         config_valid,
+        config_issue: credential_status.config_issue,
         credential_material_detected,
         quota_project,
         gcloud: gcloud_version().await,
-        adc_file,
+        adc_file: credential_status.adc_file,
         env,
         verification,
         ready,
@@ -326,24 +318,19 @@ fn next_steps(
     settings: &Settings,
     quota_project: &QuotaProjectStatus,
     verification: &VerificationReport,
-    adc_file: Option<&AdcFileStatus>,
-    env: &EnvStatus,
+    credential_status: &CredentialSourceStatus,
 ) -> Vec<String> {
     let mut steps = Vec::new();
-    if uses_local_user_adc(env)
-        && let Some(adc_file) = adc_file
-    {
-        if !adc_file.present {
-            steps.push(selected_adc_missing_step(adc_file));
-        } else if adc_file.usable == Some(false) {
-            steps.push(selected_adc_repair_step(settings, adc_file));
-        }
+    if let Some(step) = &credential_status.repair_step {
+        steps.push(step.clone());
     }
     if !verification.checked {
-        steps.push(
+        let step = if credential_status.config_valid {
             "Run `google-ad-manager-mcp auth status --verify-token` when you are ready to prove access."
-                .to_string(),
-        );
+        } else {
+            "After fixing the credential configuration, run `google-ad-manager-mcp auth status --verify-token` to prove access."
+        };
+        steps.push(step.to_string());
     }
     if !quota_project.configured {
         steps.push(
@@ -384,6 +371,9 @@ fn print_human_report(report: &AuthReport) {
     println!("Scope: {}", report.scope);
     println!("Credential source: {}", report.credential_source.as_str());
     println!("Config valid: {}", yes_no(report.config_valid));
+    if let Some(issue) = &report.config_issue {
+        println!("Credential config issue: {issue}");
+    }
     println!(
         "Credential material detected: {}",
         yes_no(report.credential_material_detected)
@@ -412,7 +402,7 @@ fn print_human_report(report: &AuthReport) {
                 println!("ADC file issue: {error}");
             }
         }
-        None => println!("ADC file: unknown"),
+        None => println!("ADC file: not selected for current credential source"),
     }
     println!(
         "Env credentials: GOOGLE_APPLICATION_CREDENTIALS={}, service-account-path={}, service-account-json={}, quota-project={}, shared-adc={}",
@@ -551,6 +541,156 @@ fn selected_adc_file_status(settings: &Settings) -> Option<AdcFileStatus> {
     }
 }
 
+fn credential_source_status(
+    settings: &Settings,
+    uses_local_user_adc: bool,
+) -> CredentialSourceStatus {
+    if uses_local_user_adc {
+        let adc_file = selected_adc_file_status(settings);
+        let config_valid = adc_file
+            .as_ref()
+            .is_some_and(|file| file.present && file.usable != Some(false));
+        let credential_material_detected =
+            adc_file.as_ref().is_some_and(|file| file.present);
+        let config_issue = adc_file.as_ref().and_then(|file| {
+            file.error.clone().or_else(|| {
+                (!file.present).then(|| {
+                    format!(
+                        "selected {} ADC file is missing at {}",
+                        file.kind,
+                        file.path.display()
+                    )
+                })
+            })
+        });
+        let repair_step = adc_file.as_ref().and_then(|file| {
+            if !file.present {
+                Some(selected_adc_missing_step(file))
+            } else if file.usable == Some(false) {
+                Some(selected_adc_repair_step(settings, file))
+            } else {
+                None
+            }
+        });
+        return CredentialSourceStatus {
+            config_valid,
+            config_issue,
+            credential_material_detected,
+            repair_step,
+            adc_file,
+        };
+    }
+
+    if let Some(path) = settings.service_account_json_path.as_deref() {
+        return service_account_json_path_status(path);
+    }
+
+    if let Some(raw_json) = settings.service_account_json.as_deref() {
+        return service_account_json_env_status(raw_json);
+    }
+
+    if let Some(path) = std::env::var_os("GOOGLE_APPLICATION_CREDENTIALS") {
+        return google_application_credentials_status(PathBuf::from(path));
+    }
+
+    CredentialSourceStatus {
+        config_valid: false,
+        config_issue: Some("no credential source was selected".to_string()),
+        credential_material_detected: false,
+        repair_step: Some(
+            "Configure a service-account credential, GOOGLE_APPLICATION_CREDENTIALS, or rerun `google-ad-manager-mcp auth login`."
+                .to_string(),
+        ),
+        adc_file: None,
+    }
+}
+
+fn service_account_json_path_status(path: &str) -> CredentialSourceStatus {
+    match CustomServiceAccount::from_file(path) {
+        Ok(_) => CredentialSourceStatus {
+            config_valid: true,
+            config_issue: None,
+            credential_material_detected: true,
+            repair_step: None,
+            adc_file: None,
+        },
+        Err(err) => CredentialSourceStatus {
+            config_valid: false,
+            config_issue: Some(redact_secret_text(&format!(
+                "failed to load service account JSON at {path}: {err}"
+            ))),
+            credential_material_detected: fs::metadata(path).is_ok(),
+            repair_step: Some(
+                "Fix `GOOGLE_AD_MANAGER_MCP_SERVICE_ACCOUNT_JSON_PATH` so it points to a valid service account JSON file, or unset it to use another credential source."
+                    .to_string(),
+            ),
+            adc_file: None,
+        },
+    }
+}
+
+fn service_account_json_env_status(raw_json: &str) -> CredentialSourceStatus {
+    match CustomServiceAccount::from_json(raw_json) {
+        Ok(_) => CredentialSourceStatus {
+            config_valid: true,
+            config_issue: None,
+            credential_material_detected: true,
+            repair_step: None,
+            adc_file: None,
+        },
+        Err(err) => CredentialSourceStatus {
+            config_valid: false,
+            config_issue: Some(redact_secret_text(&format!(
+                "invalid service account JSON in GOOGLE_AD_MANAGER_MCP_SERVICE_ACCOUNT_JSON: {err}"
+            ))),
+            credential_material_detected: true,
+            repair_step: Some(
+                "Fix `GOOGLE_AD_MANAGER_MCP_SERVICE_ACCOUNT_JSON`, or unset it to use another credential source."
+                    .to_string(),
+            ),
+            adc_file: None,
+        },
+    }
+}
+
+fn google_application_credentials_status(path: PathBuf) -> CredentialSourceStatus {
+    match fs::metadata(&path) {
+        Ok(metadata) if metadata.is_file() => CredentialSourceStatus {
+            config_valid: true,
+            config_issue: None,
+            credential_material_detected: true,
+            repair_step: None,
+            adc_file: None,
+        },
+        Ok(_) => CredentialSourceStatus {
+            config_valid: false,
+            config_issue: Some(format!(
+                "GOOGLE_APPLICATION_CREDENTIALS points to {}, but it is not a file",
+                path.display()
+            )),
+            credential_material_detected: true,
+            repair_step: Some(
+                "Point `GOOGLE_APPLICATION_CREDENTIALS` at a readable credentials file, or unset it to use another credential source."
+                    .to_string(),
+            ),
+            adc_file: None,
+        },
+        Err(err) => CredentialSourceStatus {
+            config_valid: false,
+            config_issue: Some(redact_secret_text(&format!(
+                "failed to read GOOGLE_APPLICATION_CREDENTIALS at {}: {err}",
+                path.display()
+            ))),
+            credential_material_detected: false,
+            repair_step: Some(
+                "Fix `GOOGLE_APPLICATION_CREDENTIALS` so it points to a readable credentials file, or unset it to use another credential source."
+                    .to_string(),
+            ),
+            adc_file: None,
+        },
+    }
+}
+
 fn uses_local_user_adc(env: &EnvStatus) -> bool {
     !env.google_application_credentials && !env.service_account_path && !env.service_account_json
 }
@@ -641,6 +781,7 @@ struct AuthReport {
     scope: String,
     credential_source: AuthSource,
     config_valid: bool,
+    config_issue: Option<String>,
     credential_material_detected: bool,
     quota_project: QuotaProjectStatus,
     gcloud: Option<String>,
@@ -685,6 +826,15 @@ struct VerificationReport {
     sample_network_count: Option<usize>,
     error: Option<String>,
     hint: Option<String>,
+}
+
+#[derive(Debug)]
+struct CredentialSourceStatus {
+    config_valid: bool,
+    config_issue: Option<String>,
+    credential_material_detected: bool,
+    repair_step: Option<String>,
+    adc_file: Option<AdcFileStatus>,
 }
 
 #[cfg(test)]

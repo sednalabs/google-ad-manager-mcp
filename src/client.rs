@@ -1430,7 +1430,7 @@ fn validate_batch_name_bindings(
 
 fn collect_nested_resource_names<'a>(
     value: &'a Value,
-    field_path: &str,
+    field_path: &'static str,
     names: &mut Vec<&'a str>,
 ) -> Result<(), AdManagerError> {
     match value {
@@ -1618,7 +1618,12 @@ fn validate_soap_payload_operation_binding(
             SoapTraffickingOperation::GetLineItemCreativeAssociationNativeStylePreviewUrls => {
                 (contains_any(&["lineitemcreativeassociation"])
                     || contains_all(&["lineitemid", "creativeid"]))
-                    && lower.contains("nativestyle")
+                    && contains_any(&[
+                        "nativestyle",
+                        "nativestyles",
+                        "nativestyleid",
+                        "nativestyleids",
+                    ])
             }
             SoapTraffickingOperation::PerformLineItemCreativeAssociationAction => {
                 contains_all(&["lineitemcreativeassociationaction", "filterstatement"])
@@ -2427,6 +2432,24 @@ mod tests {
                 "<gam:lineItemId>1</gam:lineItemId><gam:creativeId>2</gam:creativeId>",
             )
             .is_ok()
+        );
+        assert!(
+            validate_soap_payload_xml(
+                SoapTraffickingOperation::GetLineItemCreativeAssociationNativeStylePreviewUrls,
+                "<gam:lineItemId>1</gam:lineItemId><gam:creativeId>2</gam:creativeId><gam:nativeStyleIds><gam:long>3</gam:long></gam:nativeStyleIds>",
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn soap_native_style_preview_requires_native_style_tags() {
+        assert!(
+            validate_soap_payload_xml(
+                SoapTraffickingOperation::GetLineItemCreativeAssociationNativeStylePreviewUrls,
+                "<lineItemId>1</lineItemId><creativeId>2</creativeId><note>nativeStyle</note>",
+            )
+            .is_err()
         );
     }
 
