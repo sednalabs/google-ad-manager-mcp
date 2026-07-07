@@ -51,13 +51,14 @@ pub(crate) fn shell_join(parts: &[String]) -> String {
 
 async fn run_login(settings: &Settings, args: &AuthLoginArgs) -> Result<()> {
     let scope = selected_login_scope(settings, args.manage_scope);
+    let shared_adc = auth_command_shared_adc(settings, args.shared_adc);
     let command = gcloud_adc_login_command(&scope, args.client_id_file.as_deref(), args.headless);
-    let cloudsdk_config = require_login_cloudsdk_config(args.shared_adc)?;
+    let cloudsdk_config = require_login_cloudsdk_config(shared_adc)?;
     println!("Starting Google Ad Manager login using Application Default Credentials.");
     println!("Scope: {scope}");
     println!(
         "Credential file: {}",
-        adc_login_target_description(args.shared_adc)
+        adc_login_target_description(shared_adc)
     );
     println!(
         "Command: {}",
@@ -66,7 +67,7 @@ async fn run_login(settings: &Settings, args: &AuthLoginArgs) -> Result<()> {
     println!(
         "Tip: ADC login includes the required cloud-platform scope because gcloud requires it for local ADC user credentials."
     );
-    if !args.shared_adc {
+    if !shared_adc {
         println!(
             "Tip: this login uses a Google Ad Manager-specific ADC file so other Google MCPs keep their own tokens and scopes."
         );
@@ -130,6 +131,7 @@ async fn run_login(settings: &Settings, args: &AuthLoginArgs) -> Result<()> {
     println!("Google login completed.");
     let mut verify_settings = settings.clone();
     verify_settings.scope = scope;
+    verify_settings.shared_adc = shared_adc;
     let report = build_report(&verify_settings, !args.no_verify).await;
     print_human_report(&report);
     if !args.no_verify && report.ready == "no" {
@@ -143,7 +145,8 @@ async fn run_login(settings: &Settings, args: &AuthLoginArgs) -> Result<()> {
 fn print_login_command(settings: &Settings, args: &AuthCommandArgs) -> Result<()> {
     let scope = selected_login_scope(settings, args.manage_scope);
     let command = gcloud_adc_login_command(&scope, args.client_id_file.as_deref(), args.headless);
-    let cloudsdk_config = require_login_cloudsdk_config(args.shared_adc)?;
+    let cloudsdk_config =
+        require_login_cloudsdk_config(auth_command_shared_adc(settings, args.shared_adc))?;
     println!(
         "{}",
         shell_join_with_cloudsdk_config(&command, cloudsdk_config.as_deref())
@@ -166,6 +169,10 @@ fn selected_login_scope(settings: &Settings, manage_scope: bool) -> String {
     } else {
         settings.scope.clone()
     }
+}
+
+fn auth_command_shared_adc(settings: &Settings, shared_adc_flag: bool) -> bool {
+    shared_adc_flag || settings.shared_adc
 }
 
 async fn run_status(settings: &Settings, args: &AuthStatusCliArgs) -> Result<()> {
@@ -678,7 +685,11 @@ struct VerificationReport {
 mod tests {
     use std::path::Path;
 
-    use super::{gcloud_adc_login_command, shell_join, shell_join_with_cloudsdk_config};
+    use super::{
+        auth_command_shared_adc, gcloud_adc_login_command, shell_join,
+        shell_join_with_cloudsdk_config,
+    };
+    use crate::Settings;
 
     #[test]
     fn adc_login_command_includes_cloud_platform_and_ad_manager_scope() {
@@ -712,5 +723,16 @@ mod tests {
         let rendered = shell_join_with_cloudsdk_config(&command, Some(Path::new("/tmp/gam adc")));
         assert!(rendered.starts_with("CLOUDSDK_CONFIG='/tmp/gam adc' gcloud auth"));
         assert!(rendered.contains("admanager.readonly"));
+    }
+
+    #[test]
+    fn auth_command_shared_adc_follows_runtime_selection() {
+        let mut settings = Settings::default();
+        settings.shared_adc = true;
+
+        assert!(auth_command_shared_adc(&settings, false));
+        assert!(auth_command_shared_adc(&settings, true));
+        assert!(auth_command_shared_adc(&Settings::default(), true));
+        assert!(!auth_command_shared_adc(&Settings::default(), false));
     }
 }
