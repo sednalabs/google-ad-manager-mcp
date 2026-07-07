@@ -892,9 +892,9 @@ struct CredentialSourceStatus {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
     #[cfg(unix)]
     use std::os::unix::fs::symlink;
-    use std::fs;
     use std::path::Path;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -1001,6 +1001,11 @@ rFCaohNaJ5PK\n\
 }"#,
         )
         .expect("write authorized-user adc");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).expect("chmod");
+        }
 
         let status = google_application_credentials_status(path.clone());
 
@@ -1026,10 +1031,18 @@ rFCaohNaJ5PK\n\
     #[test]
     fn google_application_credentials_accepts_runtime_compatible_service_account_symlink() {
         let target = unique_test_file("google-application-credentials-service-account", "json");
-        let link =
-            unique_test_file("google-application-credentials-service-account-link", "json");
+        let link = unique_test_file(
+            "google-application-credentials-service-account-link",
+            "json",
+        );
         fs::create_dir_all(target.parent().expect("test file parent")).expect("create test dir");
         fs::write(&target, test_service_account_json()).expect("write service-account json");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&target, fs::Permissions::from_mode(0o600)).expect("chmod");
+        }
+        let target = fs::canonicalize(&target).expect("canonicalize target");
         symlink(&target, &link).expect("create symlink");
 
         let status = google_application_credentials_status(link.clone());

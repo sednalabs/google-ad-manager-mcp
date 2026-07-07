@@ -2231,7 +2231,10 @@ mod tests {
             .expect_err("reject mismatched create body name");
 
         assert!(err.to_string().contains("body.name"));
-        assert!(err.to_string().contains("must start with networks/1234567/sites/"));
+        assert!(
+            err.to_string()
+                .contains("must start with networks/1234567/sites/")
+        );
     }
 
     #[test]
