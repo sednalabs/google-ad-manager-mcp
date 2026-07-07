@@ -274,12 +274,7 @@ async fn build_report(settings: &Settings, verify: bool) -> AuthReport {
     };
     let credential_material_detected =
         credential_status.credential_material_detected || verification.ok == Some(true);
-    let next_steps = next_steps(
-        settings,
-        &quota_project,
-        &verification,
-        &credential_status,
-    );
+    let next_steps = next_steps(settings, &quota_project, &verification, &credential_status);
 
     AuthReport {
         server: "google-ad-manager-mcp",
@@ -593,8 +588,7 @@ fn credential_source_status(
         let config_valid = adc_file
             .as_ref()
             .is_some_and(|file| file.present && file.usable != Some(false));
-        let credential_material_detected =
-            adc_file.as_ref().is_some_and(|file| file.present);
+        let credential_material_detected = adc_file.as_ref().is_some_and(|file| file.present);
         let config_issue = adc_file.as_ref().and_then(|file| {
             file.error.clone().or_else(|| {
                 (!file.present).then(|| {
@@ -949,8 +943,8 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{
-        auth_command_shared_adc, gcloud_adc_login_command,
-        google_application_credentials_status, shell_join, shell_join_with_cloudsdk_config,
+        auth_command_shared_adc, gcloud_adc_login_command, google_application_credentials_status,
+        shell_join, shell_join_with_cloudsdk_config,
     };
     use crate::Settings;
 
