@@ -725,7 +725,7 @@ fn google_application_credentials_status(path: PathBuf) -> CredentialSourceStatu
         }
     }
 
-    match CustomServiceAccount::from_file(&path.display().to_string()) {
+    match CustomServiceAccount::from_file(path.display().to_string()) {
         Ok(_) => CredentialSourceStatus {
             config_valid: true,
             config_issue: None,
@@ -996,7 +996,7 @@ mod tests {
             status
                 .repair_step
                 .as_deref()
-                .is_some_and(|step| step.contains("auth login"))
+                .is_some_and(|step| step.contains("Unset `GOOGLE_APPLICATION_CREDENTIALS`"))
         );
 
         let _ = fs::remove_file(path);
