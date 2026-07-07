@@ -1292,6 +1292,12 @@ fn validate_rest_resource_id_segment(
     field: &'static str,
     value: &str,
 ) -> Result<(), AdManagerError> {
+    if matches!(value, "." | "..") {
+        return Err(AdManagerError::invalid(
+            field,
+            "must use a single URL-safe resource ID segment and cannot be '.' or '..'",
+        ));
+    }
     if value.bytes().all(is_safe_rest_resource_id_byte) {
         return Ok(());
     }
@@ -2190,6 +2196,8 @@ mod tests {
         }
 
         for bad_resource_name in [
+            "networks/1234567/reports/.",
+            "networks/1234567/reports/..",
             "networks/1234567/reports/987654?alt=json",
             "networks/1234567/reports/987654#fragment",
             "networks/1234567/reports/987%32654",

@@ -721,7 +721,9 @@ fn google_application_credentials_status(path: PathBuf) -> CredentialSourceStatu
                         "failed to load GOOGLE_APPLICATION_CREDENTIALS at {}: {service_account_err}",
                         path.display()
                     ))),
-                    credential_material_detected_from_gcp_auth_error(&service_account_err),
+                    credential_material_detected: credential_material_detected_from_gcp_auth_error(
+                        &service_account_err,
+                    ),
                     repair_step: Some(
                         "Fix `GOOGLE_APPLICATION_CREDENTIALS` so it points to a readable credentials file, or unset it to use another credential source."
                             .to_string(),
