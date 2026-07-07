@@ -52,6 +52,8 @@ pub enum CatalogCollection {
     AdUnits,
     Orders,
     LineItems,
+    PrivateAuctionDeals,
+    PrivateAuctions,
     Reports,
 }
 
@@ -61,6 +63,8 @@ impl CatalogCollection {
             Self::AdUnits => "ad_units",
             Self::Orders => "orders",
             Self::LineItems => "line_items",
+            Self::PrivateAuctionDeals => "private_auction_deals",
+            Self::PrivateAuctions => "private_auctions",
             Self::Reports => "reports",
         }
     }
@@ -70,6 +74,8 @@ impl CatalogCollection {
             Self::AdUnits => "adUnits",
             Self::Orders => "orders",
             Self::LineItems => "lineItems",
+            Self::PrivateAuctionDeals => "privateAuctionDeals",
+            Self::PrivateAuctions => "privateAuctions",
             Self::Reports => "reports",
         }
     }
@@ -311,6 +317,8 @@ pub enum SoapTraffickingOperation {
     GetDeliveryForecast,
     GetDeliveryForecastByIds,
     GetTrafficData,
+    GetYieldGroupsByStatement,
+    GetYieldPartners,
 }
 
 impl SoapTraffickingOperation {
@@ -347,6 +355,8 @@ impl SoapTraffickingOperation {
             Self::GetDeliveryForecast => "get_delivery_forecast",
             Self::GetDeliveryForecastByIds => "get_delivery_forecast_by_ids",
             Self::GetTrafficData => "get_traffic_data",
+            Self::GetYieldGroupsByStatement => "get_yield_groups_by_statement",
+            Self::GetYieldPartners => "get_yield_partners",
         }
     }
 
@@ -375,6 +385,7 @@ impl SoapTraffickingOperation {
             | Self::GetDeliveryForecast
             | Self::GetDeliveryForecastByIds
             | Self::GetTrafficData => "ForecastService",
+            Self::GetYieldGroupsByStatement | Self::GetYieldPartners => "YieldGroupService",
         }
     }
 
@@ -409,6 +420,8 @@ impl SoapTraffickingOperation {
             Self::GetDeliveryForecast => "getDeliveryForecast",
             Self::GetDeliveryForecastByIds => "getDeliveryForecastByIds",
             Self::GetTrafficData => "getTrafficData",
+            Self::GetYieldGroupsByStatement => "getYieldGroupsByStatement",
+            Self::GetYieldPartners => "getYieldPartners",
         }
     }
 
@@ -471,7 +484,17 @@ impl SoapTraffickingOperation {
             Self::GetTrafficData => {
                 "payload_xml must contain <lineItem> and optional <forecastOptions>"
             }
+            Self::GetYieldGroupsByStatement => {
+                "payload_xml must contain <filterStatement> with a PQL query"
+            }
+            Self::GetYieldPartners => {
+                "payload_xml should be empty; the method returns yield partners available to the network"
+            }
         }
+    }
+
+    fn allows_empty_payload(self) -> bool {
+        matches!(self, Self::GetYieldPartners)
     }
 
     pub fn is_mutating(self) -> bool {
@@ -488,6 +511,8 @@ impl SoapTraffickingOperation {
                 | Self::GetDeliveryForecast
                 | Self::GetDeliveryForecastByIds
                 | Self::GetTrafficData
+                | Self::GetYieldGroupsByStatement
+                | Self::GetYieldPartners
         )
     }
 }
@@ -662,6 +687,14 @@ impl AdManagerClient {
             &query,
         )
         .await
+    }
+
+    pub async fn get_rest_discovery_document(&self) -> Result<Value, AdManagerError> {
+        let request = self.http.request(
+            Method::GET,
+            "https://admanager.googleapis.com/$discovery/rest?version=v1",
+        );
+        self.send_json(request).await
     }
 
     pub async fn run_report(
@@ -877,7 +910,7 @@ impl AdManagerClient {
     ) -> Result<SoapTraffickingPlan, AdManagerError> {
         let network_code = validate_network_code(network_code)?;
         let api_version = validate_soap_api_version(api_version)?;
-        let payload_xml = validate_soap_payload_xml(payload_xml)?;
+        let payload_xml = validate_soap_payload_xml_for_operation(operation, payload_xml)?;
         let service = operation.service_name();
         let method = operation.soap_method();
         let namespace = soap_namespace(&api_version);
@@ -1327,6 +1360,16 @@ fn validate_soap_payload_xml(value: &str) -> Result<String, AdManagerError> {
     Ok(trimmed.to_string())
 }
 
+fn validate_soap_payload_xml_for_operation(
+    operation: SoapTraffickingOperation,
+    value: &str,
+) -> Result<String, AdManagerError> {
+    if value.trim().is_empty() && operation.allows_empty_payload() {
+        return Ok(String::new());
+    }
+    validate_soap_payload_xml(value)
+}
+
 fn soap_namespace(api_version: &str) -> String {
     format!("https://www.google.com/apis/ads/publisher/{api_version}")
 }
@@ -1602,6 +1645,14 @@ mod tests {
     fn collection_names_are_curated() {
         assert_eq!(CatalogCollection::AdUnits.as_str(), "ad_units");
         assert_eq!(CatalogCollection::LineItems.as_str(), "line_items");
+        assert_eq!(
+            CatalogCollection::PrivateAuctions.as_str(),
+            "private_auctions"
+        );
+        assert_eq!(
+            CatalogCollection::PrivateAuctionDeals.response_field(),
+            "privateAuctionDeals"
+        );
     }
 
     #[test]
@@ -1728,6 +1779,52 @@ mod tests {
             r#"<getLineItemsByStatement xmlns="https://www.google.com/apis/ads/publisher/v202605">"#
         ));
         assert!(!plan.mutating);
+    }
+
+    #[test]
+    fn yield_group_soap_operations_are_read_only() {
+        let client = AdManagerClient::from_settings(&Settings::default());
+        let plan = client
+            .build_soap_trafficking_plan(
+                "1234567",
+                None,
+                SoapTraffickingOperation::GetYieldGroupsByStatement,
+                r#"<filterStatement><query>LIMIT 10</query></filterStatement>"#,
+            )
+            .expect("yield group read plan");
+
+        assert_eq!(plan.service, "YieldGroupService");
+        assert_eq!(plan.method, "getYieldGroupsByStatement");
+        assert_eq!(
+            plan.endpoint,
+            "https://ads.google.com/apis/ads/publisher/v202605/YieldGroupService"
+        );
+        assert!(!plan.mutating);
+        assert!(!plan.destructive);
+        assert!(!plan.send_adjacent);
+    }
+
+    #[test]
+    fn yield_partner_soap_read_allows_empty_payload() {
+        let client = AdManagerClient::from_settings(&Settings::default());
+        let plan = client
+            .build_soap_trafficking_plan(
+                "1234567",
+                None,
+                SoapTraffickingOperation::GetYieldPartners,
+                "",
+            )
+            .expect("yield partner read plan");
+
+        assert_eq!(plan.service, "YieldGroupService");
+        assert_eq!(plan.method, "getYieldPartners");
+        assert_eq!(plan.payload_xml, "");
+        assert!(plan.envelope_xml.contains(
+            r#"<getYieldPartners xmlns="https://www.google.com/apis/ads/publisher/v202605">"#
+        ));
+        assert!(!plan.mutating);
+        assert!(!plan.destructive);
+        assert!(!plan.send_adjacent);
     }
 
     #[test]

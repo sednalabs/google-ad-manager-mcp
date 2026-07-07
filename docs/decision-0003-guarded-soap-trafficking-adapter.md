@@ -44,6 +44,7 @@ The operation allowlist covers:
 - `CreativeService`
 - `LineItemCreativeAssociationService`
 - `ForecastService`
+- `YieldGroupService`
 
 SOAP read/forecast calls are classified as no-mutation proof operations. They
 can run without write mode enabled but still require the manage scope because

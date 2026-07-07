@@ -66,6 +66,7 @@ SOAP v202605 by default:
 - `CreativeService`
 - `LineItemCreativeAssociationService`
 - `ForecastService`
+- `YieldGroupService`
 
 The SOAP adapter is intentionally typed by operation but thin on object
 modeling. It accepts inner operation XML fragments, wraps them in a
@@ -110,13 +111,20 @@ The initial first-class tool set is:
 `find_tools` is also exposed for deferred-loading and `tool_search` clients.
 
 The deliberately grouped tool is `gam_network_catalog_list`. It keeps the
-surface compact while still covering the four network collections that matter
-most for a first useful release:
+surface compact while still covering the curated network collections that
+matter most for a first useful release and the exchange-proof workflow:
 
 - ad units
 - orders
 - line items
+- private auctions
+- private auction deals
 - saved reports
+
+`gam_exchange_protection_probe` layers a product-neutral proof workflow over
+those catalog reads and SOAP YieldGroupService reads. It reports partial proof
+states for capped, blocked, or unsupported protection surfaces instead of
+turning missing API coverage into a clean result.
 
 The deliberately grouped write tools are `gam_rest_write_plan` and
 `gam_rest_write_apply`. They cover the current REST beta write surface through

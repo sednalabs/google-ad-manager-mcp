@@ -38,14 +38,31 @@ pub(crate) fn build_tool_inventory() -> Result<ToolInventory, ToolInventoryError
         cap(
             "gam_network_catalog_list",
             "catalog",
-            "List a curated Google Ad Manager network collection such as ad units, orders, line items, or reports.",
+            "List a curated Google Ad Manager network collection such as ad units, orders, line items, private auctions, private auction deals, or reports.",
             [
                 "google",
                 "ad-manager",
                 "ad-units",
                 "orders",
                 "line-items",
+                "private-auctions",
+                "private-deals",
                 "reports",
+            ],
+        ),
+        cap(
+            "gam_exchange_protection_probe",
+            "catalog",
+            "Read-only proof for exact ad-unit exchange/yield/protection exposure, including AdSense flags, private auctions, private deals, yield groups, and unsupported surfaces.",
+            [
+                "google",
+                "ad-manager",
+                "exchange",
+                "yield",
+                "protection",
+                "private-auctions",
+                "adsense",
+                "ad-units",
             ],
         ),
         cap(
@@ -300,6 +317,26 @@ mod tests {
             results
                 .iter()
                 .any(|result| result.name == "gam_soap_trafficking_plan")
+        );
+    }
+
+    #[test]
+    fn inventory_search_finds_exchange_protection_probe() {
+        let inventory = build_tool_inventory().expect("inventory");
+        let results = inventory.search(
+            &ToolSearchFilter {
+                query: Some("exchange yield protection ad units".to_string()),
+                group: Some("catalog".to_string()),
+                read_only: Some(true),
+                limit: Some(10),
+            },
+            ToolOperation::List,
+            &ToolInventoryPolicy::strict(),
+        );
+        assert!(
+            results
+                .iter()
+                .any(|result| result.name == "gam_exchange_protection_probe")
         );
     }
 }

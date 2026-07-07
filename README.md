@@ -98,16 +98,18 @@ After auth is proven:
 
 1. `gam_networks_list`
 2. `gam_network_catalog_list`
-3. `gam_report_run`
-4. `gam_report_result_rows` when a report result has more pages
-5. `gam_trafficking_tool_matrix` before planning writes
-6. `gam_rest_write_plan` for dry-run write previews
-7. `gam_rest_write_apply` only in explicit operator mode
-8. `gam_soap_payload_build` to generate common SOAP payload fragments
-9. `gam_soap_trafficking_plan` for order, line-item, creative, LICA, preview,
+3. `gam_exchange_protection_probe` when you need exchange/yield/protection
+   proof for exact ad units
+4. `gam_report_run`
+5. `gam_report_result_rows` when a report result has more pages
+6. `gam_trafficking_tool_matrix` before planning writes
+7. `gam_rest_write_plan` for dry-run write previews
+8. `gam_rest_write_apply` only in explicit operator mode
+9. `gam_soap_payload_build` to generate common SOAP payload fragments
+10. `gam_soap_trafficking_plan` for order, line-item, creative, LICA, preview,
    and forecast SOAP plans
-10. `gam_soap_trafficking_apply` only after reviewing the matching SOAP plan
-11. `gam_scratchpad_open_session` and the `gam_scratchpad_ingest_*` tools when
+11. `gam_soap_trafficking_apply` only after reviewing the matching SOAP plan
+12. `gam_scratchpad_open_session` and the `gam_scratchpad_ingest_*` tools when
    you want local SQL analysis or a markdown evidence bundle
 
 ## Authentication
@@ -214,6 +216,7 @@ whole credential files in tool responses.
 - `gam_auth_login_command`
 - `gam_networks_list`
 - `gam_network_catalog_list`
+- `gam_exchange_protection_probe`
 - `gam_report_run`
 - `gam_report_result_rows`
 - `gam_trafficking_tool_matrix`
@@ -256,6 +259,7 @@ used for classic trafficking workflows that remain SOAP-shaped:
 - `CreativeService`
 - `LineItemCreativeAssociationService`
 - `ForecastService`
+- `YieldGroupService`
 
 `gam_soap_trafficking_plan` wraps an allowlisted SOAP operation around an inner
 payload XML fragment and returns the exact envelope plus a confirmation token.

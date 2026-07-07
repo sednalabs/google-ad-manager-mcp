@@ -113,6 +113,8 @@ google-ad-manager-mcp --print-tool-schema > spec/tool_schema_snapshot.v1.json
 1. `gam_auth_status` with `verify_access=true`
 2. `gam_networks_list`
 3. `gam_network_catalog_list`
+4. `gam_exchange_protection_probe` when you need exchange/yield/protection
+   proof for exact ad units
 
 For reports:
 

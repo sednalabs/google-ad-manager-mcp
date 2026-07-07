@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::time::Instant;
 
 use mcp_toolkit::rmcp::handler::server::wrapper::Parameters;
@@ -16,7 +17,7 @@ use tokio::process::Command;
 use crate::auth_ux::{gcloud_adc_login_command, shell_join_with_cloudsdk_config};
 use crate::client::{
     CatalogCollection, DEFAULT_SOAP_API_VERSION, RestWriteOperation, RestWritePlan,
-    RestWriteResource, SoapTraffickingOperation, SoapTraffickingPlan,
+    RestWriteResource, SoapTraffickingOperation, SoapTraffickingPlan, soap_error_message,
 };
 use crate::config::{
     GCLOUD_ADC_REQUIRED_SCOPE, server_adc_credentials_path, server_cloudsdk_config_dir,
@@ -93,6 +94,21 @@ pub struct NetworkCatalogListArgs {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct ExchangeProtectionProbeArgs {
+    /// Raw Ad Manager network code, for example 1234567.
+    pub network_code: String,
+    /// Exact ad-unit codes to prove, for example Home_Page_LS or Search_Page_RS.
+    pub ad_unit_codes: Vec<String>,
+    /// Maximum rows to inspect from private auction, private deal, and yield group reads. Defaults to 100.
+    pub page_size: Option<u32>,
+    /// SOAP API version for YieldGroupService reads. Defaults to the current server default.
+    pub api_version: Option<String>,
+    /// Include bounded raw SOAP response XML in the yield-group summary. Defaults to false.
+    #[serde(default)]
+    pub include_raw: bool,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct ReportRunArgs {
     /// Raw Ad Manager network code, for example 1234567.
     pub network_code: String,
@@ -162,7 +178,7 @@ pub struct SoapTraffickingRequestArgs {
     pub api_version: Option<String>,
     /// Allowlisted Google Ad Manager SOAP trafficking or forecast operation.
     pub operation: SoapTraffickingOperation,
-    /// Inner XML payload for the selected operation, excluding SOAP Envelope, Header, and operation wrapper.
+    /// Inner XML payload for the selected operation, excluding SOAP Envelope, Header, and operation wrapper. Empty string is accepted only for no-body reads such as get_yield_partners.
     pub payload_xml: String,
     /// Human-readable reason for the proposed live SOAP call.
     pub reason: String,
@@ -201,6 +217,9 @@ pub enum SoapPayloadTemplate {
     ArchiveLineItem,
     DeliveryForecastByLineItemIds,
     AvailabilityForecastByLineItemId,
+    YieldGroupsByStatement,
+    YieldGroupsAll,
+    YieldPartners,
 }
 
 impl SoapPayloadTemplate {
@@ -218,6 +237,9 @@ impl SoapPayloadTemplate {
             Self::ArchiveLineItem => "archive_line_item",
             Self::DeliveryForecastByLineItemIds => "delivery_forecast_by_line_item_ids",
             Self::AvailabilityForecastByLineItemId => "availability_forecast_by_line_item_id",
+            Self::YieldGroupsByStatement => "yield_groups_by_statement",
+            Self::YieldGroupsAll => "yield_groups_all",
+            Self::YieldPartners => "yield_partners",
         }
     }
 
@@ -244,6 +266,10 @@ impl SoapPayloadTemplate {
             Self::AvailabilityForecastByLineItemId => {
                 SoapTraffickingOperation::GetAvailabilityForecastById
             }
+            Self::YieldGroupsByStatement | Self::YieldGroupsAll => {
+                SoapTraffickingOperation::GetYieldGroupsByStatement
+            }
+            Self::YieldPartners => SoapTraffickingOperation::GetYieldPartners,
         }
     }
 
@@ -259,6 +285,8 @@ impl SoapPayloadTemplate {
             Self::CreativesByAdvertiserName => &["advertiser_id", "name_contains"],
             Self::LicaPreviewUrl | Self::CreateLica => &["line_item_id", "creative_id"],
             Self::DeliveryForecastByLineItemIds => &["line_item_ids"],
+            Self::YieldGroupsByStatement => &["query"],
+            Self::YieldGroupsAll | Self::YieldPartners => &[],
         }
     }
 }
@@ -432,7 +460,8 @@ impl AdManagerServer {
                     "Restart any stdio MCP client that keeps a long-lived child process.",
                     "Call gam_auth_status with verify_access=true.",
                     "Call gam_networks_list to discover the exact network code.",
-                    "Call gam_network_catalog_list for ad_units, orders, line_items, or reports.",
+                    "Call gam_network_catalog_list for ad_units, orders, line_items, private_auctions, private_auction_deals, or reports.",
+                    "Call gam_exchange_protection_probe when you need explicit partial-proof states for Exchange, private auction, private deal, or yield-group exposure.",
                     "Call gam_report_run for saved reports and gam_report_result_rows for large paginated results.",
                     "Call gam_trafficking_tool_matrix before planning writes so the REST and SOAP trafficking surfaces are explicit.",
                     "Use gam_rest_write_plan for dry-run write plans; gam_rest_write_apply only works when the server is explicitly started with GOOGLE_AD_MANAGER_MCP_WRITE_MODE=enabled and the manage scope.",
@@ -471,6 +500,7 @@ impl AdManagerServer {
                     "gam_auth_status",
                     "gam_networks_list",
                     "gam_network_catalog_list",
+                    "gam_exchange_protection_probe",
                     "gam_trafficking_tool_matrix",
                     "gam_rest_write_plan",
                     "gam_soap_trafficking_plan",
@@ -673,7 +703,7 @@ impl AdManagerServer {
 
     #[tool(
         name = "gam_network_catalog_list",
-        description = "List a curated Google Ad Manager network collection such as ad units, orders, line items, or reports."
+        description = "List a curated Google Ad Manager network collection such as ad units, orders, line items, private auctions, private auction deals, or reports."
     )]
     async fn gam_network_catalog_list(
         &self,
@@ -702,6 +732,214 @@ impl AdManagerServer {
             )),
             Err(err) => Ok(contract::error(err, started)),
         }
+    }
+
+    #[tool(
+        name = "gam_exchange_protection_probe",
+        description = "Read-only proof for whether exact Ad Manager ad units appear exposed to AdSense, private auctions, private deals, or yield groups, while naming unsupported protection surfaces explicitly."
+    )]
+    async fn gam_exchange_protection_probe(
+        &self,
+        Parameters(args): Parameters<ExchangeProtectionProbeArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let started = Instant::now();
+        let page_size = args.page_size.unwrap_or(100).clamp(1, 1_000);
+        let ad_unit_codes = match validate_probe_ad_unit_codes(&args.ad_unit_codes) {
+            Ok(codes) => codes,
+            Err(err) => return Ok(contract::error(err, started)),
+        };
+
+        let mut attention_reasons = Vec::new();
+        let mut partial_reasons = vec![
+            "GAM protections, inventory rules, and unified pricing rules are not fully exposed through the current API surface; this probe cannot prove UI-only surfaces.".to_string(),
+        ];
+        let mut ad_unit_summaries = Vec::new();
+        let mut target_ad_unit_ids = Vec::new();
+
+        for code in &ad_unit_codes {
+            let payload = match self
+                .client()
+                .list_network_catalog(
+                    &args.network_code,
+                    CatalogCollection::AdUnits,
+                    Some(10),
+                    None,
+                    Some(format!("adUnitCode = \"{code}\"")),
+                    None,
+                )
+                .await
+            {
+                Ok(value) => value,
+                Err(err) => return Ok(contract::error(err, started)),
+            };
+            let summary = summarize_probe_ad_unit(code, &payload);
+            if summary
+                .get("decision")
+                .and_then(Value::as_str)
+                .is_some_and(|decision| decision == "attention_required")
+            {
+                attention_reasons.push(format!("ad unit {code} needs review"));
+            }
+            if summary
+                .get("proof_complete")
+                .and_then(Value::as_bool)
+                .is_some_and(|value| !value)
+            {
+                partial_reasons.push(format!("ad unit {code} did not produce complete proof"));
+            }
+            if let Some(id) = summary.get("ad_unit_id").and_then(Value::as_str) {
+                target_ad_unit_ids.push(id.to_string());
+            }
+            ad_unit_summaries.push(summary);
+        }
+
+        let private_auctions = match self
+            .client()
+            .list_network_catalog(
+                &args.network_code,
+                CatalogCollection::PrivateAuctions,
+                Some(page_size),
+                None,
+                None,
+                None,
+            )
+            .await
+        {
+            Ok(value) => {
+                let summary = summarize_probe_collection(
+                    &value,
+                    CatalogCollection::PrivateAuctions,
+                    page_size,
+                );
+                apply_probe_collection_decision(
+                    "private auctions",
+                    &summary,
+                    &mut attention_reasons,
+                    &mut partial_reasons,
+                );
+                summary
+            }
+            Err(err) => {
+                partial_reasons.push("private auction collection could not be read".to_string());
+                blocked_probe_surface("private_auctions", err)
+            }
+        };
+
+        let private_auction_deals = match self
+            .client()
+            .list_network_catalog(
+                &args.network_code,
+                CatalogCollection::PrivateAuctionDeals,
+                Some(page_size),
+                None,
+                None,
+                None,
+            )
+            .await
+        {
+            Ok(value) => {
+                let summary = summarize_probe_collection(
+                    &value,
+                    CatalogCollection::PrivateAuctionDeals,
+                    page_size,
+                );
+                apply_probe_collection_decision(
+                    "private auction deals",
+                    &summary,
+                    &mut attention_reasons,
+                    &mut partial_reasons,
+                );
+                summary
+            }
+            Err(err) => {
+                partial_reasons
+                    .push("private auction deals collection could not be read".to_string());
+                blocked_probe_surface("private_auction_deals", err)
+            }
+        };
+
+        let yield_groups = match probe_yield_groups(
+            self,
+            &args.network_code,
+            args.api_version.as_deref(),
+            page_size,
+            &target_ad_unit_ids,
+            args.include_raw,
+        )
+        .await
+        {
+            Ok(summary) => {
+                match summary.get("decision").and_then(Value::as_str) {
+                    Some("target_matches_found") => {
+                        attention_reasons.push(
+                            "one or more yield groups target a requested ad unit".to_string(),
+                        );
+                    }
+                    Some("blocked") | Some("sample_only") | Some("skipped") => {
+                        partial_reasons
+                            .push("yield group proof is unavailable or incomplete".to_string());
+                    }
+                    _ => {}
+                }
+                summary
+            }
+            Err(err) => {
+                partial_reasons.push("yield group proof failed before upstream call".to_string());
+                blocked_probe_surface("yield_groups", err)
+            }
+        };
+
+        let rest_discovery = match self.client().get_rest_discovery_document().await {
+            Ok(value) => summarize_rest_discovery(&value),
+            Err(err) => {
+                partial_reasons.push("REST discovery document could not be read".to_string());
+                blocked_probe_surface("rest_discovery", err)
+            }
+        };
+
+        let unsupported_surfaces = unsupported_exchange_surfaces(&rest_discovery);
+        let overall_decision = if !attention_reasons.is_empty() {
+            "attention_required"
+        } else if !partial_reasons.is_empty() {
+            "partial_api_proof"
+        } else {
+            "api_exposed_surfaces_clear"
+        };
+
+        Ok(contract::success_with_meta(
+            json!({
+                "network_code": args.network_code,
+                "overall_decision": overall_decision,
+                "ad_units": ad_unit_summaries,
+                "private_auctions": private_auctions,
+                "private_auction_deals": private_auction_deals,
+                "yield_groups": yield_groups,
+                "rest_discovery": rest_discovery,
+                "unsupported_or_unintegrated_surfaces": unsupported_surfaces,
+                "attention_reasons": attention_reasons,
+                "partial_reasons": partial_reasons,
+                "certainty": {
+                    "can_prove_requested_ad_unit_flags": ad_unit_summaries.iter().all(|summary| summary.get("proof_complete").and_then(Value::as_bool).unwrap_or(false)),
+                    "can_prove_private_auction_absence_or_presence": private_auctions.get("proof_state").and_then(Value::as_str).is_some_and(|state| state == "complete_empty" || state == "complete_present"),
+                    "can_prove_private_deal_absence_or_presence": private_auction_deals.get("proof_state").and_then(Value::as_str).is_some_and(|state| state == "complete_empty" || state == "complete_present"),
+                    "can_prove_yield_group_targeting": yield_groups.get("proof_state").and_then(Value::as_str).is_some_and(|state| state == "complete"),
+                    "cannot_prove_via_current_api": [
+                        "protections",
+                        "inventory_rules",
+                        "unified_pricing_rules"
+                    ]
+                }
+            }),
+            json!({
+                "mutation_performed": false,
+                "upstream_called": true,
+                "page_size": page_size,
+                "soap_default_api_version": DEFAULT_SOAP_API_VERSION,
+                "required_yield_group_scope": MANAGE_SCOPE,
+                "policy": provider_safety_contract_json(),
+            }),
+            started,
+        ))
     }
 
     #[tool(
@@ -1558,6 +1796,442 @@ fn default_true() -> bool {
     true
 }
 
+fn validate_probe_ad_unit_codes(codes: &[String]) -> Result<Vec<String>, AdManagerError> {
+    if codes.is_empty() {
+        return Err(AdManagerError::invalid(
+            "ad_unit_codes",
+            "must contain at least one exact ad-unit code",
+        ));
+    }
+    if codes.len() > 50 {
+        return Err(AdManagerError::invalid(
+            "ad_unit_codes",
+            "must contain at most 50 ad-unit codes",
+        ));
+    }
+    let mut seen = BTreeSet::new();
+    let mut cleaned = Vec::with_capacity(codes.len());
+    for code in codes {
+        let trimmed = code.trim();
+        if trimmed.is_empty() || trimmed.len() > 128 {
+            return Err(AdManagerError::invalid(
+                "ad_unit_codes",
+                "each code must be between 1 and 128 characters",
+            ));
+        }
+        if !trimmed
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | '/' | ':'))
+        {
+            return Err(AdManagerError::invalid(
+                "ad_unit_codes",
+                "codes may only contain ASCII letters, digits, underscore, hyphen, dot, slash, or colon",
+            ));
+        }
+        if !seen.insert(trimmed.to_string()) {
+            return Err(AdManagerError::invalid(
+                "ad_unit_codes",
+                format!("duplicate ad-unit code `{trimmed}`"),
+            ));
+        }
+        cleaned.push(trimmed.to_string());
+    }
+    Ok(cleaned)
+}
+
+fn summarize_probe_ad_unit(code: &str, payload: &Value) -> Value {
+    let rows = catalog_rows(payload, CatalogCollection::AdUnits);
+    let matches = rows
+        .into_iter()
+        .filter(|row| {
+            row.get("adUnitCode")
+                .and_then(Value::as_str)
+                .is_some_and(|value| value == code)
+        })
+        .collect::<Vec<_>>();
+    if matches.is_empty() {
+        return json!({
+            "ad_unit_code": code,
+            "decision": "attention_required",
+            "proof_complete": false,
+            "reason": "exact ad-unit code was not returned by GAM",
+            "matches": 0,
+        });
+    }
+    if matches.len() > 1 {
+        return json!({
+            "ad_unit_code": code,
+            "decision": "attention_required",
+            "proof_complete": false,
+            "reason": "GAM returned multiple rows for the exact ad-unit code",
+            "matches": matches.len(),
+        });
+    }
+    let row = matches[0];
+    let resource_name = row.get("name").and_then(Value::as_str).unwrap_or_default();
+    let ad_unit_id = resource_id_from_name(resource_name);
+    let applied_adsense = row.get("appliedAdsenseEnabled").and_then(Value::as_bool);
+    let effective_adsense = row.get("effectiveAdsenseEnabled").and_then(Value::as_bool);
+    let proof_complete = applied_adsense.is_some() && effective_adsense.is_some();
+    let decision = if applied_adsense == Some(true) || effective_adsense == Some(true) {
+        "attention_required"
+    } else if proof_complete {
+        "clear_on_exposed_flags"
+    } else {
+        "partial_api_proof"
+    };
+    json!({
+        "ad_unit_code": code,
+        "ad_unit_id": if ad_unit_id.is_empty() { Value::Null } else { Value::String(ad_unit_id) },
+        "resource_name": resource_name,
+        "display_name": row.get("displayName").cloned().unwrap_or(Value::Null),
+        "status": row.get("status").cloned().unwrap_or(Value::Null),
+        "ad_unit_sizes": row.get("adUnitSizes").or_else(|| row.get("sizes")).cloned().unwrap_or(Value::Null),
+        "applied_adsense_enabled": applied_adsense,
+        "effective_adsense_enabled": effective_adsense,
+        "explicitly_targeted": row.get("explicitlyTargeted").and_then(Value::as_bool),
+        "decision": decision,
+        "proof_complete": proof_complete,
+    })
+}
+
+fn catalog_rows(payload: &Value, collection: CatalogCollection) -> Vec<&Value> {
+    payload
+        .get(collection.response_field())
+        .and_then(Value::as_array)
+        .map(|rows| rows.iter().collect())
+        .unwrap_or_default()
+}
+
+fn summarize_probe_collection(
+    payload: &Value,
+    collection: CatalogCollection,
+    page_size: u32,
+) -> Value {
+    let rows = catalog_rows(payload, collection);
+    let next_page_token = payload
+        .get("nextPageToken")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty());
+    let capped = next_page_token.is_some() || rows.len() as u32 >= page_size;
+    let proof_state = if capped {
+        "sample_only"
+    } else if rows.is_empty() {
+        "complete_empty"
+    } else {
+        "complete_present"
+    };
+    json!({
+        "collection": collection.as_str(),
+        "proof_state": proof_state,
+        "row_count_in_page": rows.len(),
+        "page_size": page_size,
+        "next_page_token_present": next_page_token.is_some(),
+        "capped_or_possibly_more": capped,
+        "sample": rows.iter().take(5).map(|row| {
+            let resource_name = row.get("name").and_then(Value::as_str).unwrap_or_default();
+            json!({
+                "resource_name": resource_name,
+                "resource_id": resource_id_from_name(resource_name),
+                "display_name": row.get("displayName").or_else(|| row.get("name")).cloned().unwrap_or(Value::Null),
+                "status": row.get("status").cloned().unwrap_or(Value::Null),
+            })
+        }).collect::<Vec<_>>(),
+    })
+}
+
+fn apply_probe_collection_decision(
+    label: &str,
+    summary: &Value,
+    attention_reasons: &mut Vec<String>,
+    partial_reasons: &mut Vec<String>,
+) {
+    match summary.get("proof_state").and_then(Value::as_str) {
+        Some("complete_present") => attention_reasons.push(format!(
+            "{label} are present; review whether they can target the requested inventory"
+        )),
+        Some("sample_only") => partial_reasons.push(format!(
+            "{label} read is capped or paginated; full absence/presence is not proven"
+        )),
+        Some("blocked") => partial_reasons.push(format!("{label} read is blocked")),
+        _ => {}
+    }
+}
+
+fn blocked_probe_surface(surface: &str, err: AdManagerError) -> Value {
+    json!({
+        "surface": surface,
+        "proof_state": "blocked",
+        "error": contract::redact_secret_text(&err.to_string()),
+        "hint": err.hint(),
+    })
+}
+
+async fn probe_yield_groups(
+    server: &AdManagerServer,
+    network_code: &str,
+    api_version: Option<&str>,
+    page_size: u32,
+    target_ad_unit_ids: &[String],
+    include_raw: bool,
+) -> Result<Value, AdManagerError> {
+    if target_ad_unit_ids.is_empty() {
+        return Ok(json!({
+            "surface": "yield_groups",
+            "decision": "skipped",
+            "proof_state": "skipped",
+            "reason": "no target ad-unit ids were available from exact ad-unit reads",
+            "mutation_performed": false,
+        }));
+    }
+    if !scope_allows_write(server.client().scope()) {
+        return Ok(json!({
+            "surface": "yield_groups",
+            "decision": "blocked",
+            "proof_state": "blocked",
+            "reason": "YieldGroupService SOAP reads require the Google Ad Manager manage scope",
+            "required_scope": MANAGE_SCOPE,
+            "current_scope": server.client().scope(),
+            "mutation_performed": false,
+        }));
+    }
+    let payload_xml = pql_payload(&format!("LIMIT {}", page_size.min(1_000)));
+    let plan = server.client().build_soap_trafficking_plan(
+        network_code,
+        api_version,
+        SoapTraffickingOperation::GetYieldGroupsByStatement,
+        &payload_xml,
+    )?;
+    let applied = server.client().execute_soap_trafficking_plan(&plan).await?;
+    if applied.upstream_status >= 400 || applied.soap_fault.is_some() {
+        return Ok(json!({
+            "surface": "yield_groups",
+            "decision": "blocked",
+            "proof_state": "blocked",
+            "upstream_status": applied.upstream_status,
+            "request_id": applied.request_id,
+            "response_time": applied.response_time,
+            "soap_fault": applied.soap_fault,
+            "message": contract::redact_secret_text(&soap_error_message(&applied)),
+            "mutation_performed": false,
+        }));
+    }
+
+    Ok(summarize_yield_groups(
+        &applied.upstream_response_xml,
+        applied.response_truncated,
+        applied.request_id,
+        applied.response_time,
+        target_ad_unit_ids,
+        include_raw,
+    ))
+}
+
+fn summarize_yield_groups(
+    xml: &str,
+    response_truncated: bool,
+    request_id: Option<String>,
+    response_time: Option<String>,
+    target_ad_unit_ids: &[String],
+    include_raw: bool,
+) -> Value {
+    let target_ids = target_ad_unit_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let results = extract_xml_blocks(xml, "results");
+    let total_result_set_size =
+        extract_xml_tag_text(xml, "totalResultSetSize").and_then(|value| value.parse::<u64>().ok());
+    let mut matches = Vec::new();
+    for result in &results {
+        let ad_unit_ids = extract_xml_tag_texts(result, "adUnitId");
+        let matched_ids = ad_unit_ids
+            .iter()
+            .filter(|id| target_ids.contains(id.as_str()))
+            .cloned()
+            .collect::<Vec<_>>();
+        if matched_ids.is_empty() {
+            continue;
+        }
+        matches.push(json!({
+            "yield_group_id": extract_xml_tag_text(result, "id"),
+            "yield_group_name": extract_xml_tag_text(result, "name"),
+            "status": extract_xml_tag_text(result, "status"),
+            "format": extract_xml_tag_text(result, "format"),
+            "environment_type": extract_xml_tag_text(result, "environmentType"),
+            "matched_ad_unit_ids": matched_ids,
+        }));
+    }
+    let sample_only = response_truncated
+        || total_result_set_size
+            .map(|total| total > results.len() as u64)
+            .unwrap_or(false);
+    let decision = if !matches.is_empty() {
+        "target_matches_found"
+    } else if sample_only {
+        "sample_only"
+    } else {
+        "no_target_matches"
+    };
+    let proof_state = if sample_only {
+        "sample_only"
+    } else {
+        "complete"
+    };
+    let mut response = json!({
+        "surface": "yield_groups",
+        "decision": decision,
+        "proof_state": proof_state,
+        "request_id": request_id,
+        "response_time": response_time,
+        "total_result_set_size": total_result_set_size,
+        "inspected_results": results.len(),
+        "response_truncated": response_truncated,
+        "target_ad_unit_ids": target_ad_unit_ids,
+        "target_ad_unit_matches": matches,
+        "mutation_performed": false,
+    });
+    if include_raw && let Some(object) = response.as_object_mut() {
+        object.insert(
+            "upstream_response_xml".to_string(),
+            Value::String(xml.to_string()),
+        );
+    }
+    response
+}
+
+fn summarize_rest_discovery(document: &Value) -> Value {
+    let mut resources = Vec::new();
+    collect_discovery_resources("", document, &mut resources);
+    let interesting = resources
+        .iter()
+        .filter(|resource| {
+            let lower = resource.to_ascii_lowercase();
+            lower.contains("auction")
+                || lower.contains("yield")
+                || lower.contains("protection")
+                || lower.contains("pricing")
+                || lower.contains("inventoryrule")
+                || lower.contains("inventory_rule")
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    json!({
+        "proof_state": "metadata_read",
+        "resource_count": resources.len(),
+        "interesting_resources": interesting,
+    })
+}
+
+fn collect_discovery_resources(prefix: &str, value: &Value, out: &mut Vec<String>) {
+    let Some(resources) = value.get("resources").and_then(Value::as_object) else {
+        return;
+    };
+    for (name, resource) in resources {
+        let path = if prefix.is_empty() {
+            name.to_string()
+        } else {
+            format!("{prefix}/{name}")
+        };
+        out.push(path.clone());
+        collect_discovery_resources(&path, resource, out);
+    }
+}
+
+fn unsupported_exchange_surfaces(rest_discovery: &Value) -> Vec<Value> {
+    let resources = rest_discovery
+        .get("interesting_resources")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::to_ascii_lowercase)
+        .collect::<Vec<_>>();
+    [
+        (
+            "protections",
+            "protection",
+            "GAM protection objects are not implemented as a current MCP read surface.",
+        ),
+        (
+            "inventory_rules",
+            "inventoryrule",
+            "GAM inventory-rule objects are not implemented as a current MCP read surface.",
+        ),
+        (
+            "unified_pricing_rules",
+            "pricing",
+            "GAM unified pricing rules are not implemented as a current MCP read surface.",
+        ),
+    ]
+    .into_iter()
+    .map(|(surface, needle, note)| {
+        let exposure = if resources.iter().any(|resource| {
+            resource.contains(needle) || resource.contains(&needle.replace('_', ""))
+        }) {
+            "resource_seen_but_not_integrated"
+        } else {
+            "not_seen_in_rest_discovery"
+        };
+        json!({
+            "surface": surface,
+            "proof_state": "not_proven",
+            "api_exposure": exposure,
+            "note": note,
+        })
+    })
+    .collect()
+}
+
+fn extract_xml_blocks(value: &str, tag: &str) -> Vec<String> {
+    extract_xml_elements(value, tag, true)
+}
+
+fn extract_xml_tag_texts(value: &str, tag: &str) -> Vec<String> {
+    extract_xml_elements(value, tag, false)
+}
+
+fn extract_xml_tag_text(value: &str, tag: &str) -> Option<String> {
+    extract_xml_tag_texts(value, tag).into_iter().next()
+}
+
+fn extract_xml_elements(value: &str, tag: &str, include_outer: bool) -> Vec<String> {
+    let mut out = Vec::new();
+    for prefix in ["", "gam:", "soapenv:", "soap:"] {
+        let full_tag = format!("{prefix}{tag}");
+        let open = format!("<{full_tag}");
+        let close = format!("</{prefix}{tag}>");
+        let mut search_start = 0;
+        while let Some(relative_start) = value[search_start..].find(&open) {
+            let start = search_start + relative_start;
+            let after_tag = &value[start + open.len()..];
+            let starts_with_tag_close = after_tag.starts_with('>');
+            let starts_with_space = after_tag.chars().next().is_some_and(char::is_whitespace);
+            if !(starts_with_tag_close || starts_with_space) {
+                search_start = start + open.len();
+                continue;
+            }
+            let Some(open_end) = after_tag.find('>') else {
+                break;
+            };
+            let content_start = start + open.len() + open_end + 1;
+            let Some(relative_end) = value[content_start..].find(&close) else {
+                break;
+            };
+            let content_end = content_start + relative_end;
+            if include_outer {
+                let end = content_end + close.len();
+                out.push(value[start..end].trim().to_string());
+                search_start = end;
+            } else {
+                out.push(value[content_start..content_end].trim().to_string());
+                search_start = content_end + close.len();
+            }
+        }
+    }
+    out
+}
+
 fn build_write_plan(
     server: &AdManagerServer,
     request: &RestWriteRequestArgs,
@@ -1670,6 +2344,12 @@ fn build_soap_payload_template(
             let line_item_id = required_id(values, "line_item_id")?;
             format!("<lineItemId>{line_item_id}</lineItemId>")
         }
+        SoapPayloadTemplate::YieldGroupsByStatement => {
+            let query = required_safe_pql_query(values, "query")?;
+            pql_payload(&query)
+        }
+        SoapPayloadTemplate::YieldGroupsAll => pql_payload("LIMIT 500"),
+        SoapPayloadTemplate::YieldPartners => String::new(),
     };
 
     Ok(json!({
@@ -1888,6 +2568,48 @@ fn required_safe_name_fragment(
         return Err(AdManagerError::invalid(
             field,
             "contains unsupported characters for a safe PQL LIKE fragment",
+        ));
+    }
+    Ok(trimmed.to_string())
+}
+
+fn required_safe_pql_query(
+    values: &Map<String, Value>,
+    field: &'static str,
+) -> Result<String, AdManagerError> {
+    let value = values.get(field).ok_or_else(|| {
+        AdManagerError::invalid(field, "is required for this SOAP payload template")
+    })?;
+    let Some(text) = value.as_str() else {
+        return Err(AdManagerError::invalid(
+            field,
+            "must be a bounded PQL statement string",
+        ));
+    };
+    let trimmed = text.trim();
+    if trimmed.is_empty() || trimmed.len() > 240 {
+        return Err(AdManagerError::invalid(
+            field,
+            "must be between 1 and 240 characters",
+        ));
+    }
+    if trimmed
+        .chars()
+        .any(|ch| matches!(ch, ';' | '<' | '>' | '\n' | '\r' | '\0'))
+    {
+        return Err(AdManagerError::invalid(
+            field,
+            "must not contain XML, semicolon, null, or newline characters",
+        ));
+    }
+    let upper = trimmed.to_ascii_uppercase();
+    if !(upper.starts_with("WHERE ")
+        || upper.starts_with("ORDER BY ")
+        || upper.starts_with("LIMIT "))
+    {
+        return Err(AdManagerError::invalid(
+            field,
+            "must start with WHERE, ORDER BY, or LIMIT",
         ));
     }
     Ok(trimmed.to_string())
@@ -2234,6 +2956,14 @@ fn soap_trafficking_supported_operation_matrix() -> Value {
                 "get_traffic_data"
             ],
             "mutating_operations": []
+        },
+        {
+            "service": "YieldGroupService",
+            "operations": [
+                "get_yield_groups_by_statement",
+                "get_yield_partners"
+            ],
+            "mutating_operations": []
         }
     ])
 }
@@ -2257,6 +2987,12 @@ fn trafficking_gap_matrix() -> Value {
             "status": "manual follow-up operation",
             "impact": "mutating SOAP apply returns upstream response; operators should run get-by-statement or forecast checks for delivery proof",
             "follow_up": "support optional readback_request payloads on SOAP apply"
+        },
+        {
+            "surface": "account_level_protection_surfaces",
+            "status": "partial API proof",
+            "impact": "exchange/protection probe can prove exposed ad-unit flags, private auctions/deals, and yield groups, but must report protections, inventory rules, and unified pricing rules as unproven until an authoritative API or browser proof surface exists",
+            "follow_up": "add authoritative read coverage if Google exposes these surfaces or a supported browser/admin read adapter is approved"
         }
     ])
 }
@@ -2722,6 +3458,84 @@ mod tests {
     }
 
     #[test]
+    fn soap_payload_builder_renders_yield_group_query() {
+        let built = build_soap_payload_template(
+            SoapPayloadTemplate::YieldGroupsByStatement,
+            &values(json!({
+                "query": "LIMIT 25"
+            })),
+        )
+        .expect("payload");
+
+        assert_eq!(built["operation"], "get_yield_groups_by_statement");
+        assert_eq!(
+            built["payload_xml"],
+            "<filterStatement>\n  <query>LIMIT 25</query>\n</filterStatement>"
+        );
+        assert_eq!(built["mutation_performed"], false);
+    }
+
+    #[test]
+    fn soap_payload_builder_renders_yield_partners_empty_payload() {
+        let built =
+            build_soap_payload_template(SoapPayloadTemplate::YieldPartners, &values(json!({})))
+                .expect("payload");
+
+        assert_eq!(built["operation"], "get_yield_partners");
+        assert_eq!(built["payload_xml"], "");
+        assert_eq!(built["required_values"], json!([]));
+        assert_eq!(built["mutation_performed"], false);
+        assert_eq!(built["upstream_called"], false);
+    }
+
+    #[test]
+    fn exchange_probe_parses_yield_group_target_matches() {
+        let xml = r#"
+        <getYieldGroupsByStatementResponse>
+          <rval>
+            <totalResultSetSize>1</totalResultSetSize>
+            <results>
+              <id>10</id>
+              <name>Open bidding group</name>
+              <status>ACTIVE</status>
+              <format>DISPLAY</format>
+              <environmentType>BROWSER</environmentType>
+              <targeting>
+                <inventoryTargeting>
+                  <targetedAdUnits>
+                    <adUnitId>123</adUnitId>
+                  </targetedAdUnits>
+                </inventoryTargeting>
+              </targeting>
+            </results>
+          </rval>
+        </getYieldGroupsByStatementResponse>
+        "#;
+
+        let summary = summarize_yield_groups(
+            xml,
+            false,
+            Some("req".to_string()),
+            None,
+            &["123".to_string()],
+            false,
+        );
+
+        assert_eq!(summary["decision"], "target_matches_found");
+        assert_eq!(summary["proof_state"], "complete");
+        assert_eq!(summary["target_ad_unit_matches"][0]["yield_group_id"], "10");
+    }
+
+    #[test]
+    fn exchange_probe_marks_truncated_yield_group_response_as_sample_only() {
+        let xml = r#"<rval><totalResultSetSize>10</totalResultSetSize><results><id>1</id></results></rval>"#;
+        let summary = summarize_yield_groups(xml, false, None, None, &["999".to_string()], false);
+
+        assert_eq!(summary["decision"], "sample_only");
+        assert_eq!(summary["proof_state"], "sample_only");
+    }
+
+    #[test]
     fn soap_payload_builder_rejects_unsafe_like_fragment() {
         let err = build_soap_payload_template(
             SoapPayloadTemplate::CreativesByAdvertiserName,
@@ -2738,6 +3552,22 @@ mod tests {
                 field: "name_contains",
                 ..
             }
+        ));
+    }
+
+    #[test]
+    fn soap_payload_builder_rejects_unsafe_yield_group_query() {
+        let err = build_soap_payload_template(
+            SoapPayloadTemplate::YieldGroupsByStatement,
+            &values(json!({
+                "query": "WHERE id = 1; UPDATE LineItem"
+            })),
+        )
+        .expect_err("unsafe query should fail");
+
+        assert!(matches!(
+            err,
+            AdManagerError::InvalidInput { field: "query", .. }
         ));
     }
 

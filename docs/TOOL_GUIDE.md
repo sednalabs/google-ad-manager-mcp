@@ -12,7 +12,8 @@ All tools return Contract V1 envelopes: `ok/data/meta` on success and
 | `gam_auth_status` | Inspect configured auth inputs and optionally prove live Ad Manager access. |
 | `gam_auth_login_command` | Build a copyable ADC login command without running it. |
 | `gam_networks_list` | List Ad Manager networks visible to the authenticated principal. |
-| `gam_network_catalog_list` | List one curated network collection: `ad_units`, `orders`, `line_items`, or `reports`. |
+| `gam_network_catalog_list` | List one curated network collection: `ad_units`, `orders`, `line_items`, `private_auctions`, `private_auction_deals`, or `reports`. |
+| `gam_exchange_protection_probe` | Read-only proof for exact ad-unit exchange/yield/protection exposure, with explicit partial-proof states. |
 | `gam_report_run` | Run a saved Ad Manager report, optionally wait, and optionally fetch the first result page. |
 | `gam_report_result_rows` | Fetch rows from a completed report result resource. |
 | `gam_trafficking_tool_matrix` | Describe REST-supported writes, SOAP trafficking operations, and remaining ergonomics gaps. |
@@ -39,10 +40,47 @@ All tools return Contract V1 envelopes: `ok/data/meta` on success and
 - `ad_units`
 - `orders`
 - `line_items`
+- `private_auctions`
+- `private_auction_deals`
 - `reports`
 
 This keeps the tool useful without turning the MCP into an arbitrary upstream
 endpoint browser.
+
+## `gam_exchange_protection_probe`
+
+`gam_exchange_protection_probe` is the high-level read-only proof tool for
+special inventory and exchange/yield concerns. It accepts:
+
+- `network_code`
+- exact `ad_unit_codes`
+- optional `page_size`
+- optional SOAP `api_version`
+- optional `include_raw` for bounded YieldGroupService XML
+
+The tool checks:
+
+- exact ad-unit rows, sizes, status, `appliedAdsenseEnabled`, and
+  `effectiveAdsenseEnabled`;
+- private auctions and private auction deals through REST catalog reads;
+- yield groups through SOAP `YieldGroupService.getYieldGroupsByStatement` when
+  the configured credential has the Ad Manager manage scope;
+- the REST discovery document for exchange/protection-like resource exposure.
+
+The tool deliberately does not claim full certainty when GAM does not expose a
+surface. It returns one of:
+
+- `attention_required` when an exposed surface shows a direct issue or target
+  match;
+- `partial_api_proof` when reads are capped, blocked, or unsupported by the
+  current API surface;
+- `api_exposed_surfaces_clear` only when exposed API surfaces are complete and
+  clear.
+
+`protections`, `inventory_rules`, and `unified_pricing_rules` are reported as
+unsupported or unintegrated surfaces unless a future API/read implementation
+adds authoritative coverage. Do not interpret their absence from the probe as
+proof that those settings are clean in the GAM UI.
 
 ## `gam_report_run`
 
@@ -124,10 +162,17 @@ Payload templates currently exposed:
 - `archive_line_item`
 - `delivery_forecast_by_line_item_ids`
 - `availability_forecast_by_line_item_id`
+- `yield_groups_by_statement`
+- `yield_groups_all`
+- `yield_partners`
 
 The delivery-forecast template emits repeated `<lineItemIds>` elements plus an
 empty `<forecastOptions />` argument, which Ad Manager SOAP expects even when
 no optional forecast controls are being set.
+
+`yield_partners` intentionally emits an empty `payload_xml` string because
+`YieldGroupService.getYieldPartners` has no request body. Other SOAP operations
+still require a non-empty inner XML fragment.
 
 SOAP operations currently exposed:
 
@@ -147,11 +192,14 @@ SOAP operations currently exposed:
 - `ForecastService`: `get_availability_forecast`,
   `get_availability_forecast_by_id`, `get_delivery_forecast`,
   `get_delivery_forecast_by_ids`, `get_traffic_data`
+- `YieldGroupService`: `get_yield_groups_by_statement`, `get_yield_partners`
 
 The SOAP request shape is intentionally thin:
 
 - choose an allowlisted `operation`;
 - provide `payload_xml` as the inner operation XML only;
+- use an empty `payload_xml` only for no-body reads such as
+  `get_yield_partners`;
 - do not include a SOAP envelope, SOAP header, OAuth token, request header,
   XML declaration, DTD, or entity declaration;
 - review the generated envelope returned by `gam_soap_trafficking_plan`;

@@ -108,6 +108,52 @@
       "name": "gam_auth_status"
     },
     {
+      "description": "Read-only proof for whether exact Ad Manager ad units appear exposed to AdSense, private auctions, private deals, or yield groups, while naming unsupported protection surfaces explicitly.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "ad_unit_codes": {
+            "description": "Exact ad-unit codes to prove, for example Home_Page_LS or Search_Page_RS.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "api_version": {
+            "description": "SOAP API version for YieldGroupService reads. Defaults to the current server default.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "include_raw": {
+            "default": false,
+            "description": "Include bounded raw SOAP response XML in the yield-group summary. Defaults to false.",
+            "type": "boolean"
+          },
+          "network_code": {
+            "description": "Raw Ad Manager network code, for example 1234567.",
+            "type": "string"
+          },
+          "page_size": {
+            "description": "Maximum rows to inspect from private auction, private deal, and yield group reads. Defaults to 100.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "network_code",
+          "ad_unit_codes"
+        ],
+        "type": "object"
+      },
+      "name": "gam_exchange_protection_probe"
+    },
+    {
       "description": "Explain the recommended first-run flow, credential options, and starter tools for Google Ad Manager.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -116,7 +162,7 @@
       "name": "gam_get_started"
     },
     {
-      "description": "List a curated Google Ad Manager network collection such as ad units, orders, line items, or reports.",
+      "description": "List a curated Google Ad Manager network collection such as ad units, orders, line items, private auctions, private auction deals, or reports.",
       "inputSchema": {
         "$defs": {
           "CatalogCollection": {
@@ -124,6 +170,8 @@
               "ad_units",
               "orders",
               "line_items",
+              "private_auction_deals",
+              "private_auctions",
               "reports"
             ],
             "type": "string"
@@ -630,6 +678,8 @@
               "ad_units",
               "orders",
               "line_items",
+              "private_auction_deals",
+              "private_auctions",
               "reports"
             ],
             "type": "string"
@@ -805,10 +855,10 @@
       },
       "name": "gam_scratchpad_open_session"
     },
-        {
-            "description": "Run bounded read-only DuckDB SQL against a Google Ad Manager scratchpad session.",
-            "inputSchema": {
-                "$schema": "https://json-schema.org/draft/2020-12/schema",
+    {
+      "description": "Run bounded read-only DuckDB SQL against a Google Ad Manager scratchpad session.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "offset": {
             "description": "Zero-based result offset.",
@@ -842,55 +892,58 @@
           "sql"
         ],
         "type": "object"
-            },
-            "name": "gam_scratchpad_query"
+      },
+      "name": "gam_scratchpad_query"
+    },
+    {
+      "description": "Build a safe inner payload_xml fragment for common Google Ad Manager SOAP trafficking templates without calling upstream.",
+      "inputSchema": {
+        "$defs": {
+          "SoapPayloadTemplate": {
+            "enum": [
+              "order_by_id",
+              "line_item_by_id",
+              "line_items_by_order_id",
+              "creatives_by_advertiser_name",
+              "licas_by_line_item_id",
+              "lica_preview_url",
+              "create_lica",
+              "pause_line_item",
+              "resume_line_item",
+              "archive_line_item",
+              "delivery_forecast_by_line_item_ids",
+              "availability_forecast_by_line_item_id",
+              "yield_groups_by_statement",
+              "yield_groups_all",
+              "yield_partners"
+            ],
+            "type": "string"
+          }
         },
-        {
-            "description": "Build a safe inner payload_xml fragment for common Google Ad Manager SOAP trafficking templates without calling upstream.",
-            "inputSchema": {
-                "$defs": {
-                    "SoapPayloadTemplate": {
-                        "enum": [
-                            "order_by_id",
-                            "line_item_by_id",
-                            "line_items_by_order_id",
-                            "creatives_by_advertiser_name",
-                            "licas_by_line_item_id",
-                            "lica_preview_url",
-                            "create_lica",
-                            "pause_line_item",
-                            "resume_line_item",
-                            "archive_line_item",
-                            "delivery_forecast_by_line_item_ids",
-                            "availability_forecast_by_line_item_id"
-                        ],
-                        "type": "string"
-                    }
-                },
-                "$schema": "https://json-schema.org/draft/2020-12/schema",
-                "properties": {
-                    "template": {
-                        "$ref": "#/$defs/SoapPayloadTemplate",
-                        "description": "Safe helper template to render into an inner SOAP payload_xml fragment."
-                    },
-                    "values": {
-                        "additionalProperties": true,
-                        "default": {},
-                        "description": "Template values such as order_id, line_item_id, creative_id, advertiser_id, name_contains, or line_item_ids.",
-                        "type": "object"
-                    }
-                },
-                "required": [
-                    "template"
-                ],
-                "type": "object"
-            },
-            "name": "gam_soap_payload_build"
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "template": {
+            "$ref": "#/$defs/SoapPayloadTemplate",
+            "description": "Safe helper template to render into an inner SOAP payload_xml fragment."
+          },
+          "values": {
+            "additionalProperties": true,
+            "default": {},
+            "description": "Template values such as order_id, line_item_id, creative_id, advertiser_id, name_contains, or line_item_ids.",
+            "type": "object"
+          }
         },
-        {
-            "description": "Run an allowlisted Google Ad Manager SOAP trafficking or forecast operation after scope, runtime, and confirmation-token gates.",
-            "inputSchema": {
-                "$defs": {
+        "required": [
+          "template"
+        ],
+        "type": "object"
+      },
+      "name": "gam_soap_payload_build"
+    },
+    {
+      "description": "Run an allowlisted Google Ad Manager SOAP trafficking or forecast operation after scope, runtime, and confirmation-token gates.",
+      "inputSchema": {
+        "$defs": {
           "SoapTraffickingOperation": {
             "enum": [
               "create_orders",
@@ -915,7 +968,9 @@
               "get_availability_forecast_by_id",
               "get_delivery_forecast",
               "get_delivery_forecast_by_ids",
-              "get_traffic_data"
+              "get_traffic_data",
+              "get_yield_groups_by_statement",
+              "get_yield_partners"
             ],
             "type": "string"
           },
@@ -951,7 +1006,7 @@
                 "description": "Allowlisted Google Ad Manager SOAP trafficking or forecast operation."
               },
               "payload_xml": {
-                "description": "Inner XML payload for the selected operation, excluding SOAP Envelope, Header, and operation wrapper.",
+                "description": "Inner XML payload for the selected operation, excluding SOAP Envelope, Header, and operation wrapper. Empty string is accepted only for no-body reads such as get_yield_partners.",
                 "type": "string"
               },
               "reason": {
@@ -1021,7 +1076,9 @@
               "get_availability_forecast_by_id",
               "get_delivery_forecast",
               "get_delivery_forecast_by_ids",
-              "get_traffic_data"
+              "get_traffic_data",
+              "get_yield_groups_by_statement",
+              "get_yield_partners"
             ],
             "type": "string"
           },
@@ -1057,7 +1114,7 @@
                 "description": "Allowlisted Google Ad Manager SOAP trafficking or forecast operation."
               },
               "payload_xml": {
-                "description": "Inner XML payload for the selected operation, excluding SOAP Envelope, Header, and operation wrapper.",
+                "description": "Inner XML payload for the selected operation, excluding SOAP Envelope, Header, and operation wrapper. Empty string is accepted only for no-body reads such as get_yield_partners.",
                 "type": "string"
               },
               "reason": {
