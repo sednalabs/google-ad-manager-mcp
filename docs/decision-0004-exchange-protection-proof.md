@@ -22,8 +22,8 @@ The tool must not turn partial API coverage into a green-looking answer.
 `gam_exchange_protection_probe` returns an `overall_decision`:
 
 - `attention_required`: a requested ad unit is missing, a direct flag indicates
-  AdSense/open eligibility, private auction/deal rows are present, or a yield
-  group targets one of the requested units.
+  AdSense/open eligibility, private auction/deal rows are present, or an active
+  yield group reports `targeted_exposed` for one of the requested units.
 - `partial_api_proof`: exposed API surfaces were checked, but at least one
   relevant surface is capped, unsupported, or unavailable.
 - `api_exposed_surfaces_clear`: exposed API surfaces were checked and no target
@@ -32,6 +32,12 @@ The tool must not turn partial API coverage into a green-looking answer.
 
 The tool always sets `mutation_performed=false` and names unsupported surfaces
 explicitly.
+
+For yield groups, `targeted_exposed` means active targeting remains without a
+covering inventory exclusion. `targeted_and_excluded` means the requested unit is
+covered by an exact exclusion, or by a descendant-inclusive exclusion when the
+probe has ancestor context, so that yield-group exposure does not drive the
+top-level `attention_required` decision.
 
 False `appliedAdsenseEnabled` or `effectiveAdsenseEnabled` ad-unit flags only
 prove those exposed ad-unit fields. GPT render observations such as a slot

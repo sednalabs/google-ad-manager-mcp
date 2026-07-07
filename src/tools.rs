@@ -811,7 +811,7 @@ impl AdManagerServer {
             "GAM protections, inventory rules, and unified pricing rules are not fully exposed through the current API surface; this probe cannot prove UI-only surfaces.".to_string(),
         ];
         let mut ad_unit_summaries = Vec::new();
-        let mut target_ad_unit_ids = Vec::new();
+        let mut target_ad_units = Vec::new();
 
         for code in &ad_unit_codes {
             let payload = match self
@@ -844,8 +844,8 @@ impl AdManagerServer {
             {
                 partial_reasons.push(format!("ad unit {code} did not produce complete proof"));
             }
-            if let Some(id) = summary.get("ad_unit_id").and_then(Value::as_str) {
-                target_ad_unit_ids.push(id.to_string());
+            if let Some(target) = probe_ad_unit_target_from_summary(&summary) {
+                target_ad_units.push(target);
             }
             ad_unit_summaries.push(summary);
         }
@@ -920,16 +920,21 @@ impl AdManagerServer {
             &args.network_code,
             args.api_version.as_deref(),
             page_size,
-            &target_ad_unit_ids,
+            &target_ad_units,
             args.include_raw,
         )
         .await
         {
             Ok(summary) => {
                 match summary.get("decision").and_then(Value::as_str) {
-                    Some("target_matches_found") => {
+                    Some("targeted_exposed") => {
                         attention_reasons.push(
-                            "one or more yield groups target a requested ad unit".to_string(),
+                            "one or more active yield groups target a requested ad unit without a covering exclusion".to_string(),
+                        );
+                    }
+                    Some("targeted_activity_unknown") => {
+                        partial_reasons.push(
+                            "one or more yield groups target a requested ad unit but activity status was not proven".to_string(),
                         );
                     }
                     Some("blocked") | Some("sample_only") | Some("skipped") => {
@@ -2262,6 +2267,7 @@ fn summarize_probe_ad_unit(code: &str, payload: &Value) -> Value {
     let row = matches[0];
     let resource_name = row.get("name").and_then(Value::as_str).unwrap_or_default();
     let ad_unit_id = resource_id_from_name(resource_name);
+    let ancestor_ad_unit_ids = ad_unit_ancestor_ids(row);
     let applied_adsense = row.get("appliedAdsenseEnabled").and_then(Value::as_bool);
     let effective_adsense = row.get("effectiveAdsenseEnabled").and_then(Value::as_bool);
     let proof_complete = applied_adsense.is_some() && effective_adsense.is_some();
@@ -2275,6 +2281,7 @@ fn summarize_probe_ad_unit(code: &str, payload: &Value) -> Value {
     json!({
         "ad_unit_code": code,
         "ad_unit_id": if ad_unit_id.is_empty() { Value::Null } else { Value::String(ad_unit_id) },
+        "ancestor_ad_unit_ids": ancestor_ad_unit_ids,
         "resource_name": resource_name,
         "display_name": row.get("displayName").cloned().unwrap_or(Value::Null),
         "status": row.get("status").cloned().unwrap_or(Value::Null),
@@ -2285,6 +2292,52 @@ fn summarize_probe_ad_unit(code: &str, payload: &Value) -> Value {
         "decision": decision,
         "proof_complete": proof_complete,
     })
+}
+
+fn ad_unit_ancestor_ids(row: &Value) -> Vec<String> {
+    let mut ids = BTreeSet::new();
+    for key in [
+        "parentAdUnit",
+        "parentAdUnits",
+        "parentPath",
+        "ancestorAdUnits",
+        "adUnitParent",
+    ] {
+        collect_numeric_ad_unit_ids(row.get(key), &mut ids);
+    }
+    ids.into_iter().collect()
+}
+
+fn collect_numeric_ad_unit_ids(value: Option<&Value>, ids: &mut BTreeSet<String>) {
+    match value {
+        Some(Value::String(raw)) => {
+            if let Some(id) = numeric_ad_unit_id_from_candidate(raw) {
+                ids.insert(id);
+            }
+        }
+        Some(Value::Array(values)) => {
+            for value in values {
+                collect_numeric_ad_unit_ids(Some(value), ids);
+            }
+        }
+        Some(Value::Object(object)) => {
+            for key in ["adUnitId", "id", "name", "parentAdUnit"] {
+                collect_numeric_ad_unit_ids(object.get(key), ids);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn numeric_ad_unit_id_from_candidate(value: &str) -> Option<String> {
+    let candidate = resource_id_from_name(value.trim());
+    if candidate.is_empty()
+        || !candidate.chars().all(|ch| ch.is_ascii_digit())
+        || candidate.parse::<u64>().ok()? == 0
+    {
+        return None;
+    }
+    Some(candidate)
 }
 
 fn catalog_rows(payload: &Value, collection: CatalogCollection) -> Vec<&Value> {
@@ -2364,10 +2417,10 @@ async fn probe_yield_groups(
     network_code: &str,
     api_version: Option<&str>,
     page_size: u32,
-    target_ad_unit_ids: &[String],
+    target_ad_units: &[ProbeAdUnitTarget],
     include_raw: bool,
 ) -> Result<Value, AdManagerError> {
-    if target_ad_unit_ids.is_empty() {
+    if target_ad_units.is_empty() {
         return Ok(json!({
             "surface": "yield_groups",
             "decision": "skipped",
@@ -2414,7 +2467,7 @@ async fn probe_yield_groups(
         applied.response_truncated,
         applied.request_id,
         applied.response_time,
-        target_ad_unit_ids,
+        target_ad_units,
         include_raw,
     ))
 }
@@ -2424,42 +2477,125 @@ fn summarize_yield_groups(
     response_truncated: bool,
     request_id: Option<String>,
     response_time: Option<String>,
-    target_ad_unit_ids: &[String],
+    target_ad_units: &[ProbeAdUnitTarget],
     include_raw: bool,
 ) -> Value {
-    let target_ids = target_ad_unit_ids
+    let target_ad_unit_ids = target_ad_units
         .iter()
-        .map(String::as_str)
-        .collect::<BTreeSet<_>>();
+        .map(|target| target.ad_unit_id.clone())
+        .collect::<Vec<_>>();
     let results = extract_xml_blocks(xml, "results");
     let total_result_set_size =
         extract_xml_tag_text(xml, "totalResultSetSize").and_then(|value| value.parse::<u64>().ok());
     let mut matches = Vec::new();
+    let mut targeted_exposed = Vec::new();
+    let mut targeted_and_excluded = Vec::new();
+    let mut targeted_inactive = Vec::new();
+    let mut targeted_activity_unknown = Vec::new();
     for result in &results {
-        let ad_unit_ids = extract_xml_tag_texts(result, "adUnitId");
-        let matched_ids = ad_unit_ids
-            .iter()
-            .filter(|id| target_ids.contains(id.as_str()))
-            .cloned()
-            .collect::<Vec<_>>();
+        let yield_group_id = yield_group_id_from_xml(result);
+        let yield_group_name = yield_group_name(result);
+        let status = extract_xml_tag_text(result, "exchangeStatus")
+            .or_else(|| extract_xml_tag_text(result, "status"));
+        let activity_state = yield_group_activity_state(status.as_deref());
+        let format = extract_xml_tag_text(result, "format");
+        let environment_type = extract_xml_tag_text(result, "environmentType");
+        let targeting_block = extract_xml_first_block(result, "targeting").unwrap_or_default();
+        let inventory_block = extract_xml_first_block(&targeting_block, "inventoryTargeting")
+            .unwrap_or_else(|| "<inventoryTargeting />".to_string());
+        let targeted_ad_units = ad_unit_targeting_values(&inventory_block, "targetedAdUnits");
+        let excluded_ad_units = ad_unit_targeting_values(&inventory_block, "excludedAdUnits");
+        let mut matched_ids = Vec::new();
+        let mut result_targeted_exposed = Vec::new();
+        let mut result_targeted_and_excluded = Vec::new();
+        let mut result_targeted_inactive = Vec::new();
+        let mut result_targeted_activity_unknown = Vec::new();
+
+        for target in target_ad_units {
+            let direct_or_ancestor_targeting_match =
+                targeting_coverage_for_target(&targeted_ad_units, target);
+            let exclusion_match = targeting_coverage_for_target(&excluded_ad_units, target);
+            let broad_targeting_match =
+                if direct_or_ancestor_targeting_match.is_none() && exclusion_match.is_some() {
+                    broad_descendant_targeting_context(&targeted_ad_units)
+                } else {
+                    None
+                };
+            let targeting_match = direct_or_ancestor_targeting_match.or(broad_targeting_match);
+            let Some(classification) = yield_group_match_classification(
+                targeting_match.as_ref(),
+                exclusion_match.as_ref(),
+                activity_state,
+            ) else {
+                continue;
+            };
+
+            let match_entry = json!({
+                "yield_group_id": yield_group_id.clone(),
+                "yield_group_name": yield_group_name.clone(),
+                "status": status.clone(),
+                "activity_state": activity_state,
+                "format": format.clone(),
+                "environment_type": environment_type.clone(),
+                "requested_ad_unit_id": target.ad_unit_id.clone(),
+                "classification": classification,
+                "targeting_match": targeting_match.as_ref().map(targeting_coverage_json).unwrap_or(Value::Null),
+                "exclusion_match": exclusion_match.as_ref().map(targeting_coverage_json).unwrap_or(Value::Null),
+            });
+
+            matched_ids.push(target.ad_unit_id.clone());
+            match classification {
+                "targeted_exposed" => {
+                    result_targeted_exposed.push(target.ad_unit_id.clone());
+                    targeted_exposed.push(match_entry);
+                }
+                "targeted_and_excluded" => {
+                    result_targeted_and_excluded.push(target.ad_unit_id.clone());
+                    targeted_and_excluded.push(match_entry);
+                }
+                "targeted_inactive" => {
+                    result_targeted_inactive.push(target.ad_unit_id.clone());
+                    targeted_inactive.push(match_entry);
+                }
+                "targeted_activity_unknown" => {
+                    result_targeted_activity_unknown.push(target.ad_unit_id.clone());
+                    targeted_activity_unknown.push(match_entry);
+                }
+                _ => {}
+            }
+        }
+
         if matched_ids.is_empty() {
             continue;
         }
         matches.push(json!({
-            "yield_group_id": yield_group_id_from_xml(result),
-            "yield_group_name": yield_group_name(result),
-            "status": extract_xml_tag_text(result, "exchangeStatus").or_else(|| extract_xml_tag_text(result, "status")),
-            "format": extract_xml_tag_text(result, "format"),
-            "environment_type": extract_xml_tag_text(result, "environmentType"),
+            "yield_group_id": yield_group_id,
+            "yield_group_name": yield_group_name,
+            "status": status,
+            "activity_state": activity_state,
+            "format": format,
+            "environment_type": environment_type,
             "matched_ad_unit_ids": matched_ids,
+            "targeted_exposed_ad_unit_ids": result_targeted_exposed,
+            "targeted_and_excluded_ad_unit_ids": result_targeted_and_excluded,
+            "targeted_inactive_ad_unit_ids": result_targeted_inactive,
+            "targeted_activity_unknown_ad_unit_ids": result_targeted_activity_unknown,
+            "targeted_ad_units": targeted_ad_units,
+            "excluded_ad_units": excluded_ad_units,
         }));
     }
     let sample_only = response_truncated
         || total_result_set_size
             .map(|total| total > results.len() as u64)
             .unwrap_or(false);
-    let decision = if !matches.is_empty() {
-        "target_matches_found"
+    let decision = if !targeted_exposed.is_empty() {
+        "targeted_exposed"
+    } else if !targeted_and_excluded.is_empty() {
+        "targeted_and_excluded"
+    } else if !targeted_activity_unknown.is_empty() {
+        "targeted_activity_unknown"
+    } else if !targeted_inactive.is_empty() {
+        "targeted_inactive"
     } else if sample_only {
         "sample_only"
     } else {
@@ -2481,6 +2617,10 @@ fn summarize_yield_groups(
         "response_truncated": response_truncated,
         "target_ad_unit_ids": target_ad_unit_ids,
         "target_ad_unit_matches": matches,
+        "targeted_exposed": targeted_exposed,
+        "targeted_and_excluded": targeted_and_excluded,
+        "targeted_inactive": targeted_inactive,
+        "targeted_activity_unknown": targeted_activity_unknown,
         "mutation_performed": false,
     });
     if include_raw && let Some(object) = response.as_object_mut() {
@@ -2490,6 +2630,106 @@ fn summarize_yield_groups(
         );
     }
     response
+}
+
+fn probe_ad_unit_target_from_summary(summary: &Value) -> Option<ProbeAdUnitTarget> {
+    let ad_unit_id = summary.get("ad_unit_id").and_then(Value::as_str)?;
+    let mut target = ProbeAdUnitTarget::exact(ad_unit_id.to_string());
+    if let Some(values) = summary
+        .get("ancestor_ad_unit_ids")
+        .and_then(Value::as_array)
+    {
+        target.ancestor_ad_unit_ids.extend(
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .filter_map(numeric_ad_unit_id_from_candidate),
+        );
+    }
+    Some(target)
+}
+
+fn yield_group_activity_state(status: Option<&str>) -> &'static str {
+    match status.map(|value| value.trim().to_ascii_uppercase()) {
+        Some(value) if value == "ACTIVE" => "active",
+        Some(value)
+            if matches!(
+                value.as_str(),
+                "INACTIVE" | "ARCHIVED" | "DELETED" | "PAUSED" | "DRAFT"
+            ) =>
+        {
+            "inactive"
+        }
+        _ => "unknown",
+    }
+}
+
+fn yield_group_match_classification(
+    targeting_match: Option<&TargetingCoverage>,
+    exclusion_match: Option<&TargetingCoverage>,
+    activity_state: &str,
+) -> Option<&'static str> {
+    if targeting_match.is_some() && exclusion_match.is_some() {
+        return Some("targeted_and_excluded");
+    }
+    if targeting_match.is_none() {
+        return None;
+    }
+    if activity_state == "inactive" {
+        Some("targeted_inactive")
+    } else if activity_state == "active" {
+        Some("targeted_exposed")
+    } else {
+        Some("targeted_activity_unknown")
+    }
+}
+
+fn targeting_coverage_for_target(
+    values: &[AdUnitTargetingValue],
+    target: &ProbeAdUnitTarget,
+) -> Option<TargetingCoverage> {
+    values
+        .iter()
+        .find(|value| value.ad_unit_id == target.ad_unit_id)
+        .map(|value| TargetingCoverage {
+            ad_unit_id: value.ad_unit_id.clone(),
+            include_descendants: value.include_descendants,
+            match_type: "exact",
+        })
+        .or_else(|| {
+            values
+                .iter()
+                .find(|value| {
+                    value.include_descendants == Some(true)
+                        && target.ancestor_ad_unit_ids.contains(&value.ad_unit_id)
+                })
+                .map(|value| TargetingCoverage {
+                    ad_unit_id: value.ad_unit_id.clone(),
+                    include_descendants: value.include_descendants,
+                    match_type: "ancestor_descendant",
+                })
+        })
+}
+
+fn broad_descendant_targeting_context(
+    values: &[AdUnitTargetingValue],
+) -> Option<TargetingCoverage> {
+    values
+        .iter()
+        .find(|value| value.include_descendants == Some(true))
+        .map(|value| TargetingCoverage {
+            ad_unit_id: value.ad_unit_id.clone(),
+            include_descendants: value.include_descendants,
+            match_type: "broad_descendant_target_unresolved_hierarchy",
+        })
+}
+
+fn targeting_coverage_json(coverage: &TargetingCoverage) -> Value {
+    json!({
+        "ad_unit_id": coverage.ad_unit_id.clone(),
+        "include_descendants": coverage.include_descendants,
+        "match_type": coverage.match_type,
+    })
 }
 
 fn summarize_rest_discovery(document: &Value) -> Value {
@@ -2914,6 +3154,28 @@ fn validate_soap_apply_context(request: &SoapTraffickingRequestArgs) -> Result<(
 struct AdUnitTargetingValue {
     ad_unit_id: String,
     include_descendants: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProbeAdUnitTarget {
+    ad_unit_id: String,
+    ancestor_ad_unit_ids: BTreeSet<String>,
+}
+
+impl ProbeAdUnitTarget {
+    fn exact(ad_unit_id: String) -> Self {
+        Self {
+            ad_unit_id,
+            ancestor_ad_unit_ids: BTreeSet::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TargetingCoverage {
+    ad_unit_id: String,
+    include_descendants: Option<bool>,
+    match_type: &'static str,
 }
 
 #[derive(Debug, Clone)]
@@ -4957,13 +5219,165 @@ mod tests {
             false,
             Some("req".to_string()),
             None,
-            &["123".to_string()],
+            &probe_targets(&["123"]),
             false,
         );
 
-        assert_eq!(summary["decision"], "target_matches_found");
+        assert_eq!(summary["decision"], "targeted_exposed");
         assert_eq!(summary["proof_state"], "complete");
         assert_eq!(summary["target_ad_unit_matches"][0]["yield_group_id"], "10");
+        assert_eq!(
+            summary["targeted_exposed"][0]["classification"],
+            "targeted_exposed"
+        );
+        assert_eq!(
+            summary["targeted_exposed"][0]["targeting_match"]["match_type"],
+            "exact"
+        );
+    }
+
+    #[test]
+    fn exchange_probe_treats_exact_excluded_yield_group_match_as_protected() {
+        let xml = r#"
+        <getYieldGroupsByStatementResponse>
+          <rval>
+            <totalResultSetSize>1</totalResultSetSize>
+            <results>
+              <yieldGroupId>755382</yieldGroupId>
+              <yieldGroupName>Open bidding group</yieldGroupName>
+              <exchangeStatus>ACTIVE</exchangeStatus>
+              <format>DISPLAY</format>
+              <environmentType>WEB</environmentType>
+              <targeting>
+                <inventoryTargeting>
+                  <targetedAdUnits>
+                    <adUnitId>303152</adUnitId>
+                    <includeDescendants>true</includeDescendants>
+                  </targetedAdUnits>
+                  <excludedAdUnits>
+                    <adUnitId>987654</adUnitId>
+                    <includeDescendants>true</includeDescendants>
+                  </excludedAdUnits>
+                </inventoryTargeting>
+              </targeting>
+            </results>
+          </rval>
+        </getYieldGroupsByStatementResponse>
+        "#;
+
+        let summary = summarize_yield_groups(
+            xml,
+            false,
+            Some("req".to_string()),
+            None,
+            &probe_targets(&["987654"]),
+            false,
+        );
+
+        assert_eq!(summary["decision"], "targeted_and_excluded");
+        assert_eq!(summary["proof_state"], "complete");
+        assert_eq!(summary["targeted_exposed"], json!([]));
+        assert_eq!(
+            summary["targeted_and_excluded"][0]["classification"],
+            "targeted_and_excluded"
+        );
+        assert_eq!(
+            summary["targeted_and_excluded"][0]["exclusion_match"]["match_type"],
+            "exact"
+        );
+        assert_eq!(
+            summary["targeted_and_excluded"][0]["targeting_match"]["match_type"],
+            "broad_descendant_target_unresolved_hierarchy"
+        );
+        assert_eq!(
+            summary["target_ad_unit_matches"][0]["targeted_and_excluded_ad_unit_ids"],
+            json!(["987654"])
+        );
+    }
+
+    #[test]
+    fn exchange_probe_uses_known_ancestor_targeting_and_exact_exclusion() {
+        let xml = r#"
+        <getYieldGroupsByStatementResponse>
+          <rval>
+            <totalResultSetSize>1</totalResultSetSize>
+            <results>
+              <yieldGroupId>755382</yieldGroupId>
+              <yieldGroupName>Open bidding group</yieldGroupName>
+              <exchangeStatus>ACTIVE</exchangeStatus>
+              <targeting>
+                <inventoryTargeting>
+                  <targetedAdUnits>
+                    <adUnitId>303152</adUnitId>
+                    <includeDescendants>true</includeDescendants>
+                  </targetedAdUnits>
+                  <excludedAdUnits>
+                    <adUnitId>987654</adUnitId>
+                    <includeDescendants>false</includeDescendants>
+                  </excludedAdUnits>
+                </inventoryTargeting>
+              </targeting>
+            </results>
+          </rval>
+        </getYieldGroupsByStatementResponse>
+        "#;
+
+        let summary = summarize_yield_groups(
+            xml,
+            false,
+            None,
+            None,
+            &[probe_target_with_ancestors("987654", &["303152"])],
+            false,
+        );
+
+        assert_eq!(summary["decision"], "targeted_and_excluded");
+        assert_eq!(
+            summary["targeted_and_excluded"][0]["targeting_match"]["match_type"],
+            "ancestor_descendant"
+        );
+        assert_eq!(
+            summary["targeted_and_excluded"][0]["exclusion_match"]["include_descendants"],
+            false
+        );
+    }
+
+    #[test]
+    fn exchange_probe_marks_known_ancestor_target_without_exclusion_as_exposed() {
+        let xml = r#"
+        <getYieldGroupsByStatementResponse>
+          <rval>
+            <totalResultSetSize>1</totalResultSetSize>
+            <results>
+              <yieldGroupId>755382</yieldGroupId>
+              <exchangeStatus>ACTIVE</exchangeStatus>
+              <targeting>
+                <inventoryTargeting>
+                  <targetedAdUnits>
+                    <adUnitId>303152</adUnitId>
+                    <includeDescendants>true</includeDescendants>
+                  </targetedAdUnits>
+                </inventoryTargeting>
+              </targeting>
+            </results>
+          </rval>
+        </getYieldGroupsByStatementResponse>
+        "#;
+
+        let summary = summarize_yield_groups(
+            xml,
+            false,
+            None,
+            None,
+            &[probe_target_with_ancestors("987654", &["303152"])],
+            false,
+        );
+
+        assert_eq!(summary["decision"], "targeted_exposed");
+        assert_eq!(
+            summary["targeted_exposed"][0]["targeting_match"]["match_type"],
+            "ancestor_descendant"
+        );
     }
 
     #[test]
@@ -5179,7 +5593,8 @@ mod tests {
     #[test]
     fn exchange_probe_marks_truncated_yield_group_response_as_sample_only() {
         let xml = r#"<rval><totalResultSetSize>10</totalResultSetSize><results><id>1</id></results></rval>"#;
-        let summary = summarize_yield_groups(xml, false, None, None, &["999".to_string()], false);
+        let summary =
+            summarize_yield_groups(xml, false, None, None, &probe_targets(&["999"]), false);
 
         assert_eq!(summary["decision"], "sample_only");
         assert_eq!(summary["proof_state"], "sample_only");
@@ -5365,6 +5780,22 @@ mod tests {
         </targeting>
         <adSources><companyId>400</companyId></adSources>
         "#
+    }
+
+    fn probe_targets(ids: &[&str]) -> Vec<ProbeAdUnitTarget> {
+        ids.iter()
+            .map(|id| ProbeAdUnitTarget::exact((*id).to_string()))
+            .collect()
+    }
+
+    fn probe_target_with_ancestors(id: &str, ancestor_ids: &[&str]) -> ProbeAdUnitTarget {
+        ProbeAdUnitTarget {
+            ad_unit_id: id.to_string(),
+            ancestor_ad_unit_ids: ancestor_ids
+                .iter()
+                .map(|ancestor_id| (*ancestor_id).to_string())
+                .collect(),
+        }
     }
 
     fn sample_yield_group_exclusion_draft(current_fingerprint: &str) -> YieldGroupExclusionDraft {

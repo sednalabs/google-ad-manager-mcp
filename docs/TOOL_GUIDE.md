@@ -70,11 +70,17 @@ The tool checks:
   the configured credential has the Ad Manager manage scope;
 - the REST discovery document for exchange/protection-like resource exposure.
 
+For yield groups, the probe evaluates `targetedAdUnits` separately from
+`excludedAdUnits`. A requested ad unit matched by active yield-group targeting
+without a covering exclusion is reported as `targeted_exposed`; a requested ad
+unit covered by an exact exclusion, or by a descendant-inclusive exclusion when
+ancestor context is available, is reported as `targeted_and_excluded`.
+
 The tool deliberately does not claim full certainty when GAM does not expose a
-surface. It returns one of:
+surface. Its top-level decision returns one of:
 
 - `attention_required` when an exposed surface shows a direct issue or target
-  match;
+  match, including `targeted_exposed` yield-group exposure;
 - `partial_api_proof` when reads are capped, blocked, or unsupported by the
   current API surface;
 - `api_exposed_surfaces_clear` only when exposed API surfaces are complete and

@@ -102,7 +102,8 @@ After auth is proven:
 1. `gam_networks_list`
 2. `gam_network_catalog_list`
 3. `gam_exchange_protection_probe` when you need exchange/yield/protection
-   proof for exact ad units
+   proof for exact ad units; yield-group exposure separates
+   `targeted_exposed` from `targeted_and_excluded`
 4. `gam_report_run`
 5. `gam_report_result_rows` when a report result has more pages
 6. `gam_trafficking_tool_matrix` before planning writes
