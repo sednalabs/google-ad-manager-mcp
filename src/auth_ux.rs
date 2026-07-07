@@ -1,10 +1,11 @@
 //! Operator-facing authentication helpers.
 
 use std::fs;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
-use gcp_auth::CustomServiceAccount;
+use gcp_auth::{CustomServiceAccount, Error as GcpAuthError};
 use mcp_toolkit_auth::provider_auth::{
     GoogleProviderAuthConfig, GoogleProviderAuthFailureKind, classify_google_provider_auth_error,
     format_provider_auth_command, google_adc_quota_project_command,
@@ -691,9 +692,7 @@ fn service_account_json_env_status(raw_json: &str) -> CredentialSourceStatus {
 }
 
 fn google_application_credentials_status(path: PathBuf) -> CredentialSourceStatus {
-    let runtime_probe_path = google_application_credentials_runtime_probe_path(&path);
-    let credential_material_detected = credential_file_present(&runtime_probe_path);
-    match CustomServiceAccount::from_file(&runtime_probe_path) {
+    match CustomServiceAccount::from_file(&path) {
         Ok(_) => CredentialSourceStatus {
             config_valid: true,
             config_issue: None,
@@ -701,9 +700,7 @@ fn google_application_credentials_status(path: PathBuf) -> CredentialSourceStatu
             repair_step: None,
             adc_file: None,
         },
-        Err(service_account_err) => match google_authorized_user_adc_metadata_from_file(
-            &runtime_probe_path,
-        ) {
+        Err(service_account_err) => match google_authorized_user_adc_metadata_from_file(&path) {
             Ok(Some(_metadata)) => CredentialSourceStatus {
                 config_valid: false,
                 config_issue: Some(format!(
@@ -724,7 +721,7 @@ fn google_application_credentials_status(path: PathBuf) -> CredentialSourceStatu
                         "failed to load GOOGLE_APPLICATION_CREDENTIALS at {}: {service_account_err}",
                         path.display()
                     ))),
-                    credential_material_detected,
+                    credential_material_detected_from_gcp_auth_error(&service_account_err),
                     repair_step: Some(
                         "Fix `GOOGLE_APPLICATION_CREDENTIALS` so it points to a readable credentials file, or unset it to use another credential source."
                             .to_string(),
@@ -736,12 +733,11 @@ fn google_application_credentials_status(path: PathBuf) -> CredentialSourceStatu
     }
 }
 
-fn google_application_credentials_runtime_probe_path(path: &Path) -> PathBuf {
-    fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
-}
-
-fn credential_file_present(path: &Path) -> bool {
-    fs::metadata(path).map(|metadata| metadata.is_file()).unwrap_or(false)
+fn credential_material_detected_from_gcp_auth_error(err: &GcpAuthError) -> bool {
+    !matches!(
+        err,
+        GcpAuthError::Io(_, source) if source.kind() == ErrorKind::NotFound
+    )
 }
 
 fn uses_local_user_adc(env: &EnvStatus) -> bool {
@@ -905,8 +901,6 @@ struct CredentialSourceStatus {
 #[cfg(test)]
 mod tests {
     use std::fs;
-    #[cfg(unix)]
-    use std::os::unix::fs::symlink;
     use std::path::Path;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -1056,14 +1050,9 @@ rFCaohNaJ5PK\n\
         let _ = fs::remove_file(path);
     }
 
-    #[cfg(unix)]
     #[test]
-    fn google_application_credentials_accepts_runtime_compatible_service_account_symlink() {
+    fn google_application_credentials_accepts_service_account_json_file() {
         let target = unique_test_file("google-application-credentials-service-account", "json");
-        let link = unique_test_file(
-            "google-application-credentials-service-account-link",
-            "json",
-        );
         fs::create_dir_all(target.parent().expect("test file parent")).expect("create test dir");
         fs::write(&target, test_service_account_json()).expect("write service-account json");
         #[cfg(unix)]
@@ -1071,17 +1060,13 @@ rFCaohNaJ5PK\n\
             use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(&target, fs::Permissions::from_mode(0o600)).expect("chmod");
         }
-        let target = fs::canonicalize(&target).expect("canonicalize target");
-        symlink(&target, &link).expect("create symlink");
-
-        let status = google_application_credentials_status(link.clone());
+        let status = google_application_credentials_status(target.clone());
 
         assert!(status.config_valid);
         assert!(status.config_issue.is_none());
         assert!(status.credential_material_detected);
         assert!(status.repair_step.is_none());
 
-        let _ = fs::remove_file(link);
         let _ = fs::remove_file(target);
     }
 
