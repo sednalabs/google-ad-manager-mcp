@@ -1985,9 +1985,9 @@ mod tests {
     use super::{
         AdManagerClient, CatalogCollection, MAX_SOAP_RESPONSE_XML_BYTES, RestWriteOperation,
         RestWriteResource, SOAP_ENVELOPE_NAMESPACE, SOAP_METHOD_NAMES_LOWERCASE,
-        SoapTraffickingOperation, classify_soap_impact, clip_xml_response, extract_xml_tag,
-        validate_operation_name, validate_report_result_name, validate_rest_write_body,
-        validate_soap_payload_xml,
+        SoapTraffickingApplyResult, SoapTraffickingOperation, classify_soap_impact,
+        clip_xml_response, extract_xml_tag, soap_apply_failed, validate_operation_name,
+        validate_report_result_name, validate_rest_write_body, validate_soap_payload_xml,
     };
     use crate::Settings;
     use serde_json::json;
