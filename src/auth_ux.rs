@@ -1043,10 +1043,9 @@ rFCaohNaJ5PK\n\
         assert!(!status.config_valid);
         assert!(!status.credential_material_detected);
         assert!(
-            status
-                .config_issue
-                .as_deref()
-                .is_some_and(|issue| issue.contains("failed to load GOOGLE_APPLICATION_CREDENTIALS"))
+            status.config_issue.as_deref().is_some_and(
+                |issue| issue.contains("failed to load GOOGLE_APPLICATION_CREDENTIALS")
+            )
         );
 
         let _ = fs::remove_file(path);
