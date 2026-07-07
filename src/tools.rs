@@ -2672,9 +2672,7 @@ fn yield_group_match_classification(
     if targeting_match.is_some() && exclusion_match.is_some() {
         return Some("targeted_and_excluded");
     }
-    if targeting_match.is_none() {
-        return None;
-    }
+    targeting_match?;
     if activity_state == "inactive" {
         Some("targeted_inactive")
     } else if activity_state == "active" {
