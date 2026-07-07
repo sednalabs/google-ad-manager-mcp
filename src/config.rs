@@ -43,6 +43,14 @@ pub struct Cli {
     #[arg(long, env = "GOOGLE_AD_MANAGER_MCP_QUOTA_PROJECT", global = true)]
     pub quota_project: Option<String>,
 
+    /// Intentionally use conventional shared gcloud ADC instead of the server-specific ADC file at runtime.
+    #[arg(
+        long = "runtime-shared-adc",
+        env = "GOOGLE_AD_MANAGER_MCP_SHARED_ADC",
+        global = true
+    )]
+    pub shared_adc: bool,
+
     /// Optional server-specific service account JSON file path.
     #[arg(
         long,
@@ -268,6 +276,7 @@ pub struct Settings {
     pub print_tool_schema: bool,
     pub scope: String,
     pub quota_project: Option<String>,
+    pub shared_adc: bool,
     pub service_account_json_path: Option<String>,
     pub service_account_json: Option<String>,
     pub http_timeout: Duration,
@@ -361,6 +370,7 @@ impl Settings {
             print_tool_schema: cli.print_tool_schema,
             scope,
             quota_project: normalize_optional(cli.quota_project),
+            shared_adc: cli.shared_adc,
             service_account_json_path: normalize_optional(cli.service_account_json_path),
             service_account_json: normalize_optional(cli.service_account_json),
             http_timeout: Duration::from_millis(cli.http_timeout_ms.max(1)),
@@ -391,6 +401,7 @@ impl Default for Settings {
             print_tool_schema: false,
             scope: DEFAULT_READONLY_SCOPE.to_string(),
             quota_project: None,
+            shared_adc: false,
             service_account_json_path: None,
             service_account_json: None,
             http_timeout: Duration::from_millis(15_000),
@@ -440,8 +451,46 @@ fn parse_write_mode(value: &str) -> Result<GuardedActionRuntimeMode, AdManagerEr
     }
 }
 
-pub fn adc_credentials_path() -> Option<PathBuf> {
-    server_adc_credentials_path().or_else(conventional_adc_credentials_path)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdcSelectionSource {
+    ServerSpecificDefault,
+    SharedExplicit,
+}
+
+impl AdcSelectionSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ServerSpecificDefault => "server_specific_default",
+            Self::SharedExplicit => "shared_explicit",
+        }
+    }
+
+    pub fn kind_label(self) -> &'static str {
+        match self {
+            Self::ServerSpecificDefault => "server-specific",
+            Self::SharedExplicit => "shared",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SelectedAdcFile {
+    pub source: AdcSelectionSource,
+    pub path: PathBuf,
+}
+
+pub fn selected_adc_file(shared_adc: bool) -> Option<SelectedAdcFile> {
+    if shared_adc {
+        conventional_adc_credentials_path().map(|path| SelectedAdcFile {
+            source: AdcSelectionSource::SharedExplicit,
+            path,
+        })
+    } else {
+        server_adc_credentials_path().map(|path| SelectedAdcFile {
+            source: AdcSelectionSource::ServerSpecificDefault,
+            path,
+        })
+    }
 }
 
 pub fn server_adc_credentials_path() -> Option<PathBuf> {

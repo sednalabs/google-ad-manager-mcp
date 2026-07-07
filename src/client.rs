@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 use gcp_auth::{CustomServiceAccount, TokenProvider};
 use mcp_toolkit_auth::upstream_oauth::{
     RefreshTokenProvider, UpstreamOAuthError, google_authorized_user_adc_from_file,
+    google_authorized_user_adc_metadata_from_file,
 };
 use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderValue, USER_AGENT};
 use reqwest::{Client, Method, RequestBuilder};
@@ -16,7 +17,7 @@ use serde_json::{Value, json};
 use tokio::sync::OnceCell;
 use tokio::time::sleep;
 
-use crate::config::Settings;
+use crate::config::{SelectedAdcFile, Settings, selected_adc_file};
 use crate::error::AdManagerError;
 
 pub const DEFAULT_SOAP_API_VERSION: &str = "v202605";
@@ -28,7 +29,7 @@ const SOAP_ENVELOPE_NAMESPACE: &str = concat!("http", "://schemas.xmlsoap.org/so
 #[serde(rename_all = "snake_case")]
 pub enum AuthSource {
     GoogleDefaultProviderChain,
-    GoogleAuthorizedUserAdcFileOrDefaultProviderChain,
+    GoogleAuthorizedUserAdcFile,
     ServiceAccountJsonPath,
     ServiceAccountJsonEnv,
 }
@@ -37,9 +38,7 @@ impl AuthSource {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::GoogleDefaultProviderChain => "google_default_provider_chain",
-            Self::GoogleAuthorizedUserAdcFileOrDefaultProviderChain => {
-                "google_authorized_user_adc_file_or_default_provider_chain"
-            }
+            Self::GoogleAuthorizedUserAdcFile => "google_authorized_user_adc_file",
             Self::ServiceAccountJsonPath => "service_account_json_path",
             Self::ServiceAccountJsonEnv => "service_account_json_env",
         }
@@ -469,7 +468,7 @@ impl SoapTraffickingOperation {
                 "payload_xml must contain one or more <lineItemIds> and optional <forecastOptions>"
             }
             Self::GetTrafficData => {
-                "payload_xml must contain <lineItem> and optional <forecastOptions>"
+                "payload_xml must contain <trafficDataRequest> and optional <forecastOptions>"
             }
         }
     }
@@ -597,14 +596,7 @@ impl AdManagerClient {
     }
 
     pub fn auth_source(&self) -> AuthSource {
-        match &self.auth_mode {
-            UpstreamAuthMode::Adc => AuthSource::GoogleDefaultProviderChain,
-            UpstreamAuthMode::AuthorizedUserAdcFile(_) => {
-                AuthSource::GoogleAuthorizedUserAdcFileOrDefaultProviderChain
-            }
-            UpstreamAuthMode::ServiceAccountJsonPath(_) => AuthSource::ServiceAccountJsonPath,
-            UpstreamAuthMode::ServiceAccountJsonEnv(_) => AuthSource::ServiceAccountJsonEnv,
-        }
+        auth_source_for_mode(&self.auth_mode)
     }
 
     pub fn scope(&self) -> &str {
@@ -761,6 +753,23 @@ impl AdManagerClient {
             });
         }
         validate_rest_write_body(operation, &body)?;
+        let validated_resource_name = if operation == RestWriteOperation::Patch {
+            Some(validate_resource_name(
+                "resource_name",
+                resource_name,
+                &network_code,
+                resource.resource_segment(),
+            )?)
+        } else {
+            None
+        };
+        validate_rest_write_body_binding(
+            operation,
+            &body,
+            &network_code,
+            resource.resource_segment(),
+            validated_resource_name.as_deref(),
+        )?;
 
         let parent = format!("networks/{network_code}");
         let segment = resource.resource_segment();
@@ -773,8 +782,9 @@ impl AdManagerClient {
                 None,
             ),
             RestWriteOperation::Patch => {
-                let name =
-                    validate_resource_name("resource_name", resource_name, &network_code, segment)?;
+                let name = validated_resource_name
+                    .clone()
+                    .expect("patch operations validate resource_name before path construction");
                 if let Some(update_mask) = non_empty(update_mask.map(ToOwned::to_owned)) {
                     query.push(("updateMask".to_string(), update_mask));
                 }
@@ -877,7 +887,7 @@ impl AdManagerClient {
     ) -> Result<SoapTraffickingPlan, AdManagerError> {
         let network_code = validate_network_code(network_code)?;
         let api_version = validate_soap_api_version(api_version)?;
-        let payload_xml = validate_soap_payload_xml(payload_xml)?;
+        let payload_xml = validate_soap_payload_xml(operation, payload_xml)?;
         let service = operation.service_name();
         let method = operation.soap_method();
         let namespace = soap_namespace(&api_version);
@@ -1047,11 +1057,9 @@ impl AdManagerClient {
         Ok(provider.clone())
     }
 
-    async fn oauth_token_provider(
-        &self,
-    ) -> Result<Option<Arc<RefreshTokenProvider>>, AdManagerError> {
+    async fn oauth_token_provider(&self) -> Result<Arc<RefreshTokenProvider>, AdManagerError> {
         if let Some(provider) = self.oauth_token_provider.get() {
-            return Ok(Some(provider.clone()));
+            return Ok(provider.clone());
         }
 
         let UpstreamAuthMode::AuthorizedUserAdcFile(path) = &self.auth_mode else {
@@ -1060,32 +1068,22 @@ impl AdManagerClient {
             ));
         };
 
+        let selected = selected_adc_file_for_path(path)?;
+        ensure_selected_adc_ready(&selected)?;
         let scopes = vec![self.scope.as_ref().to_string()];
-        let adc = match google_authorized_user_adc_from_file(path, scopes) {
-            Ok(adc) => adc,
-            Err(err) if google_adc_file_missing(&err) => return Ok(None),
-            Err(err) => {
-                return Err(AdManagerError::AuthBootstrap(format!(
-                    "failed to load authorized-user ADC at '{}': {err}",
-                    path.display()
-                )));
-            }
-        };
+        let adc = google_authorized_user_adc_from_file(path, scopes).map_err(|err| {
+            AdManagerError::AuthBootstrap(selected_adc_error_message(&selected, &err))
+        })?;
         let provider = RefreshTokenProvider::new(adc.into_refresh_config())
             .map(Arc::new)
             .map_err(|err| AdManagerError::AuthBootstrap(err.to_string()))?;
         let _ = self.oauth_token_provider.set(provider.clone());
-        Ok(Some(provider))
+        Ok(provider)
     }
 
     async fn access_token(&self) -> Result<String, AdManagerError> {
-        let preferred_oauth_provider =
-            if matches!(&self.auth_mode, UpstreamAuthMode::AuthorizedUserAdcFile(_)) {
-                self.oauth_token_provider().await?
-            } else {
-                None
-            };
-        if let Some(provider) = preferred_oauth_provider {
+        if matches!(&self.auth_mode, UpstreamAuthMode::AuthorizedUserAdcFile(_)) {
+            let provider = self.oauth_token_provider().await?;
             let token = provider
                 .access_token()
                 .await
@@ -1099,6 +1097,19 @@ impl AdManagerClient {
             .await
             .map_err(|err| AdManagerError::AuthBootstrap(err.to_string()))?;
         Ok(token.as_str().to_string())
+    }
+}
+
+pub(crate) fn auth_source_from_settings(settings: &Settings) -> Result<AuthSource, AdManagerError> {
+    select_auth_mode(settings).map(|auth_mode| auth_source_for_mode(&auth_mode))
+}
+
+fn auth_source_for_mode(auth_mode: &UpstreamAuthMode) -> AuthSource {
+    match auth_mode {
+        UpstreamAuthMode::Adc => AuthSource::GoogleDefaultProviderChain,
+        UpstreamAuthMode::AuthorizedUserAdcFile(_) => AuthSource::GoogleAuthorizedUserAdcFile,
+        UpstreamAuthMode::ServiceAccountJsonPath(_) => AuthSource::ServiceAccountJsonPath,
+        UpstreamAuthMode::ServiceAccountJsonEnv(_) => AuthSource::ServiceAccountJsonEnv,
     }
 }
 
@@ -1127,11 +1138,74 @@ fn select_auth_mode(settings: &Settings) -> Result<UpstreamAuthMode, AdManagerEr
         return Ok(UpstreamAuthMode::Adc);
     }
 
-    if let Some(path) = crate::config::server_adc_credentials_path() {
-        return Ok(UpstreamAuthMode::AuthorizedUserAdcFile(path));
+    if let Some(selected) = selected_adc_file(settings.shared_adc) {
+        return Ok(UpstreamAuthMode::AuthorizedUserAdcFile(selected.path));
     }
 
-    Ok(UpstreamAuthMode::Adc)
+    let message = if settings.shared_adc {
+        "failed to determine the conventional shared ADC path; set CLOUDSDK_CONFIG, HOME/XDG_CONFIG_HOME on Unix, or APPDATA on Windows before using GOOGLE_AD_MANAGER_MCP_SHARED_ADC=true".to_string()
+    } else {
+        "failed to determine the Google Ad Manager-specific ADC path; set HOME/XDG_CONFIG_HOME on Unix or APPDATA on Windows, or set GOOGLE_AD_MANAGER_MCP_SHARED_ADC=true to intentionally use conventional shared ADC".to_string()
+    };
+    Err(AdManagerError::AuthBootstrap(message))
+}
+
+fn ensure_selected_adc_ready(selected: &SelectedAdcFile) -> Result<(), AdManagerError> {
+    match google_authorized_user_adc_metadata_from_file(&selected.path) {
+        Ok(Some(metadata)) => {
+            if metadata.client_id_present()
+                && metadata.client_secret_present()
+                && metadata.refresh_token_present()
+            {
+                Ok(())
+            } else {
+                Err(AdManagerError::AuthBootstrap(format!(
+                    "selected {} ADC file at '{}' is missing one or more required authorized-user fields (client_id, client_secret, refresh_token); {}",
+                    selected.source.kind_label(),
+                    selected.path.display(),
+                    selected_adc_repair_guidance(selected)
+                )))
+            }
+        }
+        Ok(None) => Err(AdManagerError::AuthBootstrap(selected_adc_missing_message(
+            selected,
+        ))),
+        Err(err) => Err(AdManagerError::AuthBootstrap(selected_adc_error_message(
+            selected, &err,
+        ))),
+    }
+}
+
+fn selected_adc_repair_guidance(selected: &SelectedAdcFile) -> &'static str {
+    match selected.source {
+        crate::config::AdcSelectionSource::ServerSpecificDefault => {
+            "rerun `google-ad-manager-mcp auth login` or set GOOGLE_AD_MANAGER_MCP_SHARED_ADC=true to intentionally use conventional shared ADC"
+        }
+        crate::config::AdcSelectionSource::SharedExplicit => {
+            "rerun `google-ad-manager-mcp auth login --shared-adc`, or clear GOOGLE_AD_MANAGER_MCP_SHARED_ADC to return to the server-specific default"
+        }
+    }
+}
+
+fn selected_adc_missing_message(selected: &SelectedAdcFile) -> String {
+    format!(
+        "selected {} ADC file is missing at '{}'; {}",
+        selected.source.kind_label(),
+        selected.path.display(),
+        selected_adc_repair_guidance(selected)
+    )
+}
+
+fn selected_adc_error_message(selected: &SelectedAdcFile, err: &UpstreamOAuthError) -> String {
+    if google_adc_file_missing(err) {
+        selected_adc_missing_message(selected)
+    } else {
+        format!(
+            "failed to load selected {} ADC file at '{}': {err}",
+            selected.source.kind_label(),
+            selected.path.display()
+        )
+    }
 }
 
 fn google_adc_file_missing(err: &UpstreamOAuthError) -> bool {
@@ -1139,6 +1213,19 @@ fn google_adc_file_missing(err: &UpstreamOAuthError) -> bool {
         err,
         UpstreamOAuthError::Io { source, .. } if source.kind() == ErrorKind::NotFound
     )
+}
+
+fn selected_adc_file_for_path(path: &PathBuf) -> Result<SelectedAdcFile, AdManagerError> {
+    if let Some(selected) = selected_adc_file(false).filter(|selected| &selected.path == path) {
+        return Ok(selected);
+    }
+    if let Some(selected) = selected_adc_file(true).filter(|selected| &selected.path == path) {
+        return Ok(selected);
+    }
+    Err(AdManagerError::AuthBootstrap(format!(
+        "failed to classify selected ADC path '{}'",
+        path.display()
+    )))
 }
 
 fn absolute_api_url(
@@ -1161,10 +1248,10 @@ fn validate_network_code(value: &str) -> Result<String, AdManagerError> {
     if trimmed.is_empty() {
         return Err(AdManagerError::invalid("network_code", "must not be empty"));
     }
-    if trimmed.contains('/') || trimmed.chars().any(char::is_whitespace) {
+    if !trimmed.bytes().all(|byte| byte.is_ascii_digit()) {
         return Err(AdManagerError::invalid(
             "network_code",
-            "must be the raw Ad Manager network code, for example 1234567",
+            "must be the raw numeric Ad Manager network code, for example 1234567",
         ));
     }
     Ok(trimmed.to_string())
@@ -1197,13 +1284,34 @@ fn validate_resource_name(
             "must contain exactly one resource ID segment after the prefix",
         ));
     }
-    if trimmed.chars().any(char::is_whitespace) {
+    validate_rest_resource_id_segment(field, id_segment)?;
+    Ok(trimmed.to_string())
+}
+
+fn validate_rest_resource_id_segment(
+    field: &'static str,
+    value: &str,
+) -> Result<(), AdManagerError> {
+    if matches!(value, "." | "..") {
         return Err(AdManagerError::invalid(
             field,
-            "must not contain whitespace",
+            "must use a single URL-safe resource ID segment and cannot be '.' or '..'",
         ));
     }
-    Ok(trimmed.to_string())
+    if value.bytes().all(is_safe_rest_resource_id_byte) {
+        return Ok(());
+    }
+    Err(AdManagerError::invalid(
+        field,
+        "must use a single URL-safe resource ID segment containing only ASCII letters, digits, '.', '_' or '-'",
+    ))
+}
+
+fn is_safe_rest_resource_id_byte(byte: u8) -> bool {
+    matches!(
+        byte,
+        b'0'..=b'9' | b'a'..=b'z' | b'A'..=b'Z' | b'.' | b'_' | b'-'
+    )
 }
 
 fn validate_rest_write_body(
@@ -1245,6 +1353,145 @@ fn validate_rest_write_body(
     Ok(())
 }
 
+fn validate_rest_write_body_binding(
+    operation: RestWriteOperation,
+    body: &Value,
+    network_code: &str,
+    segment: &str,
+    resource_name: Option<&str>,
+) -> Result<(), AdManagerError> {
+    match operation {
+        RestWriteOperation::BatchCreate | RestWriteOperation::BatchUpdate => {
+            validate_batch_request_bindings(operation, body, network_code, segment)
+        }
+        RestWriteOperation::BatchActivate
+        | RestWriteOperation::BatchDeactivate
+        | RestWriteOperation::BatchArchive
+        | RestWriteOperation::BatchUnarchive
+        | RestWriteOperation::BatchSubmitForApproval
+        | RestWriteOperation::BatchApprove => {
+            validate_batch_name_bindings(body, network_code, segment)
+        }
+        RestWriteOperation::Patch => {
+            let expected_resource_name = resource_name.ok_or_else(|| {
+                AdManagerError::invalid("resource_name", "is required for patch operations")
+            })?;
+            if let Some(body_name) = body.get("name") {
+                let body_name = body_name.as_str().ok_or_else(|| {
+                    AdManagerError::invalid("body.name", "must be a string resource name")
+                })?;
+                let body_name =
+                    validate_resource_name("body.name", Some(body_name), network_code, segment)?;
+                if body_name != expected_resource_name {
+                    return Err(AdManagerError::invalid(
+                        "body.name",
+                        format!("must exactly match resource_name {expected_resource_name}"),
+                    ));
+                }
+            }
+            let mut names = Vec::new();
+            collect_nested_resource_names(body, "body.name", &mut names)?;
+            for name in names {
+                validate_resource_name("body.name", Some(name), network_code, segment)?;
+            }
+            Ok(())
+        }
+        RestWriteOperation::Create => {
+            let mut names = Vec::new();
+            collect_nested_resource_names(body, "body.name", &mut names)?;
+            for name in names {
+                validate_resource_name("body.name", Some(name), network_code, segment)?;
+            }
+            Ok(())
+        }
+    }
+}
+
+fn validate_batch_request_bindings(
+    operation: RestWriteOperation,
+    body: &Value,
+    network_code: &str,
+    segment: &str,
+) -> Result<(), AdManagerError> {
+    let requests = body
+        .get("requests")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            AdManagerError::invalid(
+                "body.requests",
+                "must be an array for batch create/update operations",
+            )
+        })?;
+    for request in requests {
+        if !request.is_object() {
+            return Err(AdManagerError::invalid(
+                "body.requests[]",
+                "must contain JSON objects",
+            ));
+        }
+        let mut names = Vec::new();
+        collect_nested_resource_names(request, "body.requests[].name", &mut names)?;
+        if operation == RestWriteOperation::BatchUpdate && names.is_empty() {
+            return Err(AdManagerError::invalid(
+                "body.requests[]",
+                "must contain at least one nested resource `name` for batch update operations",
+            ));
+        }
+        for name in names {
+            validate_resource_name("body.requests[].name", Some(name), network_code, segment)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_batch_name_bindings(
+    body: &Value,
+    network_code: &str,
+    segment: &str,
+) -> Result<(), AdManagerError> {
+    let names = body.get("names").and_then(Value::as_array).ok_or_else(|| {
+        AdManagerError::invalid(
+            "body.names",
+            "must be an array for batch state/action operations",
+        )
+    })?;
+    for name in names {
+        let name = name.as_str().ok_or_else(|| {
+            AdManagerError::invalid("body.names[]", "must contain string resource names")
+        })?;
+        validate_resource_name("body.names[]", Some(name), network_code, segment)?;
+    }
+    Ok(())
+}
+
+fn collect_nested_resource_names<'a>(
+    value: &'a Value,
+    field_path: &'static str,
+    names: &mut Vec<&'a str>,
+) -> Result<(), AdManagerError> {
+    match value {
+        Value::Object(object) => {
+            for (key, child) in object {
+                if key == "name" {
+                    let name = child.as_str().ok_or_else(|| {
+                        AdManagerError::invalid(field_path, "must be a string resource name")
+                    })?;
+                    names.push(name);
+                }
+                collect_nested_resource_names(child, field_path, names)?;
+            }
+            Ok(())
+        }
+        Value::Array(items) => {
+            for item in items {
+                collect_nested_resource_names(item, field_path, names)?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
 fn validate_soap_api_version(value: Option<&str>) -> Result<String, AdManagerError> {
     let version = value
         .map(str::trim)
@@ -1262,7 +1509,36 @@ fn validate_soap_api_version(value: Option<&str>) -> Result<String, AdManagerErr
     Ok(version.to_string())
 }
 
-fn validate_soap_payload_xml(value: &str) -> Result<String, AdManagerError> {
+const SOAP_METHOD_NAMES_LOWERCASE: &[&str] = &[
+    "createorders",
+    "getordersbystatement",
+    "performorderaction",
+    "updateorders",
+    "createlineitems",
+    "getlineitemsbystatement",
+    "performlineitemaction",
+    "updatelineitems",
+    "createcreatives",
+    "getcreativesbystatement",
+    "performcreativeaction",
+    "updatecreatives",
+    "createlineitemcreativeassociations",
+    "getlineitemcreativeassociationsbystatement",
+    "getpreviewurl",
+    "getpreviewurlsfornativestyles",
+    "performlineitemcreativeassociationaction",
+    "updatelineitemcreativeassociations",
+    "getavailabilityforecast",
+    "getavailabilityforecastbyid",
+    "getdeliveryforecast",
+    "getdeliveryforecastbyids",
+    "gettrafficdata",
+];
+
+fn validate_soap_payload_xml(
+    operation: SoapTraffickingOperation,
+    value: &str,
+) -> Result<String, AdManagerError> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         return Err(AdManagerError::invalid(
@@ -1324,7 +1600,115 @@ fn validate_soap_payload_xml(value: &str) -> Result<String, AdManagerError> {
         }
     }
 
+    for method in SOAP_METHOD_NAMES_LOWERCASE {
+        if contains_xml_tag(&lower, method) {
+            return Err(AdManagerError::invalid(
+                "payload_xml",
+                "must contain only the inner payload fragment, not the outer SOAP method wrapper",
+            ));
+        }
+    }
+    validate_soap_payload_operation_binding(operation, &lower)?;
+
     Ok(trimmed.to_string())
+}
+
+fn validate_soap_payload_operation_binding(
+    operation: SoapTraffickingOperation,
+    lower: &str,
+) -> Result<(), AdManagerError> {
+    let contains_all = |tags: &[&str]| tags.iter().all(|tag| contains_xml_tag(lower, tag));
+    let contains_any = |tags: &[&str]| tags.iter().any(|tag| contains_xml_tag(lower, tag));
+    let compatible =
+        match operation {
+            SoapTraffickingOperation::CreateOrders | SoapTraffickingOperation::UpdateOrders => {
+                contains_any(&["orders"])
+            }
+            SoapTraffickingOperation::GetOrdersByStatement
+            | SoapTraffickingOperation::GetLineItemsByStatement
+            | SoapTraffickingOperation::GetCreativesByStatement
+            | SoapTraffickingOperation::GetLineItemCreativeAssociationsByStatement => {
+                contains_any(&["filterstatement"])
+            }
+            SoapTraffickingOperation::PerformOrderAction => {
+                contains_all(&["orderaction", "filterstatement"])
+            }
+            SoapTraffickingOperation::CreateLineItems
+            | SoapTraffickingOperation::UpdateLineItems => contains_any(&["lineitems"]),
+            SoapTraffickingOperation::PerformLineItemAction => {
+                contains_all(&["lineitemaction", "filterstatement"])
+            }
+            SoapTraffickingOperation::CreateCreatives
+            | SoapTraffickingOperation::UpdateCreatives => contains_any(&["creatives"]),
+            SoapTraffickingOperation::PerformCreativeAction => {
+                contains_all(&["creativeaction", "filterstatement"])
+            }
+            SoapTraffickingOperation::CreateLineItemCreativeAssociations
+            | SoapTraffickingOperation::UpdateLineItemCreativeAssociations => {
+                contains_any(&["lineitemcreativeassociations"])
+            }
+            SoapTraffickingOperation::GetLineItemCreativeAssociationPreviewUrl => {
+                contains_any(&["lineitemcreativeassociation"])
+                    || contains_all(&["lineitemid", "creativeid"])
+            }
+            SoapTraffickingOperation::GetLineItemCreativeAssociationNativeStylePreviewUrls => {
+                (contains_any(&["lineitemcreativeassociation"])
+                    || contains_all(&["lineitemid", "creativeid"]))
+                    && contains_any(&[
+                        "nativestyle",
+                        "nativestyles",
+                        "nativestyleid",
+                        "nativestyleids",
+                    ])
+            }
+            SoapTraffickingOperation::PerformLineItemCreativeAssociationAction => {
+                contains_all(&["lineitemcreativeassociationaction", "filterstatement"])
+            }
+            SoapTraffickingOperation::GetAvailabilityForecast => contains_any(&["lineitem"]),
+            SoapTraffickingOperation::GetTrafficData => contains_any(&["trafficdatarequest"]),
+            SoapTraffickingOperation::GetAvailabilityForecastById => contains_any(&["lineitemid"]),
+            SoapTraffickingOperation::GetDeliveryForecast => contains_any(&["lineitems"]),
+            SoapTraffickingOperation::GetDeliveryForecastByIds => contains_any(&["lineitemids"]),
+        };
+    if compatible {
+        Ok(())
+    } else {
+        Err(AdManagerError::invalid(
+            "payload_xml",
+            format!(
+                "does not match the selected SOAP operation `{}`",
+                operation.as_str()
+            ),
+        ))
+    }
+}
+
+fn contains_xml_tag(compact: &str, tag: &str) -> bool {
+    compact.match_indices('<').any(|(start, _)| {
+        let rest = &compact[start + 1..];
+        let rest = rest.strip_prefix('/').unwrap_or(rest);
+        let Some(boundary) =
+            rest.find(|ch: char| ch == '>' || ch == '/' || ch.is_ascii_whitespace())
+        else {
+            return false;
+        };
+        let candidate = &rest[..boundary];
+        matches_xml_tag_name(candidate, tag)
+    })
+}
+
+fn matches_xml_tag_name(candidate: &str, tag: &str) -> bool {
+    candidate == tag
+        || candidate
+            .split_once(':')
+            .is_some_and(|(prefix, local)| local == tag && is_xml_name_prefix(prefix))
+}
+
+fn is_xml_name_prefix(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.'))
 }
 
 fn soap_namespace(api_version: &str) -> String {
@@ -1509,6 +1893,15 @@ pub(crate) fn soap_error_message(result: &SoapTraffickingApplyResult) -> String 
     }
 }
 
+pub(crate) fn soap_apply_failed(result: &SoapTraffickingApplyResult) -> bool {
+    result.upstream_status >= 400
+        || result
+            .soap_fault
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|value| !value.is_empty())
+}
+
 fn extract_xml_tag(value: &str, tag: &str) -> Option<String> {
     for prefix in ["", "gam:", "soapenv:", "soap:"] {
         let full_tag = format!("{prefix}{tag}");
@@ -1591,9 +1984,10 @@ fn clip_message(message: String) -> String {
 mod tests {
     use super::{
         AdManagerClient, CatalogCollection, MAX_SOAP_RESPONSE_XML_BYTES, RestWriteOperation,
-        RestWriteResource, SOAP_ENVELOPE_NAMESPACE, SoapTraffickingOperation, classify_soap_impact,
-        clip_xml_response, extract_xml_tag, validate_operation_name, validate_report_result_name,
-        validate_rest_write_body, validate_soap_payload_xml,
+        RestWriteResource, SOAP_ENVELOPE_NAMESPACE, SOAP_METHOD_NAMES_LOWERCASE,
+        SoapTraffickingApplyResult, SoapTraffickingOperation, classify_soap_impact,
+        clip_xml_response, extract_xml_tag, soap_apply_failed, validate_operation_name,
+        validate_report_result_name, validate_rest_write_body, validate_soap_payload_xml,
     };
     use crate::Settings;
     use serde_json::json;
@@ -1635,6 +2029,85 @@ mod tests {
         assert!(
             validate_rest_write_body(RestWriteOperation::BatchActivate, &json!({"requests": []}))
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn batch_state_names_must_match_selected_network_and_resource() {
+        let client = AdManagerClient::from_settings(&Settings::default());
+        let err = client
+            .build_rest_write_plan(
+                "1234567",
+                RestWriteResource::Sites,
+                RestWriteOperation::BatchSubmitForApproval,
+                None,
+                None,
+                json!({"names": ["networks/7654321/sites/111"]}),
+            )
+            .expect_err("reject wrong network");
+
+        assert!(
+            err.to_string()
+                .contains("must start with networks/1234567/sites/")
+        );
+    }
+
+    #[test]
+    fn batch_update_requests_require_matching_resource_names() {
+        let client = AdManagerClient::from_settings(&Settings::default());
+        let err = client
+            .build_rest_write_plan(
+                "1234567",
+                RestWriteResource::Sites,
+                RestWriteOperation::BatchUpdate,
+                None,
+                None,
+                json!({
+                    "requests": [
+                        {
+                            "site": {
+                                "name": "networks/1234567/adUnits/111",
+                                "displayName": "Bad binding"
+                            },
+                            "updateMask": "displayName"
+                        }
+                    ]
+                }),
+            )
+            .expect_err("reject wrong resource segment");
+
+        assert!(
+            err.to_string()
+                .contains("must start with networks/1234567/sites/")
+        );
+    }
+
+    #[test]
+    fn batch_update_requests_require_at_least_one_resource_name() {
+        let client = AdManagerClient::from_settings(&Settings::default());
+        let err = client
+            .build_rest_write_plan(
+                "1234567",
+                RestWriteResource::Sites,
+                RestWriteOperation::BatchUpdate,
+                None,
+                None,
+                json!({
+                    "requests": [
+                        {
+                            "site": {
+                                "displayName": "Missing name"
+                            },
+                            "updateMask": "displayName"
+                        }
+                    ]
+                }),
+            )
+            .expect_err("reject missing nested resource name");
+
+        assert!(
+            err.to_string()
+                .contains("must contain at least one nested resource `name`")
         );
     }
 
@@ -1701,6 +2174,169 @@ mod tests {
     }
 
     #[test]
+    fn rest_write_paths_reject_unsafe_network_codes_and_resource_segments() {
+        let client = AdManagerClient::from_settings(&Settings::default());
+        for bad_network_code in ["1234567?alt=json", "123 4567", "1234567/extra"] {
+            assert!(
+                client
+                    .build_rest_write_plan(
+                        bad_network_code,
+                        RestWriteResource::Reports,
+                        RestWriteOperation::Patch,
+                        Some("networks/1234567/reports/987654"),
+                        Some("displayName"),
+                        json!({
+                            "name": "networks/1234567/reports/987654",
+                            "displayName": "Delivery proof"
+                        }),
+                    )
+                    .is_err(),
+                "{bad_network_code} should be rejected"
+            );
+        }
+
+        for bad_resource_name in [
+            "networks/1234567/reports/.",
+            "networks/1234567/reports/..",
+            "networks/1234567/reports/987654?alt=json",
+            "networks/1234567/reports/987654#fragment",
+            "networks/1234567/reports/987%32654",
+        ] {
+            assert!(
+                client
+                    .build_rest_write_plan(
+                        "1234567",
+                        RestWriteResource::Reports,
+                        RestWriteOperation::Patch,
+                        Some(bad_resource_name),
+                        Some("displayName"),
+                        json!({
+                            "name": bad_resource_name,
+                            "displayName": "Delivery proof"
+                        }),
+                    )
+                    .is_err(),
+                "{bad_resource_name} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn patch_body_name_must_exactly_match_resource_name() {
+        let client = AdManagerClient::from_settings(&Settings::default());
+        let err = client
+            .build_rest_write_plan(
+                "1234567",
+                RestWriteResource::Reports,
+                RestWriteOperation::Patch,
+                Some("networks/1234567/reports/987654"),
+                Some("displayName"),
+                json!({
+                    "name": "networks/1234567/reports/222222",
+                    "displayName": "Mismatch"
+                }),
+            )
+            .expect_err("reject mismatched patch body name");
+
+        assert!(
+            err.to_string()
+                .contains("must exactly match resource_name networks/1234567/reports/987654")
+        );
+    }
+
+    #[test]
+    fn patch_nested_name_errors_use_patch_field_path() {
+        let client = AdManagerClient::from_settings(&Settings::default());
+        let err = client
+            .build_rest_write_plan(
+                "1234567",
+                RestWriteResource::Reports,
+                RestWriteOperation::Patch,
+                Some("networks/1234567/reports/987654"),
+                Some("displayName"),
+                json!({
+                    "name": "networks/1234567/reports/987654",
+                    "nested": {
+                        "name": 123
+                    }
+                }),
+            )
+            .expect_err("reject non-string nested patch name");
+
+        assert!(err.to_string().contains("body.name"));
+    }
+
+    #[test]
+    fn batch_update_nested_name_errors_use_batch_field_path() {
+        let client = AdManagerClient::from_settings(&Settings::default());
+        let err = client
+            .build_rest_write_plan(
+                "1234567",
+                RestWriteResource::Sites,
+                RestWriteOperation::BatchUpdate,
+                None,
+                None,
+                json!({
+                    "requests": [
+                        {
+                            "site": {
+                                "name": 123
+                            }
+                        }
+                    ]
+                }),
+            )
+            .expect_err("reject non-string nested batch name");
+
+        assert!(err.to_string().contains("body.requests[].name"));
+    }
+
+    #[test]
+    fn create_body_names_must_match_selected_resource_segment() {
+        let client = AdManagerClient::from_settings(&Settings::default());
+        let err = client
+            .build_rest_write_plan(
+                "1234567",
+                RestWriteResource::Sites,
+                RestWriteOperation::Create,
+                None,
+                None,
+                json!({
+                    "name": "networks/1234567/orders/987654",
+                    "displayName": "Mismatch"
+                }),
+            )
+            .expect_err("reject mismatched create body name");
+
+        assert!(err.to_string().contains("body.name"));
+        assert!(
+            err.to_string()
+                .contains("must start with networks/1234567/sites/")
+        );
+    }
+
+    #[test]
+    fn create_nested_name_errors_use_create_field_path() {
+        let client = AdManagerClient::from_settings(&Settings::default());
+        let err = client
+            .build_rest_write_plan(
+                "1234567",
+                RestWriteResource::Sites,
+                RestWriteOperation::Create,
+                None,
+                None,
+                json!({
+                    "site": {
+                        "name": 123
+                    }
+                }),
+            )
+            .expect_err("reject non-string nested create name");
+
+        assert!(err.to_string().contains("body.name"));
+    }
+
+    #[test]
     fn builds_soap_trafficking_envelope_and_endpoint() {
         let client = AdManagerClient::from_settings(&Settings::default());
         let plan = client
@@ -1745,15 +2381,271 @@ mod tests {
             "<!DOCTYPE x [<!ENTITY y SYSTEM \"file:///etc/passwd\">]>",
         ] {
             assert!(
-                validate_soap_payload_xml(bad).is_err(),
+                validate_soap_payload_xml(SoapTraffickingOperation::GetLineItemsByStatement, bad)
+                    .is_err(),
                 "{bad} should be rejected"
             );
         }
         assert!(
             validate_soap_payload_xml(
+                SoapTraffickingOperation::GetLineItemsByStatement,
                 r#"<filterStatement><query>WHERE status = 'ACTIVE'</query></filterStatement>"#
             )
             .is_ok()
+        );
+    }
+
+    #[test]
+    fn soap_apply_failed_when_fault_present_even_with_2xx_status() {
+        let result = SoapTraffickingApplyResult {
+            upstream_status: 200,
+            upstream_response_xml: "<Fault><faultstring>bad request</faultstring></Fault>"
+                .to_string(),
+            response_truncated: false,
+            request_id: None,
+            response_time: None,
+            soap_fault: Some("bad request".to_string()),
+        };
+
+        assert!(soap_apply_failed(&result));
+    }
+
+    #[test]
+    fn soap_apply_succeeds_when_2xx_and_no_fault_is_present() {
+        let result = SoapTraffickingApplyResult {
+            upstream_status: 200,
+            upstream_response_xml: "<ok />".to_string(),
+            response_truncated: false,
+            request_id: Some("req-1".to_string()),
+            response_time: Some("123".to_string()),
+            soap_fault: None,
+        };
+
+        assert!(!soap_apply_failed(&result));
+    }
+
+    #[test]
+    fn soap_method_wrapper_blocklist_covers_all_allowlisted_operations() {
+        let cases = [
+            (SoapTraffickingOperation::CreateOrders, "createorders"),
+            (
+                SoapTraffickingOperation::GetOrdersByStatement,
+                "getordersbystatement",
+            ),
+            (
+                SoapTraffickingOperation::PerformOrderAction,
+                "performorderaction",
+            ),
+            (SoapTraffickingOperation::UpdateOrders, "updateorders"),
+            (SoapTraffickingOperation::CreateLineItems, "createlineitems"),
+            (
+                SoapTraffickingOperation::GetLineItemsByStatement,
+                "getlineitemsbystatement",
+            ),
+            (
+                SoapTraffickingOperation::PerformLineItemAction,
+                "performlineitemaction",
+            ),
+            (SoapTraffickingOperation::UpdateLineItems, "updatelineitems"),
+            (SoapTraffickingOperation::CreateCreatives, "createcreatives"),
+            (
+                SoapTraffickingOperation::GetCreativesByStatement,
+                "getcreativesbystatement",
+            ),
+            (
+                SoapTraffickingOperation::PerformCreativeAction,
+                "performcreativeaction",
+            ),
+            (SoapTraffickingOperation::UpdateCreatives, "updatecreatives"),
+            (
+                SoapTraffickingOperation::CreateLineItemCreativeAssociations,
+                "createlineitemcreativeassociations",
+            ),
+            (
+                SoapTraffickingOperation::GetLineItemCreativeAssociationsByStatement,
+                "getlineitemcreativeassociationsbystatement",
+            ),
+            (
+                SoapTraffickingOperation::GetLineItemCreativeAssociationPreviewUrl,
+                "getpreviewurl",
+            ),
+            (
+                SoapTraffickingOperation::GetLineItemCreativeAssociationNativeStylePreviewUrls,
+                "getpreviewurlsfornativestyles",
+            ),
+            (
+                SoapTraffickingOperation::PerformLineItemCreativeAssociationAction,
+                "performlineitemcreativeassociationaction",
+            ),
+            (
+                SoapTraffickingOperation::UpdateLineItemCreativeAssociations,
+                "updatelineitemcreativeassociations",
+            ),
+            (
+                SoapTraffickingOperation::GetAvailabilityForecast,
+                "getavailabilityforecast",
+            ),
+            (
+                SoapTraffickingOperation::GetAvailabilityForecastById,
+                "getavailabilityforecastbyid",
+            ),
+            (
+                SoapTraffickingOperation::GetDeliveryForecast,
+                "getdeliveryforecast",
+            ),
+            (
+                SoapTraffickingOperation::GetDeliveryForecastByIds,
+                "getdeliveryforecastbyids",
+            ),
+            (SoapTraffickingOperation::GetTrafficData, "gettrafficdata"),
+        ];
+        assert_eq!(cases.len(), SOAP_METHOD_NAMES_LOWERCASE.len());
+        for (operation, method) in cases {
+            let payload = format!("<{method}/>");
+            assert!(
+                validate_soap_payload_xml(operation, &payload).is_err(),
+                "{method} wrapper should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn soap_namespaced_method_wrappers_are_rejected() {
+        assert!(
+            validate_soap_payload_xml(
+                SoapTraffickingOperation::GetLineItemsByStatement,
+                "<gam:getLineItemsByStatement/>",
+            )
+            .is_err()
+        );
+        assert!(
+            validate_soap_payload_xml(
+                SoapTraffickingOperation::GetLineItemCreativeAssociationPreviewUrl,
+                "<gam:getPreviewUrl><gam:lineItemId>1</gam:lineItemId></gam:getPreviewUrl>",
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn soap_preview_method_wrappers_are_rejected() {
+        assert!(
+            validate_soap_payload_xml(
+                SoapTraffickingOperation::GetLineItemCreativeAssociationPreviewUrl,
+                "<getPreviewUrl><lineItemId>1</lineItemId><creativeId>2</creativeId></getPreviewUrl>",
+            )
+            .is_err()
+        );
+        assert!(
+            validate_soap_payload_xml(
+                SoapTraffickingOperation::GetLineItemCreativeAssociationNativeStylePreviewUrls,
+                "<getPreviewUrlsForNativeStyles/>",
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn soap_payload_must_match_selected_operation() {
+        let err = validate_soap_payload_xml(
+            SoapTraffickingOperation::GetLineItemsByStatement,
+            "<orders><name>Mismatch</name></orders>",
+        )
+        .expect_err("reject mismatched payload");
+
+        assert!(
+            err.to_string()
+                .contains("does not match the selected SOAP operation")
+        );
+    }
+
+    #[test]
+    fn traffic_data_and_availability_forecast_require_distinct_payload_roots() {
+        assert_eq!(
+            SoapTraffickingOperation::GetTrafficData.request_hint(),
+            "payload_xml must contain <trafficDataRequest> and optional <forecastOptions>"
+        );
+        assert!(
+            validate_soap_payload_xml(
+                SoapTraffickingOperation::GetTrafficData,
+                "<trafficDataRequest/>",
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_soap_payload_xml(
+                SoapTraffickingOperation::GetTrafficData,
+                "<lineItem><targeting/></lineItem>",
+            )
+            .is_err()
+        );
+        assert!(
+            validate_soap_payload_xml(
+                SoapTraffickingOperation::GetAvailabilityForecast,
+                "<lineItem><targeting/></lineItem>",
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn soap_payload_prefix_aliases_are_rejected() {
+        assert!(
+            validate_soap_payload_xml(
+                SoapTraffickingOperation::GetAvailabilityForecastById,
+                "<lineItemIds><value>1</value></lineItemIds>",
+            )
+            .is_err()
+        );
+        assert!(
+            validate_soap_payload_xml(
+                SoapTraffickingOperation::GetLineItemCreativeAssociationPreviewUrl,
+                "<lineItemCreativeAssociations><value>1</value></lineItemCreativeAssociations>",
+            )
+            .is_err()
+        );
+        assert!(
+            validate_soap_payload_xml(
+                SoapTraffickingOperation::GetLineItemCreativeAssociationNativeStylePreviewUrls,
+                "<lineItemId>1</lineItemId><creativeId>2</creativeId>",
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn soap_namespaced_inner_tags_are_accepted() {
+        assert!(
+            validate_soap_payload_xml(
+                SoapTraffickingOperation::GetLineItemsByStatement,
+                "<gam:filterStatement><gam:query>WHERE id = 42</gam:query></gam:filterStatement>",
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_soap_payload_xml(
+                SoapTraffickingOperation::GetLineItemCreativeAssociationPreviewUrl,
+                "<gam:lineItemId>1</gam:lineItemId><gam:creativeId>2</gam:creativeId>",
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_soap_payload_xml(
+                SoapTraffickingOperation::GetLineItemCreativeAssociationNativeStylePreviewUrls,
+                "<gam:lineItemId>1</gam:lineItemId><gam:creativeId>2</gam:creativeId><gam:nativeStyleIds><gam:long>3</gam:long></gam:nativeStyleIds>",
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn soap_native_style_preview_requires_native_style_tags() {
+        assert!(
+            validate_soap_payload_xml(
+                SoapTraffickingOperation::GetLineItemCreativeAssociationNativeStylePreviewUrls,
+                "<lineItemId>1</lineItemId><creativeId>2</creativeId><note>nativeStyle</note>",
+            )
+            .is_err()
         );
     }
 

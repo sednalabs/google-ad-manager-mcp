@@ -1077,7 +1077,7 @@ impl AdManagerServer {
             Ok(value) => value,
             Err(err) => return Ok(contract::error(err, started)),
         };
-        if applied.upstream_status >= 400 {
+        if crate::client::soap_apply_failed(&applied) {
             return Ok(contract::error_with_detail(
                 AdManagerError::UpstreamApi {
                     status: applied.upstream_status,
