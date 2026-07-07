@@ -596,12 +596,7 @@ impl AdManagerClient {
     }
 
     pub fn auth_source(&self) -> AuthSource {
-        match &self.auth_mode {
-            UpstreamAuthMode::Adc => AuthSource::GoogleDefaultProviderChain,
-            UpstreamAuthMode::AuthorizedUserAdcFile(_) => AuthSource::GoogleAuthorizedUserAdcFile,
-            UpstreamAuthMode::ServiceAccountJsonPath(_) => AuthSource::ServiceAccountJsonPath,
-            UpstreamAuthMode::ServiceAccountJsonEnv(_) => AuthSource::ServiceAccountJsonEnv,
-        }
+        auth_source_for_mode(&self.auth_mode)
     }
 
     pub fn scope(&self) -> &str {
@@ -1102,6 +1097,19 @@ impl AdManagerClient {
             .await
             .map_err(|err| AdManagerError::AuthBootstrap(err.to_string()))?;
         Ok(token.as_str().to_string())
+    }
+}
+
+pub(crate) fn auth_source_from_settings(settings: &Settings) -> Result<AuthSource, AdManagerError> {
+    select_auth_mode(settings).map(|auth_mode| auth_source_for_mode(&auth_mode))
+}
+
+fn auth_source_for_mode(auth_mode: &UpstreamAuthMode) -> AuthSource {
+    match auth_mode {
+        UpstreamAuthMode::Adc => AuthSource::GoogleDefaultProviderChain,
+        UpstreamAuthMode::AuthorizedUserAdcFile(_) => AuthSource::GoogleAuthorizedUserAdcFile,
+        UpstreamAuthMode::ServiceAccountJsonPath(_) => AuthSource::ServiceAccountJsonPath,
+        UpstreamAuthMode::ServiceAccountJsonEnv(_) => AuthSource::ServiceAccountJsonEnv,
     }
 }
 

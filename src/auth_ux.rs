@@ -9,10 +9,13 @@ use mcp_toolkit_auth::provider_auth::{
     GoogleProviderAuthConfig, GoogleProviderAuthFailureKind, classify_google_provider_auth_error,
     format_provider_auth_command, google_adc_quota_project_command,
 };
-use mcp_toolkit_auth::upstream_oauth::google_authorized_user_adc_metadata_from_file;
+use mcp_toolkit_auth::upstream_oauth::{
+    UpstreamOAuthError, google_authorized_user_adc_metadata_from_file,
+};
 use serde::Serialize;
 use tokio::process::Command;
 
+use crate::client::auth_source_from_settings;
 use crate::config::{
     AuthCommandArgs, AuthDoctorArgs, AuthLoginArgs, AuthStatusCliArgs, AuthSubcommand, Settings,
     conventional_adc_credentials_path, selected_adc_file, server_adc_credentials_path,
@@ -197,7 +200,6 @@ async fn run_doctor(settings: &Settings, args: &AuthDoctorArgs) -> Result<()> {
 }
 
 async fn build_report(settings: &Settings, verify: bool) -> AuthReport {
-    let client = AdManagerClient::from_settings(settings);
     let env = EnvStatus {
         google_application_credentials: std::env::var_os("GOOGLE_APPLICATION_CREDENTIALS")
             .is_some(),
@@ -208,19 +210,33 @@ async fn build_report(settings: &Settings, verify: bool) -> AuthReport {
     };
     let uses_local_user_adc = uses_local_user_adc(&env);
     let credential_status = credential_source_status(settings, uses_local_user_adc);
-    let quota_project = effective_quota_project(settings, credential_status.adc_file.as_ref(), &env);
+    let credential_source = auth_source_from_settings(settings);
+    let quota_project =
+        effective_quota_project(settings, credential_status.adc_file.as_ref(), &env);
     let verification = if verify {
-        match client.list_networks(Some(1), None).await {
-            Ok(payload) => VerificationReport {
-                checked: true,
-                ok: Some(true),
-                sample_network_count: payload
-                    .get("networks")
-                    .and_then(|value| value.as_array())
-                    .map(Vec::len),
-                error: None,
-                hint: None,
-            },
+        match credential_source.as_ref() {
+            Ok(_) => {
+                let client = AdManagerClient::from_settings(settings);
+                match client.list_networks(Some(1), None).await {
+                    Ok(payload) => VerificationReport {
+                        checked: true,
+                        ok: Some(true),
+                        sample_network_count: payload
+                            .get("networks")
+                            .and_then(|value| value.as_array())
+                            .map(Vec::len),
+                        error: None,
+                        hint: None,
+                    },
+                    Err(err) => VerificationReport {
+                        checked: true,
+                        ok: Some(false),
+                        sample_network_count: None,
+                        error: Some(redact_secret_text(&err.to_string())),
+                        hint: Some(err.hint().to_string()),
+                    },
+                }
+            }
             Err(err) => VerificationReport {
                 checked: true,
                 ok: Some(false),
@@ -239,13 +255,23 @@ async fn build_report(settings: &Settings, verify: bool) -> AuthReport {
         }
     };
 
-    let config_valid = credential_status.config_valid;
-    let ready = match verification.ok {
-        Some(true) => "yes",
-        Some(false) => "no",
-        None => "not_verified",
-    }
-    .to_string();
+    let config_issue = credential_status.config_issue.or_else(|| {
+        credential_source
+            .as_ref()
+            .err()
+            .map(|err| redact_secret_text(&err.to_string()))
+    });
+    let config_valid = credential_status.config_valid && credential_source.is_ok();
+    let ready = if !config_valid {
+        "no".to_string()
+    } else {
+        match verification.ok {
+            Some(true) => "yes",
+            Some(false) => "no",
+            None => "not_verified",
+        }
+        .to_string()
+    };
     let credential_material_detected =
         credential_status.credential_material_detected || verification.ok == Some(true);
     let next_steps = next_steps(
@@ -258,9 +284,9 @@ async fn build_report(settings: &Settings, verify: bool) -> AuthReport {
     AuthReport {
         server: "google-ad-manager-mcp",
         scope: settings.scope.clone(),
-        credential_source: client.auth_source(),
+        credential_source: preferred_auth_source(settings, &env),
         config_valid,
-        config_issue: credential_status.config_issue,
+        config_issue,
         credential_material_detected,
         quota_project,
         gcloud: gcloud_version().await,
@@ -547,6 +573,23 @@ fn credential_source_status(
 ) -> CredentialSourceStatus {
     if uses_local_user_adc {
         let adc_file = selected_adc_file_status(settings);
+        if adc_file.is_none() {
+            let repair_step = if settings.shared_adc {
+                "Set CLOUDSDK_CONFIG, HOME/XDG_CONFIG_HOME, or APPDATA so the conventional shared ADC path can be resolved, or disable shared ADC to use the server-specific default."
+            } else {
+                "Set HOME/XDG_CONFIG_HOME or APPDATA so the server-specific ADC path can be resolved, or enable GOOGLE_AD_MANAGER_MCP_SHARED_ADC=true to intentionally use conventional shared ADC."
+            };
+            return CredentialSourceStatus {
+                config_valid: false,
+                config_issue: Some(
+                    "failed to determine the selected ADC path for local authorized-user credentials"
+                        .to_string(),
+                ),
+                credential_material_detected: false,
+                repair_step: Some(repair_step.to_string()),
+                adc_file: None,
+            };
+        }
         let config_valid = adc_file
             .as_ref()
             .is_some_and(|file| file.present && file.usable != Some(false));
@@ -654,13 +697,67 @@ fn service_account_json_env_status(raw_json: &str) -> CredentialSourceStatus {
 }
 
 fn google_application_credentials_status(path: PathBuf) -> CredentialSourceStatus {
+    match google_authorized_user_adc_metadata_from_file(&path) {
+        Ok(Some(metadata)) => {
+            let usable = metadata.client_id_present()
+                && metadata.client_secret_present()
+                && metadata.refresh_token_present();
+            return CredentialSourceStatus {
+                config_valid: usable,
+                config_issue: (!usable).then(|| {
+                    format!(
+                        "GOOGLE_APPLICATION_CREDENTIALS authorized-user ADC is missing one or more required fields at {}",
+                        path.display()
+                    )
+                }),
+                credential_material_detected: true,
+                repair_step: (!usable).then(|| {
+                    "Repair the authorized-user ADC file pointed to by `GOOGLE_APPLICATION_CREDENTIALS`, or unset it to use another credential source."
+                        .to_string()
+                }),
+                adc_file: None,
+            };
+        }
+        Ok(None) | Err(UpstreamOAuthError::UnsupportedGoogleAdcCredentialType) => {}
+        Err(err) => {
+            return CredentialSourceStatus {
+                config_valid: false,
+                config_issue: Some(redact_secret_text(&format!(
+                    "failed to load GOOGLE_APPLICATION_CREDENTIALS as authorized-user ADC at {}: {err}",
+                    path.display()
+                ))),
+                credential_material_detected: fs::metadata(&path).is_ok(),
+                repair_step: Some(
+                    "Fix `GOOGLE_APPLICATION_CREDENTIALS` so it points to a readable supported credentials file, or unset it to use another credential source."
+                        .to_string(),
+                ),
+                adc_file: None,
+            };
+        }
+    }
+
     match fs::metadata(&path) {
-        Ok(metadata) if metadata.is_file() => CredentialSourceStatus {
-            config_valid: true,
-            config_issue: None,
-            credential_material_detected: true,
-            repair_step: None,
-            adc_file: None,
+        Ok(metadata) if metadata.is_file() => match CustomServiceAccount::from_file(&path.display().to_string()) {
+            Ok(_) => CredentialSourceStatus {
+                config_valid: true,
+                config_issue: None,
+                credential_material_detected: true,
+                repair_step: None,
+                adc_file: None,
+            },
+            Err(err) => CredentialSourceStatus {
+                config_valid: false,
+                config_issue: Some(redact_secret_text(&format!(
+                    "failed to load GOOGLE_APPLICATION_CREDENTIALS at {}: {err}",
+                    path.display()
+                ))),
+                credential_material_detected: true,
+                repair_step: Some(
+                    "Fix `GOOGLE_APPLICATION_CREDENTIALS` so it points to a readable supported credentials file, or unset it to use another credential source."
+                        .to_string(),
+                ),
+                adc_file: None,
+            },
         },
         Ok(_) => CredentialSourceStatus {
             config_valid: false,
@@ -693,6 +790,18 @@ fn google_application_credentials_status(path: PathBuf) -> CredentialSourceStatu
 
 fn uses_local_user_adc(env: &EnvStatus) -> bool {
     !env.google_application_credentials && !env.service_account_path && !env.service_account_json
+}
+
+fn preferred_auth_source(settings: &Settings, env: &EnvStatus) -> AuthSource {
+    if settings.service_account_json.is_some() {
+        AuthSource::ServiceAccountJsonEnv
+    } else if settings.service_account_json_path.is_some() {
+        AuthSource::ServiceAccountJsonPath
+    } else if env.google_application_credentials {
+        AuthSource::GoogleDefaultProviderChain
+    } else {
+        AuthSource::GoogleAuthorizedUserAdcFile
+    }
 }
 
 fn selected_adc_missing_step(adc_file: &AdcFileStatus) -> String {
