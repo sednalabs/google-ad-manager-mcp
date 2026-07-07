@@ -691,7 +691,9 @@ fn service_account_json_env_status(raw_json: &str) -> CredentialSourceStatus {
 }
 
 fn google_application_credentials_status(path: PathBuf) -> CredentialSourceStatus {
-    match CustomServiceAccount::from_file(path.display().to_string()) {
+    let runtime_probe_path = google_application_credentials_runtime_probe_path(&path);
+    let credential_material_detected = credential_file_present(&runtime_probe_path);
+    match CustomServiceAccount::from_file(&runtime_probe_path) {
         Ok(_) => CredentialSourceStatus {
             config_valid: true,
             config_issue: None,
@@ -699,7 +701,9 @@ fn google_application_credentials_status(path: PathBuf) -> CredentialSourceStatu
             repair_step: None,
             adc_file: None,
         },
-        Err(service_account_err) => match google_authorized_user_adc_metadata_from_file(&path) {
+        Err(service_account_err) => match google_authorized_user_adc_metadata_from_file(
+            &runtime_probe_path,
+        ) {
             Ok(Some(_metadata)) => CredentialSourceStatus {
                 config_valid: false,
                 config_issue: Some(format!(
@@ -720,7 +724,7 @@ fn google_application_credentials_status(path: PathBuf) -> CredentialSourceStatu
                         "failed to load GOOGLE_APPLICATION_CREDENTIALS at {}: {service_account_err}",
                         path.display()
                     ))),
-                    credential_material_detected: true,
+                    credential_material_detected,
                     repair_step: Some(
                         "Fix `GOOGLE_APPLICATION_CREDENTIALS` so it points to a readable credentials file, or unset it to use another credential source."
                             .to_string(),
@@ -730,6 +734,14 @@ fn google_application_credentials_status(path: PathBuf) -> CredentialSourceStatu
             }
         },
     }
+}
+
+fn google_application_credentials_runtime_probe_path(path: &Path) -> PathBuf {
+    fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn credential_file_present(path: &Path) -> bool {
+    fs::metadata(path).map(|metadata| metadata.is_file()).unwrap_or(false)
 }
 
 fn uses_local_user_adc(env: &EnvStatus) -> bool {
@@ -1022,6 +1034,23 @@ rFCaohNaJ5PK\n\
                 .repair_step
                 .as_deref()
                 .is_some_and(|step| step.contains("Unset `GOOGLE_APPLICATION_CREDENTIALS`"))
+        );
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn google_application_credentials_missing_file_does_not_claim_material_detected() {
+        let path = unique_test_file("google-application-credentials-missing", "json");
+        let status = google_application_credentials_status(path.clone());
+
+        assert!(!status.config_valid);
+        assert!(!status.credential_material_detected);
+        assert!(
+            status
+                .config_issue
+                .as_deref()
+                .is_some_and(|issue| issue.contains("failed to load GOOGLE_APPLICATION_CREDENTIALS"))
         );
 
         let _ = fs::remove_file(path);
