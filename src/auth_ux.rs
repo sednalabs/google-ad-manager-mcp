@@ -656,7 +656,7 @@ fn service_account_json_path_status(path: &str) -> CredentialSourceStatus {
             config_issue: Some(redact_secret_text(&format!(
                 "failed to load service account JSON at {path}: {err}"
             ))),
-            credential_material_detected: fs::metadata(path).is_ok(),
+            credential_material_detected: true,
             repair_step: Some(
                 "Fix `GOOGLE_AD_MANAGER_MCP_SERVICE_ACCOUNT_JSON_PATH` so it points to a valid service account JSON file, or unset it to use another credential source."
                     .to_string(),
@@ -715,7 +715,7 @@ fn google_application_credentials_status(path: PathBuf) -> CredentialSourceStatu
                     "failed to load GOOGLE_APPLICATION_CREDENTIALS as authorized-user ADC at {}: {err}",
                     path.display()
                 ))),
-                credential_material_detected: fs::metadata(&path).is_ok(),
+                credential_material_detected: true,
                 repair_step: Some(
                     "Fix `GOOGLE_APPLICATION_CREDENTIALS` so it points to a readable supported credentials file, or unset it to use another credential source."
                         .to_string(),
@@ -725,49 +725,21 @@ fn google_application_credentials_status(path: PathBuf) -> CredentialSourceStatu
         }
     }
 
-    match fs::metadata(&path) {
-        Ok(metadata) if metadata.is_file() => match CustomServiceAccount::from_file(&path.display().to_string()) {
-            Ok(_) => CredentialSourceStatus {
-                config_valid: true,
-                config_issue: None,
-                credential_material_detected: true,
-                repair_step: None,
-                adc_file: None,
-            },
-            Err(err) => CredentialSourceStatus {
-                config_valid: false,
-                config_issue: Some(redact_secret_text(&format!(
-                    "failed to load GOOGLE_APPLICATION_CREDENTIALS at {}: {err}",
-                    path.display()
-                ))),
-                credential_material_detected: true,
-                repair_step: Some(
-                    "Fix `GOOGLE_APPLICATION_CREDENTIALS` so it points to a readable supported credentials file, or unset it to use another credential source."
-                        .to_string(),
-                ),
-                adc_file: None,
-            },
-        },
+    match CustomServiceAccount::from_file(&path.display().to_string()) {
         Ok(_) => CredentialSourceStatus {
-            config_valid: false,
-            config_issue: Some(format!(
-                "GOOGLE_APPLICATION_CREDENTIALS points to {}, but it is not a file",
-                path.display()
-            )),
+            config_valid: true,
+            config_issue: None,
             credential_material_detected: true,
-            repair_step: Some(
-                "Point `GOOGLE_APPLICATION_CREDENTIALS` at a readable credentials file, or unset it to use another credential source."
-                    .to_string(),
-            ),
+            repair_step: None,
             adc_file: None,
         },
         Err(err) => CredentialSourceStatus {
             config_valid: false,
             config_issue: Some(redact_secret_text(&format!(
-                "failed to read GOOGLE_APPLICATION_CREDENTIALS at {}: {err}",
+                "failed to load GOOGLE_APPLICATION_CREDENTIALS at {}: {err}",
                 path.display()
             ))),
-            credential_material_detected: false,
+            credential_material_detected: true,
             repair_step: Some(
                 "Fix `GOOGLE_APPLICATION_CREDENTIALS` so it points to a readable credentials file, or unset it to use another credential source."
                     .to_string(),
