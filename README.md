@@ -142,9 +142,10 @@ Supported credential sources:
 - Server-specific raw service account JSON via
   `GOOGLE_AD_MANAGER_MCP_SERVICE_ACCOUNT_JSON`
 
-For local user ADC, the runtime prefers the server-specific credential file and
-falls back to conventional shared ADC only when that file has not been created
-yet. Use `google-ad-manager-mcp auth login` for the low-friction isolated path.
+For local user ADC, the runtime uses the server-specific credential file by
+default and fails closed if that file is missing or malformed. Set
+`GOOGLE_AD_MANAGER_MCP_SHARED_ADC=true` only when you intentionally want the
+conventional shared gcloud ADC file for this server.
 
 If you already have a service account for the Google Ad Manager SOAP API, the
 official Ad Manager Beta docs say you can reuse it after enabling the Ad
@@ -189,6 +190,7 @@ whole credential files in tool responses.
 | --- | --- | --- |
 | `GOOGLE_AD_MANAGER_MCP_SCOPE` | `https://www.googleapis.com/auth/admanager.readonly` | OAuth scope requested from Google credentials |
 | `GOOGLE_AD_MANAGER_MCP_QUOTA_PROJECT` | unset | Optional `x-goog-user-project` header |
+| `GOOGLE_AD_MANAGER_MCP_SHARED_ADC` | `false` | Intentionally use conventional shared gcloud ADC instead of the server-specific ADC file |
 | `GOOGLE_AD_MANAGER_MCP_SERVICE_ACCOUNT_JSON_PATH` | unset | Server-specific service-account credential path |
 | `GOOGLE_AD_MANAGER_MCP_SERVICE_ACCOUNT_JSON` | unset | Server-specific raw service-account JSON |
 | `GOOGLE_AD_MANAGER_MCP_HTTP_TIMEOUT_MS` | `15000` | Upstream request timeout |

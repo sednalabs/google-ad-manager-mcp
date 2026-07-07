@@ -8,12 +8,13 @@ use mcp_toolkit_auth::provider_auth::{
     GoogleProviderAuthConfig, GoogleProviderAuthFailureKind, classify_google_provider_auth_error,
     format_provider_auth_command, google_adc_quota_project_command,
 };
+use mcp_toolkit_auth::upstream_oauth::google_authorized_user_adc_metadata_from_file;
 use serde::Serialize;
 use tokio::process::Command;
 
 use crate::config::{
     AuthCommandArgs, AuthDoctorArgs, AuthLoginArgs, AuthStatusCliArgs, AuthSubcommand, Settings,
-    adc_credentials_path, conventional_adc_credentials_path, server_adc_credentials_path,
+    conventional_adc_credentials_path, selected_adc_file, server_adc_credentials_path,
     server_cloudsdk_config_dir,
 };
 use crate::contract::redact_secret_text;
@@ -189,8 +190,17 @@ async fn run_doctor(settings: &Settings, args: &AuthDoctorArgs) -> Result<()> {
 
 async fn build_report(settings: &Settings, verify: bool) -> AuthReport {
     let client = AdManagerClient::from_settings(settings);
-    let adc_file = selected_adc_file_status();
-    let quota_project = effective_quota_project(settings);
+    let adc_file = selected_adc_file_status(settings);
+    let env = EnvStatus {
+        google_application_credentials: std::env::var_os("GOOGLE_APPLICATION_CREDENTIALS")
+            .is_some(),
+        service_account_path: settings.service_account_json_path.is_some(),
+        service_account_json: settings.service_account_json.is_some(),
+        quota_project: settings.quota_project.is_some(),
+        shared_adc: settings.shared_adc,
+    };
+    let uses_local_user_adc = uses_local_user_adc(&env);
+    let quota_project = effective_quota_project(settings, adc_file.as_ref(), &env);
     let verification = if verify {
         match client.list_networks(Some(1), None).await {
             Ok(payload) => VerificationReport {
@@ -221,30 +231,31 @@ async fn build_report(settings: &Settings, verify: bool) -> AuthReport {
         }
     };
 
+    let config_valid = if uses_local_user_adc {
+        adc_file
+            .as_ref()
+            .is_some_and(|file| file.present && file.usable != Some(false))
+    } else {
+        true
+    };
     let ready = match verification.ok {
         Some(true) => "yes",
         Some(false) => "no",
         None => "not_verified",
     }
     .to_string();
-    let env = EnvStatus {
-        google_application_credentials: std::env::var_os("GOOGLE_APPLICATION_CREDENTIALS")
-            .is_some(),
-        service_account_path: settings.service_account_json_path.is_some(),
-        service_account_json: settings.service_account_json.is_some(),
-        quota_project: settings.quota_project.is_some(),
-    };
     let credential_material_detected = env.google_application_credentials
         || env.service_account_path
         || env.service_account_json
+        || adc_file.as_ref().is_some_and(|file| file.present)
         || verification.ok == Some(true);
-    let next_steps = next_steps(settings, &quota_project, &verification);
+    let next_steps = next_steps(settings, &quota_project, &verification, adc_file.as_ref(), &env);
 
     AuthReport {
         server: "google-ad-manager-mcp",
         scope: settings.scope.clone(),
         credential_source: client.auth_source(),
-        config_valid: true,
+        config_valid,
         credential_material_detected,
         quota_project,
         gcloud: gcloud_version().await,
@@ -256,13 +267,26 @@ async fn build_report(settings: &Settings, verify: bool) -> AuthReport {
     }
 }
 
-fn effective_quota_project(settings: &Settings) -> QuotaProjectStatus {
+fn effective_quota_project(
+    settings: &Settings,
+    adc_file: Option<&AdcFileStatus>,
+    env: &EnvStatus,
+) -> QuotaProjectStatus {
     if let Some(project) = settings.quota_project.as_deref() {
         return QuotaProjectStatus {
             configured: true,
             value: Some(project.to_string()),
             source: Some("GOOGLE_AD_MANAGER_MCP_QUOTA_PROJECT_or_cli".to_string()),
         };
+    }
+    if uses_local_user_adc(env) {
+        if let Some(project) = adc_file.and_then(|status| status.quota_project_id.as_ref()) {
+            return QuotaProjectStatus {
+                configured: true,
+                value: Some(project.to_string()),
+                source: Some("selected_adc_file".to_string()),
+            };
+        }
     }
     QuotaProjectStatus {
         configured: false,
@@ -289,8 +313,19 @@ fn next_steps(
     settings: &Settings,
     quota_project: &QuotaProjectStatus,
     verification: &VerificationReport,
+    adc_file: Option<&AdcFileStatus>,
+    env: &EnvStatus,
 ) -> Vec<String> {
     let mut steps = Vec::new();
+    if uses_local_user_adc(env) {
+        if let Some(adc_file) = adc_file {
+            if !adc_file.present {
+                steps.push(selected_adc_missing_step(adc_file));
+            } else if adc_file.usable == Some(false) {
+                steps.push(selected_adc_repair_step(settings, adc_file));
+            }
+        }
+    }
     if !verification.checked {
         steps.push(
             "Run `google-ad-manager-mcp auth status --verify-token` when you are ready to prove access."
@@ -349,20 +384,30 @@ fn print_human_report(report: &AuthReport) {
         None => println!("gcloud: not available"),
     }
     match &report.adc_file {
-        Some(file) => println!(
-            "ADC file: {} {} ({})",
-            file.kind,
-            file.role,
-            file.path.display()
-        ),
+        Some(file) => {
+            println!(
+                "ADC file: {} ({}, {})",
+                if file.present { "present" } else { "missing" },
+                file.kind,
+                file.path.display()
+            );
+            println!("ADC selection: {}", file.selection_source);
+            if let Some(usable) = file.usable {
+                println!("ADC file usable: {}", yes_no(usable));
+            }
+            if let Some(error) = &file.error {
+                println!("ADC file issue: {error}");
+            }
+        }
         None => println!("ADC file: unknown"),
     }
     println!(
-        "Env credentials: GOOGLE_APPLICATION_CREDENTIALS={}, service-account-path={}, service-account-json={}, quota-project={}",
+        "Env credentials: GOOGLE_APPLICATION_CREDENTIALS={}, service-account-path={}, service-account-json={}, quota-project={}, shared-adc={}",
         yes_no(report.env.google_application_credentials),
         yes_no(report.env.service_account_path),
         yes_no(report.env.service_account_json),
         yes_no(report.env.quota_project),
+        yes_no(report.env.shared_adc),
     );
     if report.verification.checked {
         if report.verification.ok == Some(true) {
@@ -446,20 +491,86 @@ pub(crate) fn shell_join_with_cloudsdk_config(
     }
 }
 
-fn selected_adc_file_status() -> Option<AdcFileStatus> {
-    server_adc_credentials_path()
-        .map(|path| AdcFileStatus {
-            kind: "server-specific",
-            role: "preferred",
-            path,
-        })
-        .or_else(|| {
-            adc_credentials_path().map(|path| AdcFileStatus {
-                kind: "shared",
-                role: "fallback",
+fn selected_adc_file_status(settings: &Settings) -> Option<AdcFileStatus> {
+    let selected = selected_adc_file(settings.shared_adc)?;
+    let path = selected.path.clone();
+    match google_authorized_user_adc_metadata_from_file(&path) {
+        Ok(Some(metadata)) => {
+            let usable = metadata.client_id_present()
+                && metadata.client_secret_present()
+                && metadata.refresh_token_present();
+            let error = if usable {
+                None
+            } else {
+                Some(format!(
+                    "missing required authorized-user fields in {} ADC file",
+                    selected.source.kind_label()
+                ))
+            };
+            Some(AdcFileStatus {
+                selection_source: selected.source.as_str(),
+                kind: selected.source.kind_label(),
                 path,
+                present: true,
+                usable: Some(usable),
+                quota_project_id: metadata.quota_project_id().map(str::to_string),
+                error,
             })
-        })
+        }
+        Ok(None) => Some(AdcFileStatus {
+            selection_source: selected.source.as_str(),
+            kind: selected.source.kind_label(),
+            path,
+            present: false,
+            usable: None,
+            quota_project_id: None,
+            error: None,
+        }),
+        Err(err) => Some(AdcFileStatus {
+            selection_source: selected.source.as_str(),
+            kind: selected.source.kind_label(),
+            present: fs::symlink_metadata(&path).is_ok(),
+            path,
+            usable: Some(false),
+            quota_project_id: None,
+            error: Some(redact_secret_text(&err.to_string())),
+        }),
+    }
+}
+
+fn uses_local_user_adc(env: &EnvStatus) -> bool {
+    !env.google_application_credentials && !env.service_account_path && !env.service_account_json
+}
+
+fn selected_adc_missing_step(adc_file: &AdcFileStatus) -> String {
+    match adc_file.selection_source {
+        "server_specific_default" => format!(
+            "Run `google-ad-manager-mcp auth login --headless --quota-project PROJECT_ID` to create the server-specific ADC file at {}, or set GOOGLE_AD_MANAGER_MCP_SHARED_ADC=true to intentionally use conventional shared ADC.",
+            adc_file.path.display()
+        ),
+        "shared_explicit" => format!(
+            "Run `google-ad-manager-mcp auth login --shared-adc --headless --quota-project PROJECT_ID` to create the shared ADC file at {}, or clear GOOGLE_AD_MANAGER_MCP_SHARED_ADC to return to the server-specific default.",
+            adc_file.path.display()
+        ),
+        _ => format!(
+            "Create the selected ADC file at {} before retrying auth.",
+            adc_file.path.display()
+        ),
+    }
+}
+
+fn selected_adc_repair_step(settings: &Settings, adc_file: &AdcFileStatus) -> String {
+    if settings.shared_adc {
+        format!(
+            "Repair or replace the shared ADC file at {}, rerun `google-ad-manager-mcp auth login --shared-adc`, or clear GOOGLE_AD_MANAGER_MCP_SHARED_ADC to return to the server-specific default.",
+            adc_file.path.display()
+        )
+    } else {
+        format!(
+            "Repair or replace the server-specific ADC file at {}, or rerun `google-ad-manager-mcp auth login --headless --quota-project PROJECT_ID`.",
+            adc_file.path.display()
+        )
+    }
 }
 
 fn mentions_quota_project(error: &str) -> bool {
@@ -536,9 +647,13 @@ struct QuotaProjectStatus {
 
 #[derive(Debug, Serialize)]
 struct AdcFileStatus {
+    selection_source: &'static str,
     kind: &'static str,
-    role: &'static str,
     path: PathBuf,
+    present: bool,
+    usable: Option<bool>,
+    quota_project_id: Option<String>,
+    error: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -547,6 +662,7 @@ struct EnvStatus {
     service_account_path: bool,
     service_account_json: bool,
     quota_project: bool,
+    shared_adc: bool,
 }
 
 #[derive(Debug, Serialize)]
