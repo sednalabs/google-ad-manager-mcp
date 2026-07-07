@@ -468,7 +468,7 @@ impl SoapTraffickingOperation {
                 "payload_xml must contain one or more <lineItemIds> and optional <forecastOptions>"
             }
             Self::GetTrafficData => {
-                "payload_xml must contain <lineItem> and optional <forecastOptions>"
+                "payload_xml must contain <trafficDataRequest> and optional <forecastOptions>"
             }
         }
     }
@@ -1375,7 +1375,14 @@ fn validate_rest_write_body_binding(
             }
             Ok(())
         }
-        RestWriteOperation::Create => Ok(()),
+        RestWriteOperation::Create => {
+            let mut names = Vec::new();
+            collect_nested_resource_names(body, "body.name", &mut names)?;
+            for name in names {
+                validate_resource_name("body.name", Some(name), network_code, segment)?;
+            }
+            Ok(())
+        }
     }
 }
 
@@ -1636,8 +1643,8 @@ fn validate_soap_payload_operation_binding(
             SoapTraffickingOperation::PerformLineItemCreativeAssociationAction => {
                 contains_all(&["lineitemcreativeassociationaction", "filterstatement"])
             }
-            SoapTraffickingOperation::GetAvailabilityForecast
-            | SoapTraffickingOperation::GetTrafficData => contains_any(&["lineitem"]),
+            SoapTraffickingOperation::GetAvailabilityForecast => contains_any(&["lineitem"]),
+            SoapTraffickingOperation::GetTrafficData => contains_any(&["trafficdatarequest"]),
             SoapTraffickingOperation::GetAvailabilityForecastById => contains_any(&["lineitemid"]),
             SoapTraffickingOperation::GetDeliveryForecast => contains_any(&["lineitems"]),
             SoapTraffickingOperation::GetDeliveryForecastByIds => contains_any(&["lineitemids"]),
@@ -2207,6 +2214,48 @@ mod tests {
     }
 
     #[test]
+    fn create_body_names_must_match_selected_resource_segment() {
+        let client = AdManagerClient::from_settings(&Settings::default());
+        let err = client
+            .build_rest_write_plan(
+                "1234567",
+                RestWriteResource::Sites,
+                RestWriteOperation::Create,
+                None,
+                None,
+                json!({
+                    "name": "networks/1234567/orders/987654",
+                    "displayName": "Mismatch"
+                }),
+            )
+            .expect_err("reject mismatched create body name");
+
+        assert!(err.to_string().contains("body.name"));
+        assert!(err.to_string().contains("must start with networks/1234567/sites/"));
+    }
+
+    #[test]
+    fn create_nested_name_errors_use_create_field_path() {
+        let client = AdManagerClient::from_settings(&Settings::default());
+        let err = client
+            .build_rest_write_plan(
+                "1234567",
+                RestWriteResource::Sites,
+                RestWriteOperation::Create,
+                None,
+                None,
+                json!({
+                    "site": {
+                        "name": 123
+                    }
+                }),
+            )
+            .expect_err("reject non-string nested create name");
+
+        assert!(err.to_string().contains("body.name"));
+    }
+
+    #[test]
     fn builds_soap_trafficking_envelope_and_endpoint() {
         let client = AdManagerClient::from_settings(&Settings::default());
         let plan = client
@@ -2397,6 +2446,35 @@ mod tests {
         assert!(
             err.to_string()
                 .contains("does not match the selected SOAP operation")
+        );
+    }
+
+    #[test]
+    fn traffic_data_and_availability_forecast_require_distinct_payload_roots() {
+        assert_eq!(
+            SoapTraffickingOperation::GetTrafficData.request_hint(),
+            "payload_xml must contain <trafficDataRequest> and optional <forecastOptions>"
+        );
+        assert!(
+            validate_soap_payload_xml(
+                SoapTraffickingOperation::GetTrafficData,
+                "<trafficDataRequest/>",
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_soap_payload_xml(
+                SoapTraffickingOperation::GetTrafficData,
+                "<lineItem><targeting/></lineItem>",
+            )
+            .is_err()
+        );
+        assert!(
+            validate_soap_payload_xml(
+                SoapTraffickingOperation::GetAvailabilityForecast,
+                "<lineItem><targeting/></lineItem>",
+            )
+            .is_ok()
         );
     }
 
