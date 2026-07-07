@@ -256,7 +256,13 @@ async fn build_report(settings: &Settings, verify: bool) -> AuthReport {
         || env.service_account_json
         || adc_file.as_ref().is_some_and(|file| file.present)
         || verification.ok == Some(true);
-    let next_steps = next_steps(settings, &quota_project, &verification, adc_file.as_ref(), &env);
+    let next_steps = next_steps(
+        settings,
+        &quota_project,
+        &verification,
+        adc_file.as_ref(),
+        &env,
+    );
 
     AuthReport {
         server: "google-ad-manager-mcp",
@@ -286,14 +292,14 @@ fn effective_quota_project(
             source: Some("GOOGLE_AD_MANAGER_MCP_QUOTA_PROJECT_or_cli".to_string()),
         };
     }
-    if uses_local_user_adc(env) {
-        if let Some(project) = adc_file.and_then(|status| status.quota_project_id.as_ref()) {
-            return QuotaProjectStatus {
-                configured: true,
-                value: Some(project.to_string()),
-                source: Some("selected_adc_file".to_string()),
-            };
-        }
+    if uses_local_user_adc(env)
+        && let Some(project) = adc_file.and_then(|status| status.quota_project_id.as_ref())
+    {
+        return QuotaProjectStatus {
+            configured: true,
+            value: Some(project.to_string()),
+            source: Some("selected_adc_file".to_string()),
+        };
     }
     QuotaProjectStatus {
         configured: false,
@@ -324,13 +330,13 @@ fn next_steps(
     env: &EnvStatus,
 ) -> Vec<String> {
     let mut steps = Vec::new();
-    if uses_local_user_adc(env) {
-        if let Some(adc_file) = adc_file {
-            if !adc_file.present {
-                steps.push(selected_adc_missing_step(adc_file));
-            } else if adc_file.usable == Some(false) {
-                steps.push(selected_adc_repair_step(settings, adc_file));
-            }
+    if uses_local_user_adc(env)
+        && let Some(adc_file) = adc_file
+    {
+        if !adc_file.present {
+            steps.push(selected_adc_missing_step(adc_file));
+        } else if adc_file.usable == Some(false) {
+            steps.push(selected_adc_repair_step(settings, adc_file));
         }
     }
     if !verification.checked {
@@ -536,7 +542,7 @@ fn selected_adc_file_status(settings: &Settings) -> Option<AdcFileStatus> {
         Err(err) => Some(AdcFileStatus {
             selection_source: selected.source.as_str(),
             kind: selected.source.kind_label(),
-            present: fs::symlink_metadata(&path).is_ok(),
+            present: true,
             path,
             usable: Some(false),
             quota_project_id: None,
@@ -727,8 +733,10 @@ mod tests {
 
     #[test]
     fn auth_command_shared_adc_follows_runtime_selection() {
-        let mut settings = Settings::default();
-        settings.shared_adc = true;
+        let settings = Settings {
+            shared_adc: true,
+            ..Settings::default()
+        };
 
         assert!(auth_command_shared_adc(&settings, false));
         assert!(auth_command_shared_adc(&settings, true));

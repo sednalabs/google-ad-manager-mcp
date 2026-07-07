@@ -44,7 +44,11 @@ pub struct Cli {
     pub quota_project: Option<String>,
 
     /// Intentionally use conventional shared gcloud ADC instead of the server-specific ADC file at runtime.
-    #[arg(long = "runtime-shared-adc", env = "GOOGLE_AD_MANAGER_MCP_SHARED_ADC", global = true)]
+    #[arg(
+        long = "runtime-shared-adc",
+        env = "GOOGLE_AD_MANAGER_MCP_SHARED_ADC",
+        global = true
+    )]
     pub shared_adc: bool,
 
     /// Optional server-specific service account JSON file path.
@@ -445,10 +449,6 @@ fn parse_write_mode(value: &str) -> Result<GuardedActionRuntimeMode, AdManagerEr
             "must be one of read_only, preview_only, or enabled",
         )),
     }
-}
-
-pub fn adc_credentials_path() -> Option<PathBuf> {
-    server_adc_credentials_path().or_else(conventional_adc_credentials_path)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

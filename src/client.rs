@@ -1361,7 +1361,7 @@ fn validate_rest_write_body_binding(
                 }
             }
             let mut names = Vec::new();
-            collect_nested_resource_names(body, &mut names)?;
+            collect_nested_resource_names(body, "body.name", &mut names)?;
             for name in names {
                 validate_resource_name("body.name", Some(name), network_code, segment)?;
             }
@@ -1394,7 +1394,7 @@ fn validate_batch_request_bindings(
             ));
         }
         let mut names = Vec::new();
-        collect_nested_resource_names(request, &mut names)?;
+        collect_nested_resource_names(request, "body.requests[].name", &mut names)?;
         if operation == RestWriteOperation::BatchUpdate && names.is_empty() {
             return Err(AdManagerError::invalid(
                 "body.requests[]",
@@ -1430,6 +1430,7 @@ fn validate_batch_name_bindings(
 
 fn collect_nested_resource_names<'a>(
     value: &'a Value,
+    field_path: &str,
     names: &mut Vec<&'a str>,
 ) -> Result<(), AdManagerError> {
     match value {
@@ -1437,20 +1438,17 @@ fn collect_nested_resource_names<'a>(
             for (key, child) in object {
                 if key == "name" {
                     let name = child.as_str().ok_or_else(|| {
-                        AdManagerError::invalid(
-                            "body.requests[].name",
-                            "must be a string resource name",
-                        )
+                        AdManagerError::invalid(field_path, "must be a string resource name")
                     })?;
                     names.push(name);
                 }
-                collect_nested_resource_names(child, names)?;
+                collect_nested_resource_names(child, field_path, names)?;
             }
             Ok(())
         }
         Value::Array(items) => {
             for item in items {
-                collect_nested_resource_names(item, names)?;
+                collect_nested_resource_names(item, field_path, names)?;
             }
             Ok(())
         }
@@ -1567,81 +1565,79 @@ fn validate_soap_payload_xml(
     }
 
     for method in SOAP_METHOD_NAMES_LOWERCASE {
-        let open = format!("<{method}");
-        let close = format!("</{method}>");
-        if compact.contains(&open) || compact.contains(&close) {
+        if contains_xml_tag(&lower, method) {
             return Err(AdManagerError::invalid(
                 "payload_xml",
                 "must contain only the inner payload fragment, not the outer SOAP method wrapper",
             ));
         }
     }
-    validate_soap_payload_operation_binding(operation, &compact)?;
+    validate_soap_payload_operation_binding(operation, &lower)?;
 
     Ok(trimmed.to_string())
 }
 
 fn validate_soap_payload_operation_binding(
     operation: SoapTraffickingOperation,
-    compact: &str,
+    lower: &str,
 ) -> Result<(), AdManagerError> {
-    let contains_all = |tags: &[&str]| tags.iter().all(|tag| contains_xml_tag(compact, tag));
-    let contains_any = |tags: &[&str]| tags.iter().any(|tag| contains_xml_tag(compact, tag));
-    let compatible = match operation {
-        SoapTraffickingOperation::CreateOrders | SoapTraffickingOperation::UpdateOrders => {
-            contains_any(&["orders"])
-        }
-        SoapTraffickingOperation::GetOrdersByStatement
-        | SoapTraffickingOperation::GetLineItemsByStatement
-        | SoapTraffickingOperation::GetCreativesByStatement
-        | SoapTraffickingOperation::GetLineItemCreativeAssociationsByStatement => {
-            contains_any(&["filterstatement"])
-        }
-        SoapTraffickingOperation::PerformOrderAction => {
-            contains_all(&["orderaction", "filterstatement"])
-        }
-        SoapTraffickingOperation::CreateLineItems | SoapTraffickingOperation::UpdateLineItems => {
-            contains_any(&["lineitems"])
-        }
-        SoapTraffickingOperation::PerformLineItemAction => {
-            contains_all(&["lineitemaction", "filterstatement"])
-        }
-        SoapTraffickingOperation::CreateCreatives | SoapTraffickingOperation::UpdateCreatives => {
-            contains_any(&["creatives"])
-        }
-        SoapTraffickingOperation::PerformCreativeAction => {
-            contains_all(&["creativeaction", "filterstatement"])
-        }
-        SoapTraffickingOperation::CreateLineItemCreativeAssociations
-        | SoapTraffickingOperation::UpdateLineItemCreativeAssociations => {
-            contains_any(&["lineitemcreativeassociations"])
-        }
-        SoapTraffickingOperation::GetLineItemCreativeAssociationPreviewUrl => {
-            contains_any(&["lineitemcreativeassociation"])
-                || contains_all(&["lineitemid", "creativeid"])
-        }
-        SoapTraffickingOperation::GetLineItemCreativeAssociationNativeStylePreviewUrls => {
-            (contains_any(&["lineitemcreativeassociation"])
-                || contains_all(&["lineitemid", "creativeid"]))
-                && compact.contains("nativestyle")
-        }
-        SoapTraffickingOperation::PerformLineItemCreativeAssociationAction => {
-            contains_all(&["lineitemcreativeassociationaction", "filterstatement"])
-        }
-        SoapTraffickingOperation::GetAvailabilityForecast
-        | SoapTraffickingOperation::GetTrafficData => contains_any(&["lineitem"]),
-        SoapTraffickingOperation::GetAvailabilityForecastById => {
-            contains_any(&["lineitemid"])
-        }
-        SoapTraffickingOperation::GetDeliveryForecast => contains_any(&["lineitems"]),
-        SoapTraffickingOperation::GetDeliveryForecastByIds => contains_any(&["lineitemids"]),
-    };
+    let contains_all = |tags: &[&str]| tags.iter().all(|tag| contains_xml_tag(lower, tag));
+    let contains_any = |tags: &[&str]| tags.iter().any(|tag| contains_xml_tag(lower, tag));
+    let compatible =
+        match operation {
+            SoapTraffickingOperation::CreateOrders | SoapTraffickingOperation::UpdateOrders => {
+                contains_any(&["orders"])
+            }
+            SoapTraffickingOperation::GetOrdersByStatement
+            | SoapTraffickingOperation::GetLineItemsByStatement
+            | SoapTraffickingOperation::GetCreativesByStatement
+            | SoapTraffickingOperation::GetLineItemCreativeAssociationsByStatement => {
+                contains_any(&["filterstatement"])
+            }
+            SoapTraffickingOperation::PerformOrderAction => {
+                contains_all(&["orderaction", "filterstatement"])
+            }
+            SoapTraffickingOperation::CreateLineItems
+            | SoapTraffickingOperation::UpdateLineItems => contains_any(&["lineitems"]),
+            SoapTraffickingOperation::PerformLineItemAction => {
+                contains_all(&["lineitemaction", "filterstatement"])
+            }
+            SoapTraffickingOperation::CreateCreatives
+            | SoapTraffickingOperation::UpdateCreatives => contains_any(&["creatives"]),
+            SoapTraffickingOperation::PerformCreativeAction => {
+                contains_all(&["creativeaction", "filterstatement"])
+            }
+            SoapTraffickingOperation::CreateLineItemCreativeAssociations
+            | SoapTraffickingOperation::UpdateLineItemCreativeAssociations => {
+                contains_any(&["lineitemcreativeassociations"])
+            }
+            SoapTraffickingOperation::GetLineItemCreativeAssociationPreviewUrl => {
+                contains_any(&["lineitemcreativeassociation"])
+                    || contains_all(&["lineitemid", "creativeid"])
+            }
+            SoapTraffickingOperation::GetLineItemCreativeAssociationNativeStylePreviewUrls => {
+                (contains_any(&["lineitemcreativeassociation"])
+                    || contains_all(&["lineitemid", "creativeid"]))
+                    && lower.contains("nativestyle")
+            }
+            SoapTraffickingOperation::PerformLineItemCreativeAssociationAction => {
+                contains_all(&["lineitemcreativeassociationaction", "filterstatement"])
+            }
+            SoapTraffickingOperation::GetAvailabilityForecast
+            | SoapTraffickingOperation::GetTrafficData => contains_any(&["lineitem"]),
+            SoapTraffickingOperation::GetAvailabilityForecastById => contains_any(&["lineitemid"]),
+            SoapTraffickingOperation::GetDeliveryForecast => contains_any(&["lineitems"]),
+            SoapTraffickingOperation::GetDeliveryForecastByIds => contains_any(&["lineitemids"]),
+        };
     if compatible {
         Ok(())
     } else {
         Err(AdManagerError::invalid(
             "payload_xml",
-            format!("does not match the selected SOAP operation `{}`", operation.as_str()),
+            format!(
+                "does not match the selected SOAP operation `{}`",
+                operation.as_str()
+            ),
         ))
     }
 }
@@ -1650,7 +1646,9 @@ fn contains_xml_tag(compact: &str, tag: &str) -> bool {
     compact.match_indices('<').any(|(start, _)| {
         let rest = &compact[start + 1..];
         let rest = rest.strip_prefix('/').unwrap_or(rest);
-        let Some(boundary) = rest.find(['>', '/']) else {
+        let Some(boundary) =
+            rest.find(|ch: char| ch == '>' || ch == '/' || ch.is_ascii_whitespace())
+        else {
             return false;
         };
         let candidate = &rest[..boundary];
@@ -1661,8 +1659,15 @@ fn contains_xml_tag(compact: &str, tag: &str) -> bool {
 fn matches_xml_tag_name(candidate: &str, tag: &str) -> bool {
     candidate == tag
         || candidate
-            .strip_suffix(tag)
-            .is_some_and(|prefix| !prefix.is_empty() && prefix.chars().all(|ch| ch.is_ascii_alphanumeric()))
+            .split_once(':')
+            .is_some_and(|(prefix, local)| local == tag && is_xml_name_prefix(prefix))
+}
+
+fn is_xml_name_prefix(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.'))
 }
 
 fn soap_namespace(api_version: &str) -> String {
@@ -1991,7 +1996,10 @@ mod tests {
             )
             .expect_err("reject wrong network");
 
-        assert!(err.to_string().contains("must start with networks/1234567/sites/"));
+        assert!(
+            err.to_string()
+                .contains("must start with networks/1234567/sites/")
+        );
     }
 
     #[test]
@@ -2018,7 +2026,10 @@ mod tests {
             )
             .expect_err("reject wrong resource segment");
 
-        assert!(err.to_string().contains("must start with networks/1234567/sites/"));
+        assert!(
+            err.to_string()
+                .contains("must start with networks/1234567/sites/")
+        );
     }
 
     #[test]
@@ -2044,9 +2055,10 @@ mod tests {
             )
             .expect_err("reject missing nested resource name");
 
-        assert!(err
-            .to_string()
-            .contains("must contain at least one nested resource `name`"));
+        assert!(
+            err.to_string()
+                .contains("must contain at least one nested resource `name`")
+        );
     }
 
     #[test]
@@ -2128,9 +2140,57 @@ mod tests {
             )
             .expect_err("reject mismatched patch body name");
 
-        assert!(err
-            .to_string()
-            .contains("must exactly match resource_name networks/1234567/reports/987654"));
+        assert!(
+            err.to_string()
+                .contains("must exactly match resource_name networks/1234567/reports/987654")
+        );
+    }
+
+    #[test]
+    fn patch_nested_name_errors_use_patch_field_path() {
+        let client = AdManagerClient::from_settings(&Settings::default());
+        let err = client
+            .build_rest_write_plan(
+                "1234567",
+                RestWriteResource::Reports,
+                RestWriteOperation::Patch,
+                Some("networks/1234567/reports/987654"),
+                Some("displayName"),
+                json!({
+                    "name": "networks/1234567/reports/987654",
+                    "nested": {
+                        "name": 123
+                    }
+                }),
+            )
+            .expect_err("reject non-string nested patch name");
+
+        assert!(err.to_string().contains("body.name"));
+    }
+
+    #[test]
+    fn batch_update_nested_name_errors_use_batch_field_path() {
+        let client = AdManagerClient::from_settings(&Settings::default());
+        let err = client
+            .build_rest_write_plan(
+                "1234567",
+                RestWriteResource::Sites,
+                RestWriteOperation::BatchUpdate,
+                None,
+                None,
+                json!({
+                    "requests": [
+                        {
+                            "site": {
+                                "name": 123
+                            }
+                        }
+                    ]
+                }),
+            )
+            .expect_err("reject non-string nested batch name");
+
+        assert!(err.to_string().contains("body.requests[].name"));
     }
 
     #[test]
@@ -2200,7 +2260,10 @@ mod tests {
                 SoapTraffickingOperation::GetOrdersByStatement,
                 "getordersbystatement",
             ),
-            (SoapTraffickingOperation::PerformOrderAction, "performorderaction"),
+            (
+                SoapTraffickingOperation::PerformOrderAction,
+                "performorderaction",
+            ),
             (SoapTraffickingOperation::UpdateOrders, "updateorders"),
             (SoapTraffickingOperation::CreateLineItems, "createlineitems"),
             (
@@ -2275,6 +2338,24 @@ mod tests {
     }
 
     #[test]
+    fn soap_namespaced_method_wrappers_are_rejected() {
+        assert!(
+            validate_soap_payload_xml(
+                SoapTraffickingOperation::GetLineItemsByStatement,
+                "<gam:getLineItemsByStatement/>",
+            )
+            .is_err()
+        );
+        assert!(
+            validate_soap_payload_xml(
+                SoapTraffickingOperation::GetLineItemCreativeAssociationPreviewUrl,
+                "<gam:getPreviewUrl><gam:lineItemId>1</gam:lineItemId></gam:getPreviewUrl>",
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn soap_preview_method_wrappers_are_rejected() {
         assert!(
             validate_soap_payload_xml(
@@ -2300,9 +2381,10 @@ mod tests {
         )
         .expect_err("reject mismatched payload");
 
-        assert!(err
-            .to_string()
-            .contains("does not match the selected SOAP operation"));
+        assert!(
+            err.to_string()
+                .contains("does not match the selected SOAP operation")
+        );
     }
 
     #[test]
@@ -2327,6 +2409,24 @@ mod tests {
                 "<lineItemId>1</lineItemId><creativeId>2</creativeId>",
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn soap_namespaced_inner_tags_are_accepted() {
+        assert!(
+            validate_soap_payload_xml(
+                SoapTraffickingOperation::GetLineItemsByStatement,
+                "<gam:filterStatement><gam:query>WHERE id = 42</gam:query></gam:filterStatement>",
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_soap_payload_xml(
+                SoapTraffickingOperation::GetLineItemCreativeAssociationPreviewUrl,
+                "<gam:lineItemId>1</gam:lineItemId><gam:creativeId>2</gam:creativeId>",
+            )
+            .is_ok()
         );
     }
 
