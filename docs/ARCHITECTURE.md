@@ -98,16 +98,18 @@ The initial first-class tool set is:
 11. `gam_soap_payload_build`
 12. `gam_soap_trafficking_plan`
 13. `gam_soap_trafficking_apply`
-14. `gam_scratchpad_open_session`
-15. `gam_scratchpad_close_session`
-16. `gam_scratchpad_list_sessions`
-17. `gam_scratchpad_list_tables`
-18. `gam_scratchpad_drop_table`
-19. `gam_scratchpad_query`
-20. `gam_scratchpad_ingest_network_catalog`
-21. `gam_scratchpad_ingest_report_result_rows`
-22. `gam_scratchpad_ingest_soap_line_items`
-23. `gam_scratchpad_export_evidence_bundle`
+14. `gam_yield_group_exclusions_preview`
+15. `gam_yield_group_exclusions_apply`
+16. `gam_scratchpad_open_session`
+17. `gam_scratchpad_close_session`
+18. `gam_scratchpad_list_sessions`
+19. `gam_scratchpad_list_tables`
+20. `gam_scratchpad_drop_table`
+21. `gam_scratchpad_query`
+22. `gam_scratchpad_ingest_network_catalog`
+23. `gam_scratchpad_ingest_report_result_rows`
+24. `gam_scratchpad_ingest_soap_line_items`
+25. `gam_scratchpad_export_evidence_bundle`
 
 `find_tools` is also exposed for deferred-loading and `tool_search` clients.
 
@@ -126,6 +128,14 @@ matter most for a first useful release and the exchange-proof workflow:
 those catalog reads and SOAP YieldGroupService reads. It reports partial proof
 states for capped, blocked, or unsupported protection surfaces instead of
 turning missing API coverage into a clean result.
+
+`gam_yield_group_exclusions_preview` and
+`gam_yield_group_exclusions_apply` are the typed mutation path for exact
+YieldGroupService ad-unit exclusions. They read the current yield group,
+preserve the existing yield-group targeting object, add only missing exact
+`excludedAdUnits` entries, and require post-apply readback before reporting an
+applied state. They deliberately do not make `updateYieldGroups` a generic SOAP
+operation.
 
 The deliberately grouped write tools are `gam_rest_write_plan` and
 `gam_rest_write_apply`. They cover the current REST beta write surface through

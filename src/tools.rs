@@ -17,7 +17,8 @@ use tokio::process::Command;
 use crate::auth_ux::{gcloud_adc_login_command, shell_join_with_cloudsdk_config};
 use crate::client::{
     CatalogCollection, DEFAULT_SOAP_API_VERSION, RestWriteOperation, RestWritePlan,
-    RestWriteResource, SoapTraffickingOperation, SoapTraffickingPlan, soap_error_message,
+    RestWriteResource, SoapTraffickingOperation, SoapTraffickingPlan, YieldGroupUpdateSoapRequest,
+    soap_error_message,
 };
 use crate::config::{
     GCLOUD_ADC_REQUIRED_SCOPE, server_adc_credentials_path, server_cloudsdk_config_dir,
@@ -199,6 +200,41 @@ pub struct SoapTraffickingPlanArgs {
 pub struct SoapTraffickingApplyArgs {
     pub request: SoapTraffickingRequestArgs,
     /// Confirmation token returned by gam_soap_trafficking_plan for this exact request.
+    pub confirmation_token: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct YieldGroupExclusionRequestArgs {
+    /// Raw Ad Manager network code, for example 1234567.
+    pub network_code: String,
+    /// Numeric YieldGroupService yield group identifier.
+    pub yield_group_id: String,
+    /// Exact ad-unit IDs to add to YieldGroupService InventoryTargeting.excludedAdUnits.
+    pub excluded_ad_unit_ids: Vec<String>,
+    /// SOAP API version, for example v202605. Defaults to the current server default.
+    pub api_version: Option<String>,
+    /// Include generated SOAP payload fragments in the response. Defaults to false.
+    #[serde(default)]
+    pub include_payload_xml: bool,
+    /// Human-readable reason for the proposed yield-group exclusion change.
+    pub reason: String,
+    /// Expected advertiser, campaign, delivery, or operational impact. Required for apply.
+    pub expected_impact: Option<String>,
+    /// Rollback or reversal note. Required by policy for live apply review.
+    pub rollback_note: Option<String>,
+    /// Optional caller-supplied idempotency or ticket reference.
+    pub idempotency_key: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct YieldGroupExclusionPreviewArgs {
+    pub request: YieldGroupExclusionRequestArgs,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct YieldGroupExclusionApplyArgs {
+    pub request: YieldGroupExclusionRequestArgs,
+    /// Confirmation token returned by gam_yield_group_exclusions_preview for this exact request and readback fingerprint.
     pub confirmation_token: String,
 }
 
@@ -484,6 +520,7 @@ impl AdManagerServer {
                     "Call gam_trafficking_tool_matrix before planning writes so the REST and SOAP trafficking surfaces are explicit.",
                     "Use gam_rest_write_plan for dry-run write plans; gam_rest_write_apply only works when the server is explicitly started with GOOGLE_AD_MANAGER_MCP_WRITE_MODE=enabled and the manage scope.",
                     "Use gam_soap_trafficking_plan and gam_soap_trafficking_apply for order, line-item, creative, LICA, and forecast SOAP workflows.",
+                    "Use gam_yield_group_exclusions_preview and gam_yield_group_exclusions_apply when an existing yield group needs exact ad-unit exclusions with post-apply readback proof.",
                     "For local operator apply testing, rerun auth with google-ad-manager-mcp auth login --headless --quota-project <PROJECT_ID> --manage-scope.",
                     "Use gam_scratchpad_open_session plus the gam_scratchpad_ingest_* tools when you need local joins, filtering, evidence bundles, or larger result review."
                 ],
@@ -522,6 +559,7 @@ impl AdManagerServer {
                     "gam_trafficking_tool_matrix",
                     "gam_rest_write_plan",
                     "gam_soap_trafficking_plan",
+                    "gam_yield_group_exclusions_preview",
                     "gam_scratchpad_open_session"
                 ],
                 "notes": [
@@ -1382,6 +1420,228 @@ impl AdManagerServer {
     }
 
     #[tool(
+        name = "gam_yield_group_exclusions_preview",
+        description = "Read one YieldGroupService yield group and preview adding exact ad-unit IDs to InventoryTargeting.excludedAdUnits without mutating Google Ad Manager."
+    )]
+    async fn gam_yield_group_exclusions_preview(
+        &self,
+        Parameters(args): Parameters<YieldGroupExclusionPreviewArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let started = Instant::now();
+        if let Err(err) = self.settings().write_mode.assert_allowed(
+            "gam_yield_group_exclusions_preview",
+            GuardedActionPosture::preview(),
+        ) {
+            return Ok(contract::error(write_action_disabled(err), started));
+        }
+        if !scope_allows_write(self.client().scope()) {
+            return Ok(contract::error(
+                AdManagerError::WriteScopeRequired {
+                    scope: self.client().scope().to_string(),
+                },
+                started,
+            ));
+        }
+        if let Err(err) = validate_yield_group_exclusion_context(&args.request) {
+            return Ok(contract::error(err, started));
+        }
+
+        let draft = match build_yield_group_exclusion_draft(self, &args.request).await {
+            Ok(value) => value,
+            Err(err) => return Ok(contract::error(err, started)),
+        };
+        let (plan_id, confirmation_token, fingerprint) =
+            match guarded_yield_group_exclusion_identifiers(&args.request, &draft) {
+                Ok(value) => value,
+                Err(err) => return Ok(contract::error(err, started)),
+            };
+        let preview = GuardedActionPreview::new(
+            plan_id,
+            self.settings().write_mode,
+            GuardedActionPosture::preview(),
+            json!({
+                "request": yield_group_exclusion_request_summary(&args.request, &draft),
+                "yield_group": yield_group_exclusion_draft_summary(&draft, args.request.include_payload_xml),
+                "confirmation_token": confirmation_token,
+                "fingerprint": fingerprint,
+                "warnings": yield_group_exclusion_warnings(self.settings().write_mode, self.client().scope(), &args.request, &draft),
+                "next_step": if draft.noop {
+                    "No update is needed because every requested ad-unit ID is already excluded by the yield group readback."
+                } else {
+                    "Review the exact added_excluded_ad_unit_ids, current targeting summary, and payload hash. To apply, restart or run the server with GOOGLE_AD_MANAGER_MCP_WRITE_MODE=enabled, use the manage scope, and call gam_yield_group_exclusions_apply with this exact request and confirmation_token."
+                },
+            }),
+            json!({
+                "mutation_performed": false,
+                "upstream_called": true,
+                "soap_default_api_version": DEFAULT_SOAP_API_VERSION,
+                "required_soap_scope": MANAGE_SCOPE,
+                "policy": provider_safety_contract_json(),
+            }),
+        );
+        Ok(contract::success(json!(preview), started))
+    }
+
+    #[tool(
+        name = "gam_yield_group_exclusions_apply",
+        description = "Apply a previewed YieldGroupService exact ad-unit exclusion update after write-mode, manage-scope, confirmation-token, and readback gates."
+    )]
+    async fn gam_yield_group_exclusions_apply(
+        &self,
+        Parameters(args): Parameters<YieldGroupExclusionApplyArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let started = Instant::now();
+        if let Err(err) = self.settings().write_mode.assert_allowed(
+            "gam_yield_group_exclusions_apply",
+            GuardedActionPosture::guarded_apply(),
+        ) {
+            return Ok(contract::error(write_action_disabled(err), started));
+        }
+        if !scope_allows_write(self.client().scope()) {
+            return Ok(contract::error(
+                AdManagerError::WriteScopeRequired {
+                    scope: self.client().scope().to_string(),
+                },
+                started,
+            ));
+        }
+        if let Err(err) = validate_yield_group_exclusion_context(&args.request)
+            .and_then(|_| validate_yield_group_exclusion_apply_context(&args.request))
+        {
+            return Ok(contract::error(err, started));
+        }
+
+        let draft = match build_yield_group_exclusion_draft(self, &args.request).await {
+            Ok(value) => value,
+            Err(err) => return Ok(contract::error(err, started)),
+        };
+        let (plan_id, expected_token, fingerprint) =
+            match guarded_yield_group_exclusion_identifiers(&args.request, &draft) {
+                Ok(value) => value,
+                Err(err) => return Ok(contract::error(err, started)),
+            };
+        if args.confirmation_token.trim() != expected_token {
+            return Ok(contract::error(
+                AdManagerError::ConfirmationTokenMismatch,
+                started,
+            ));
+        }
+
+        let mut apply_evidence = json!({
+            "request": yield_group_exclusion_request_summary(&args.request, &draft),
+            "preview_readback": yield_group_exclusion_draft_summary(&draft, args.request.include_payload_xml),
+            "finish_state": "noop_proven",
+            "update_response": null,
+            "post_apply_readback": null,
+        });
+        if !draft.noop {
+            let update_request = match self.client().build_yield_group_update_request(
+                &args.request.network_code,
+                args.request.api_version.as_deref(),
+                &draft.update_payload_xml,
+            ) {
+                Ok(value) => value,
+                Err(err) => return Ok(contract::error(err, started)),
+            };
+            let applied = match self
+                .client()
+                .execute_yield_group_update_request(&update_request)
+                .await
+            {
+                Ok(value) => value,
+                Err(err) => return Ok(contract::error(err, started)),
+            };
+            if applied.upstream_status >= 400 || applied.soap_fault.is_some() {
+                return Ok(contract::error_with_detail(
+                    AdManagerError::UpstreamApi {
+                        status: applied.upstream_status,
+                        message: crate::client::soap_error_message(&applied),
+                    },
+                    json!({
+                        "yield_group_update_request": yield_group_update_request_to_json(&update_request, args.request.include_payload_xml),
+                        "upstream_status": applied.upstream_status,
+                        "response_truncated": applied.response_truncated,
+                        "request_id": applied.request_id,
+                        "response_time": applied.response_time,
+                        "soap_fault": applied.soap_fault,
+                    }),
+                    started,
+                ));
+            }
+
+            let readback = match build_yield_group_exclusion_draft(self, &args.request).await {
+                Ok(value) => value,
+                Err(err) => {
+                    return Ok(contract::error_with_detail(
+                        err,
+                        json!({
+                            "yield_group_update_request": yield_group_update_request_to_json(&update_request, args.request.include_payload_xml),
+                            "upstream_status": applied.upstream_status,
+                            "response_truncated": applied.response_truncated,
+                            "request_id": applied.request_id,
+                            "response_time": applied.response_time,
+                            "soap_fault": applied.soap_fault,
+                            "readback_state": "blocked_after_update",
+                        }),
+                        started,
+                    ));
+                }
+            };
+            if !readback.all_requested_ids_currently_excluded() {
+                return Ok(contract::error_with_detail(
+                    AdManagerError::UpstreamApi {
+                        status: 500,
+                        message: "yield group update response did not prove the requested exclusions on readback".to_string(),
+                    },
+                    json!({
+                        "yield_group_update_request": yield_group_update_request_to_json(&update_request, args.request.include_payload_xml),
+                        "upstream_status": applied.upstream_status,
+                        "response_truncated": applied.response_truncated,
+                        "request_id": applied.request_id,
+                        "response_time": applied.response_time,
+                        "soap_fault": applied.soap_fault,
+                        "post_apply_readback": yield_group_exclusion_draft_summary(&readback, args.request.include_payload_xml),
+                    }),
+                    started,
+                ));
+            }
+
+            apply_evidence["finish_state"] = json!("applied_proven");
+            apply_evidence["update_response"] = json!({
+                "yield_group_update_request": yield_group_update_request_to_json(&update_request, args.request.include_payload_xml),
+                "upstream_status": applied.upstream_status,
+                "response_truncated": applied.response_truncated,
+                "request_id": applied.request_id,
+                "response_time": applied.response_time,
+                "soap_fault": applied.soap_fault,
+            });
+            apply_evidence["post_apply_readback"] =
+                yield_group_exclusion_draft_summary(&readback, args.request.include_payload_xml);
+        }
+
+        let apply = GuardedActionApply::new(
+            plan_id,
+            self.settings().write_mode,
+            GuardedActionPosture::guarded_apply(),
+            apply_evidence,
+            json!({
+                "mutation_performed": !draft.noop,
+                "upstream_called": true,
+                "fingerprint": fingerprint,
+                "required_soap_scope": MANAGE_SCOPE,
+                "operator_context": {
+                    "reason": args.request.reason,
+                    "expected_impact": args.request.expected_impact,
+                    "rollback_note": args.request.rollback_note,
+                    "idempotency_key": args.request.idempotency_key,
+                },
+                "policy": provider_safety_contract_json(),
+            }),
+        );
+        Ok(contract::success(json!(apply), started))
+    }
+
+    #[tool(
         name = "gam_trafficking_tool_matrix",
         description = "Describe the current Google Ad Manager write and trafficking surface, including REST-supported writes, SOAP trafficking operations, and remaining ergonomics gaps."
     )]
@@ -1407,6 +1667,10 @@ impl AdManagerServer {
                     "gam_soap_trafficking_plan",
                     "gam_soap_trafficking_apply"
                 ],
+                "yield_group_exclusion_tools": [
+                    "gam_yield_group_exclusions_preview",
+                    "gam_yield_group_exclusions_apply"
+                ],
                 "rest_beta_supported_resources": rest_supported_resource_matrix(),
                 "soap_trafficking_supported_operations": soap_trafficking_supported_operation_matrix(),
                 "trafficking_gaps": if include_gaps { trafficking_gap_matrix() } else { Value::Null },
@@ -1419,6 +1683,7 @@ impl AdManagerServer {
                 "notes": [
                     "Google Ad Manager REST beta exposes write methods for inventory/supporting resources and saved reports.",
                     "The guarded SOAP tools cover order, line item, creative, line-item creative association, preview URL, and forecast operations.",
+                    "The yield-group exclusion tools provide a typed read-modify-write path for exact YieldGroupService ad-unit exclusions with post-apply readback proof.",
                     "Live SOAP calls require the Ad Manager manage OAuth scope; mutating SOAP calls also require write mode enabled."
                 ],
             }),
@@ -2121,7 +2386,7 @@ async fn probe_yield_groups(
             "mutation_performed": false,
         }));
     }
-    let payload_xml = pql_payload(&format!("LIMIT {}", page_size.min(1_000)));
+    let payload_xml = pql_statement_payload(&format!("LIMIT {}", page_size.min(1_000)));
     let plan = server.client().build_soap_trafficking_plan(
         network_code,
         api_version,
@@ -2180,9 +2445,9 @@ fn summarize_yield_groups(
             continue;
         }
         matches.push(json!({
-            "yield_group_id": extract_xml_tag_text(result, "id"),
-            "yield_group_name": extract_xml_tag_text(result, "name"),
-            "status": extract_xml_tag_text(result, "status"),
+            "yield_group_id": yield_group_id_from_xml(result),
+            "yield_group_name": yield_group_name(result),
+            "status": extract_xml_tag_text(result, "exchangeStatus").or_else(|| extract_xml_tag_text(result, "status")),
             "format": extract_xml_tag_text(result, "format"),
             "environment_type": extract_xml_tag_text(result, "environmentType"),
             "matched_ad_unit_ids": matched_ids,
@@ -2544,9 +2809,9 @@ fn build_soap_payload_template(
         }
         SoapPayloadTemplate::YieldGroupsByStatement => {
             let query = required_safe_pql_query(values, "query")?;
-            pql_payload(&query)
+            pql_statement_payload(&query)
         }
-        SoapPayloadTemplate::YieldGroupsAll => pql_payload("LIMIT 500"),
+        SoapPayloadTemplate::YieldGroupsAll => pql_statement_payload("LIMIT 500"),
         SoapPayloadTemplate::YieldPartners => String::new(),
     };
 
@@ -2644,9 +2909,662 @@ fn validate_soap_apply_context(request: &SoapTraffickingRequestArgs) -> Result<(
     Ok(())
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct AdUnitTargetingValue {
+    ad_unit_id: String,
+    include_descendants: Option<bool>,
+}
+
+#[derive(Debug, Clone)]
+struct YieldGroupExclusionDraft {
+    network_code: String,
+    api_version: String,
+    yield_group_id: String,
+    yield_group_name: Option<String>,
+    exchange_status: Option<String>,
+    format: Option<String>,
+    environment_type: Option<String>,
+    total_result_set_size: Option<u64>,
+    read_request_id: Option<String>,
+    read_response_time: Option<String>,
+    read_payload_xml: String,
+    current_yield_group_xml: String,
+    update_payload_xml: String,
+    current_yield_group_fingerprint: String,
+    update_payload_fingerprint: String,
+    targeted_ad_units: Vec<AdUnitTargetingValue>,
+    current_excluded_ad_units: Vec<AdUnitTargetingValue>,
+    requested_excluded_ad_unit_ids: Vec<String>,
+    already_excluded_ad_unit_ids: Vec<String>,
+    added_excluded_ad_unit_ids: Vec<String>,
+    noop: bool,
+}
+
+impl YieldGroupExclusionDraft {
+    fn all_requested_ids_currently_excluded(&self) -> bool {
+        let current = self
+            .current_excluded_ad_units
+            .iter()
+            .map(|value| value.ad_unit_id.as_str())
+            .collect::<BTreeSet<_>>();
+        self.requested_excluded_ad_unit_ids
+            .iter()
+            .all(|id| current.contains(id.as_str()))
+    }
+}
+
+fn validate_yield_group_exclusion_context(
+    request: &YieldGroupExclusionRequestArgs,
+) -> Result<(), AdManagerError> {
+    if request.reason.trim().is_empty() {
+        return Err(AdManagerError::invalid(
+            "reason",
+            "must explain why the yield-group exclusion change is being planned",
+        ));
+    }
+    let _ = parse_positive_id_string("yield_group_id", &request.yield_group_id)?;
+    let _ = validated_excluded_ad_unit_ids(&request.excluded_ad_unit_ids)?;
+    Ok(())
+}
+
+fn validate_yield_group_exclusion_apply_context(
+    request: &YieldGroupExclusionRequestArgs,
+) -> Result<(), AdManagerError> {
+    if request
+        .expected_impact
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or_default()
+        .is_empty()
+    {
+        return Err(AdManagerError::invalid(
+            "expected_impact",
+            "is required before applying yield-group exclusion updates",
+        ));
+    }
+    if request
+        .rollback_note
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or_default()
+        .is_empty()
+    {
+        return Err(AdManagerError::invalid(
+            "rollback_note",
+            "is required before applying yield-group exclusion updates",
+        ));
+    }
+    Ok(())
+}
+
+async fn build_yield_group_exclusion_draft(
+    server: &AdManagerServer,
+    request: &YieldGroupExclusionRequestArgs,
+) -> Result<YieldGroupExclusionDraft, AdManagerError> {
+    let yield_group_id = parse_positive_id_string("yield_group_id", &request.yield_group_id)?;
+    let requested_excluded_ad_unit_ids =
+        validated_excluded_ad_unit_ids(&request.excluded_ad_unit_ids)?;
+    let read_payload_xml = pql_statement_payload(&format!("WHERE id = {yield_group_id}"));
+    let read_plan = server.client().build_soap_trafficking_plan(
+        &request.network_code,
+        request.api_version.as_deref(),
+        SoapTraffickingOperation::GetYieldGroupsByStatement,
+        &read_payload_xml,
+    )?;
+    let read_result = server
+        .client()
+        .execute_soap_trafficking_plan(&read_plan)
+        .await?;
+    if read_result.upstream_status >= 400 || read_result.soap_fault.is_some() {
+        return Err(AdManagerError::UpstreamApi {
+            status: read_result.upstream_status,
+            message: crate::client::soap_error_message(&read_result),
+        });
+    }
+
+    let current_yield_group_xml =
+        exact_yield_group_from_readback(&read_result.upstream_response_xml, &yield_group_id)?;
+    let total_result_set_size =
+        extract_xml_tag_text(&read_result.upstream_response_xml, "totalResultSetSize")
+            .and_then(|value| value.parse::<u64>().ok());
+    let update = build_yield_group_exclusion_update(
+        &current_yield_group_xml,
+        &yield_group_id,
+        &requested_excluded_ad_unit_ids,
+    )?;
+    let update_payload_fingerprint = stable_fingerprint(&update.payload_xml);
+    let current_yield_group_fingerprint = stable_fingerprint(&current_yield_group_xml);
+
+    Ok(YieldGroupExclusionDraft {
+        network_code: read_plan.network_code,
+        api_version: read_plan.api_version,
+        yield_group_id: yield_group_id.clone(),
+        yield_group_name: yield_group_name(&current_yield_group_xml),
+        exchange_status: extract_xml_tag_text(&current_yield_group_xml, "exchangeStatus")
+            .or_else(|| extract_xml_tag_text(&current_yield_group_xml, "status")),
+        format: extract_xml_tag_text(&current_yield_group_xml, "format"),
+        environment_type: extract_xml_tag_text(&current_yield_group_xml, "environmentType"),
+        total_result_set_size,
+        read_request_id: read_result.request_id,
+        read_response_time: read_result.response_time,
+        read_payload_xml,
+        current_yield_group_xml,
+        update_payload_xml: update.payload_xml,
+        current_yield_group_fingerprint,
+        update_payload_fingerprint,
+        targeted_ad_units: update.targeted_ad_units,
+        current_excluded_ad_units: update.current_excluded_ad_units,
+        requested_excluded_ad_unit_ids,
+        already_excluded_ad_unit_ids: update.already_excluded_ad_unit_ids,
+        added_excluded_ad_unit_ids: update.added_excluded_ad_unit_ids.clone(),
+        noop: update.added_excluded_ad_unit_ids.is_empty(),
+    })
+}
+
+#[derive(Debug, Clone)]
+struct YieldGroupExclusionUpdate {
+    payload_xml: String,
+    targeted_ad_units: Vec<AdUnitTargetingValue>,
+    current_excluded_ad_units: Vec<AdUnitTargetingValue>,
+    already_excluded_ad_unit_ids: Vec<String>,
+    added_excluded_ad_unit_ids: Vec<String>,
+}
+
+fn build_yield_group_exclusion_update(
+    current_yield_group_xml: &str,
+    yield_group_id: &str,
+    requested_excluded_ad_unit_ids: &[String],
+) -> Result<YieldGroupExclusionUpdate, AdManagerError> {
+    let observed_yield_group_id =
+        yield_group_id_from_xml(current_yield_group_xml).ok_or_else(|| {
+            AdManagerError::invalid(
+                "yield_group_readback",
+                "readback did not include a yield group id",
+            )
+        })?;
+    if observed_yield_group_id != yield_group_id {
+        return Err(AdManagerError::invalid(
+            "yield_group_readback",
+            "readback yield group id did not match the requested target",
+        ));
+    }
+
+    let targeting_block = extract_xml_first_block(current_yield_group_xml, "targeting")
+        .ok_or_else(|| {
+            AdManagerError::invalid(
+                "yield_group_readback",
+                "yield group readback did not include targeting; refusing to synthesize targeting from scratch",
+            )
+        })?;
+    let inventory_block = extract_xml_first_block(&targeting_block, "inventoryTargeting")
+        .unwrap_or_else(|| "<inventoryTargeting />".to_string());
+    let targeted_ad_units = ad_unit_targeting_values(&inventory_block, "targetedAdUnits");
+    let current_excluded_ad_units = ad_unit_targeting_values(&inventory_block, "excludedAdUnits");
+    let targeted_ids = targeted_ad_units
+        .iter()
+        .map(|value| value.ad_unit_id.as_str())
+        .collect::<BTreeSet<_>>();
+    if let Some(conflicting_id) = requested_excluded_ad_unit_ids
+        .iter()
+        .find(|id| targeted_ids.contains(id.as_str()))
+    {
+        return Err(AdManagerError::invalid(
+            "excluded_ad_unit_ids",
+            format!(
+                "ad unit {conflicting_id} is directly targeted by this yield group; refusing to target and exclude the same exact ad unit"
+            ),
+        ));
+    }
+
+    let current_excluded_ids = current_excluded_ad_units
+        .iter()
+        .map(|value| value.ad_unit_id.as_str())
+        .collect::<BTreeSet<_>>();
+    let mut already_excluded_ad_unit_ids = Vec::new();
+    let mut added_excluded_ad_unit_ids = Vec::new();
+    for id in requested_excluded_ad_unit_ids {
+        if current_excluded_ids.contains(id.as_str()) {
+            already_excluded_ad_unit_ids.push(id.clone());
+        } else {
+            added_excluded_ad_unit_ids.push(id.clone());
+        }
+    }
+
+    let updated_inventory_xml = yield_group_inventory_targeting_with_exclusions(
+        &inventory_block,
+        &added_excluded_ad_unit_ids,
+    );
+    let updated_yield_group_xml =
+        if extract_xml_first_block(&targeting_block, "inventoryTargeting").is_some() {
+            replace_first_xml_block(
+                current_yield_group_xml,
+                "inventoryTargeting",
+                &updated_inventory_xml,
+            )
+            .ok_or_else(|| {
+                AdManagerError::invalid(
+                    "yield_group_readback",
+                    "could not replace inventoryTargeting in yield group readback",
+                )
+            })?
+        } else {
+            insert_inventory_targeting(current_yield_group_xml, &updated_inventory_xml).ok_or_else(
+                || {
+                    AdManagerError::invalid(
+                        "yield_group_readback",
+                        "could not insert inventoryTargeting in yield group targeting",
+                    )
+                },
+            )?
+        };
+    let payload_xml = format!(
+        "<yieldGroups>\n{}\n</yieldGroups>",
+        indent_xml_fragment(&updated_yield_group_xml, 2)
+    );
+
+    Ok(YieldGroupExclusionUpdate {
+        payload_xml,
+        targeted_ad_units,
+        current_excluded_ad_units,
+        already_excluded_ad_unit_ids,
+        added_excluded_ad_unit_ids,
+    })
+}
+
+fn exact_yield_group_from_readback(
+    xml: &str,
+    yield_group_id: &str,
+) -> Result<String, AdManagerError> {
+    let results = extract_xml_blocks(xml, "results");
+    let mut matching = results
+        .into_iter()
+        .filter(|result| yield_group_id_from_xml(result).as_deref() == Some(yield_group_id))
+        .collect::<Vec<_>>();
+    match matching.len() {
+        1 => {
+            let result = matching.remove(0);
+            Ok(strip_outer_xml_block(&result, "results").unwrap_or(result))
+        }
+        0 => Err(AdManagerError::UpstreamApi {
+            status: 404,
+            message: format!("yield group {yield_group_id} was not found by statement readback"),
+        }),
+        _ => Err(AdManagerError::UpstreamApi {
+            status: 500,
+            message: format!("yield group {yield_group_id} matched multiple readback rows"),
+        }),
+    }
+}
+
+fn yield_group_inventory_targeting_with_exclusions(
+    inventory_block: &str,
+    added_excluded_ad_unit_ids: &[String],
+) -> String {
+    let targeted_blocks = extract_xml_blocks(inventory_block, "targetedAdUnits");
+    let mut excluded_blocks = extract_xml_blocks(inventory_block, "excludedAdUnits");
+    excluded_blocks.extend(
+        added_excluded_ad_unit_ids
+            .iter()
+            .map(|id| exact_excluded_ad_unit_xml(id)),
+    );
+    let placement_ids = extract_xml_tag_texts(inventory_block, "targetedPlacementIds");
+
+    let mut children = Vec::new();
+    children.extend(targeted_blocks);
+    children.extend(excluded_blocks);
+    children.extend(placement_ids.into_iter().map(|id| {
+        format!(
+            "<targetedPlacementIds>{}</targetedPlacementIds>",
+            escape_xml_text(&id)
+        )
+    }));
+    if children.is_empty() {
+        "<inventoryTargeting />".to_string()
+    } else {
+        format!(
+            "<inventoryTargeting>\n{}\n</inventoryTargeting>",
+            indent_xml_fragment(&children.join("\n"), 2)
+        )
+    }
+}
+
+fn exact_excluded_ad_unit_xml(ad_unit_id: &str) -> String {
+    format!(
+        "<excludedAdUnits>\n  <adUnitId>{}</adUnitId>\n  <includeDescendants>false</includeDescendants>\n</excludedAdUnits>",
+        escape_xml_text(ad_unit_id)
+    )
+}
+
+fn insert_inventory_targeting(yield_group_xml: &str, inventory_xml: &str) -> Option<String> {
+    let (start, end) = find_first_xml_block_range(yield_group_xml, "targeting")?;
+    let targeting_block = &yield_group_xml[start..end];
+    let targeting_inner = strip_outer_xml_block(targeting_block, "targeting")?;
+    let updated_targeting = if targeting_inner.trim().is_empty() {
+        format!(
+            "<targeting>\n{}\n</targeting>",
+            indent_xml_fragment(inventory_xml, 2)
+        )
+    } else {
+        format!(
+            "<targeting>\n{}\n{}\n</targeting>",
+            indent_xml_fragment(inventory_xml, 2),
+            indent_xml_fragment(&targeting_inner, 2)
+        )
+    };
+    let mut updated = String::with_capacity(
+        yield_group_xml.len()
+            + updated_targeting
+                .len()
+                .saturating_sub(targeting_block.len()),
+    );
+    updated.push_str(&yield_group_xml[..start]);
+    updated.push_str(&updated_targeting);
+    updated.push_str(&yield_group_xml[end..]);
+    Some(updated)
+}
+
+fn ad_unit_targeting_values(value: &str, tag: &str) -> Vec<AdUnitTargetingValue> {
+    extract_xml_blocks(value, tag)
+        .into_iter()
+        .filter_map(|block| {
+            let ad_unit_id = extract_xml_tag_text(&block, "adUnitId")?;
+            Some(AdUnitTargetingValue {
+                ad_unit_id,
+                include_descendants: extract_xml_tag_text(&block, "includeDescendants").and_then(
+                    |value| match value.trim().to_ascii_lowercase().as_str() {
+                        "true" => Some(true),
+                        "false" => Some(false),
+                        _ => None,
+                    },
+                ),
+            })
+        })
+        .collect()
+}
+
+fn yield_group_id_from_xml(value: &str) -> Option<String> {
+    extract_xml_tag_text(value, "yieldGroupId").or_else(|| extract_xml_tag_text(value, "id"))
+}
+
+fn yield_group_name(value: &str) -> Option<String> {
+    extract_xml_tag_text(value, "yieldGroupName").or_else(|| extract_xml_tag_text(value, "name"))
+}
+
+fn strip_outer_xml_block(value: &str, tag: &str) -> Option<String> {
+    let (start, end) = find_first_xml_block_range(value, tag)?;
+    let open_end = value[start..end].find('>')?;
+    let content_start = start + open_end + 1;
+    let close_start = value[..end].rfind("</")?;
+    Some(value[content_start..close_start].trim().to_string())
+}
+
+fn replace_first_xml_block(value: &str, tag: &str, replacement: &str) -> Option<String> {
+    let (start, end) = find_first_xml_block_range(value, tag)?;
+    let mut updated =
+        String::with_capacity(value.len() + replacement.len().saturating_sub(end - start));
+    updated.push_str(&value[..start]);
+    updated.push_str(replacement);
+    updated.push_str(&value[end..]);
+    Some(updated)
+}
+
+fn find_first_xml_block_range(value: &str, tag: &str) -> Option<(usize, usize)> {
+    let mut best: Option<(usize, usize)> = None;
+    for prefix in ["", "gam:", "soapenv:", "soap:"] {
+        let full_tag = format!("{prefix}{tag}");
+        let open = format!("<{full_tag}");
+        let close = format!("</{prefix}{tag}>");
+        let mut search_start = 0;
+        while let Some(relative_start) = value[search_start..].find(&open) {
+            let start = search_start + relative_start;
+            let after_tag = &value[start + open.len()..];
+            let starts_with_tag_close = after_tag.starts_with('>') || after_tag.starts_with("/>");
+            let starts_with_space = after_tag.chars().next().is_some_and(char::is_whitespace);
+            if !(starts_with_tag_close || starts_with_space) {
+                search_start = start + open.len();
+                continue;
+            }
+            let open_end = after_tag.find('>')?;
+            if after_tag[..=open_end].trim_end().ends_with("/>") {
+                let end = start + open.len() + open_end + 1;
+                best = choose_earlier_range(best, (start, end));
+                break;
+            }
+            let content_start = start + open.len() + open_end + 1;
+            let Some(relative_end) = value[content_start..].find(&close) else {
+                break;
+            };
+            let end = content_start + relative_end + close.len();
+            best = choose_earlier_range(best, (start, end));
+            break;
+        }
+    }
+    best
+}
+
+fn choose_earlier_range(
+    current: Option<(usize, usize)>,
+    candidate: (usize, usize),
+) -> Option<(usize, usize)> {
+    match current {
+        Some(existing) if existing.0 <= candidate.0 => Some(existing),
+        _ => Some(candidate),
+    }
+}
+
+fn indent_xml_fragment(value: &str, spaces: usize) -> String {
+    let prefix = " ".repeat(spaces);
+    value
+        .lines()
+        .map(|line| {
+            if line.trim().is_empty() {
+                String::new()
+            } else {
+                format!("{prefix}{}", line.trim_end())
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn parse_positive_id_string(field: &'static str, value: &str) -> Result<String, AdManagerError> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || !trimmed.chars().all(|ch| ch.is_ascii_digit()) {
+        return Err(AdManagerError::invalid(
+            field,
+            "must be a positive numeric ID",
+        ));
+    }
+    match trimmed.parse::<u64>() {
+        Ok(id) if id > 0 => Ok(id.to_string()),
+        _ => Err(AdManagerError::invalid(
+            field,
+            "must be a positive numeric ID",
+        )),
+    }
+}
+
+fn validated_excluded_ad_unit_ids(values: &[String]) -> Result<Vec<String>, AdManagerError> {
+    if values.is_empty() {
+        return Err(AdManagerError::invalid(
+            "excluded_ad_unit_ids",
+            "must contain at least one exact ad-unit ID",
+        ));
+    }
+    if values.len() > 100 {
+        return Err(AdManagerError::invalid(
+            "excluded_ad_unit_ids",
+            "must contain at most 100 exact ad-unit IDs per guarded update",
+        ));
+    }
+    let mut ids = BTreeSet::new();
+    for value in values {
+        let id = parse_positive_id_string("excluded_ad_unit_ids", value)?;
+        if !ids.insert(id.clone()) {
+            return Err(AdManagerError::invalid(
+                "excluded_ad_unit_ids",
+                format!("must not contain duplicate ID {id}"),
+            ));
+        }
+    }
+    Ok(ids.into_iter().collect())
+}
+
+fn guarded_yield_group_exclusion_identifiers(
+    request: &YieldGroupExclusionRequestArgs,
+    draft: &YieldGroupExclusionDraft,
+) -> Result<(String, String, String), AdManagerError> {
+    let target = format!(
+        "YieldGroupService.updateYieldGroups:{}:{}",
+        draft.api_version, draft.yield_group_id
+    );
+    let seed =
+        GuardedActionPlanSeed::new("gam_yield_group_exclusions", &request.network_code, &target)
+            .map_err(|err| AdManagerError::invalid("plan_seed", err.to_string()))?;
+    let fingerprint_input = json!({
+        "network_code": request.network_code,
+        "api_version": draft.api_version,
+        "yield_group_id": draft.yield_group_id,
+        "requested_excluded_ad_unit_ids": draft.requested_excluded_ad_unit_ids,
+        "current_yield_group_fingerprint": draft.current_yield_group_fingerprint,
+        "update_payload_fingerprint": draft.update_payload_fingerprint,
+    });
+    let fingerprint = stable_fingerprint(&fingerprint_input.to_string());
+    let plan_id = format!("{}.{}", seed.stable_plan_id(), fingerprint);
+    let confirmation_token = format!("confirm-gam-yield-group-exclusions-{fingerprint}");
+    Ok((plan_id, confirmation_token, fingerprint))
+}
+
+fn yield_group_exclusion_request_summary(
+    request: &YieldGroupExclusionRequestArgs,
+    draft: &YieldGroupExclusionDraft,
+) -> Value {
+    json!({
+        "network_code": request.network_code,
+        "api_version": draft.api_version,
+        "yield_group_id": draft.yield_group_id,
+        "requested_excluded_ad_unit_ids": draft.requested_excluded_ad_unit_ids,
+        "reason": request.reason,
+        "idempotency_key": request.idempotency_key,
+    })
+}
+
+fn yield_group_exclusion_draft_summary(
+    draft: &YieldGroupExclusionDraft,
+    include_payload_xml: bool,
+) -> Value {
+    let mut value = json!({
+        "network_code": draft.network_code,
+        "api_version": draft.api_version,
+        "yield_group_id": draft.yield_group_id,
+        "yield_group_name": draft.yield_group_name,
+        "exchange_status": draft.exchange_status,
+        "format": draft.format,
+        "environment_type": draft.environment_type,
+        "total_result_set_size": draft.total_result_set_size,
+        "read_request_id": draft.read_request_id,
+        "read_response_time": draft.read_response_time,
+        "targeted_ad_units": draft.targeted_ad_units,
+        "current_excluded_ad_units": draft.current_excluded_ad_units,
+        "requested_excluded_ad_unit_ids": draft.requested_excluded_ad_unit_ids,
+        "already_excluded_ad_unit_ids": draft.already_excluded_ad_unit_ids,
+        "added_excluded_ad_unit_ids": draft.added_excluded_ad_unit_ids,
+        "apply_required": !draft.noop,
+        "readback_proves_requested_exclusions": draft.all_requested_ids_currently_excluded(),
+        "current_yield_group_xml_bytes": draft.current_yield_group_xml.len(),
+        "current_yield_group_fingerprint": draft.current_yield_group_fingerprint,
+        "update_payload_xml_bytes": draft.update_payload_xml.len(),
+        "update_payload_fingerprint": draft.update_payload_fingerprint,
+    });
+    if include_payload_xml {
+        value["read_payload_xml"] = json!(draft.read_payload_xml);
+        value["update_payload_xml"] = json!(draft.update_payload_xml);
+    }
+    value
+}
+
+fn yield_group_update_request_to_json(
+    request: &YieldGroupUpdateSoapRequest,
+    include_payload_xml: bool,
+) -> Value {
+    let mut value = json!({
+        "network_code": request.network_code,
+        "api_version": request.api_version,
+        "service": request.service,
+        "method": request.method,
+        "endpoint": request.endpoint,
+        "namespace": request.namespace,
+        "target": request.target,
+        "payload_xml_bytes": request.payload_xml.len(),
+        "payload_fingerprint": stable_fingerprint(&request.payload_xml),
+    });
+    if include_payload_xml {
+        value["payload_xml"] = json!(request.payload_xml);
+        value["envelope_xml"] = json!(request.envelope_xml);
+    }
+    value
+}
+
+fn yield_group_exclusion_warnings(
+    write_mode: GuardedActionRuntimeMode,
+    scope: &str,
+    request: &YieldGroupExclusionRequestArgs,
+    draft: &YieldGroupExclusionDraft,
+) -> Vec<String> {
+    let mut warnings = Vec::new();
+    if write_mode != GuardedActionRuntimeMode::Enabled {
+        warnings.push(format!(
+            "Apply is disabled while GOOGLE_AD_MANAGER_MCP_WRITE_MODE is {}.",
+            write_mode.as_str()
+        ));
+    }
+    if !scope_allows_write(scope) {
+        warnings.push(format!(
+            "Apply requires the Google Ad Manager manage scope: {MANAGE_SCOPE}."
+        ));
+    }
+    if request
+        .expected_impact
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or_default()
+        .is_empty()
+    {
+        warnings.push("Apply requires expected_impact to be set.".to_string());
+    }
+    if request
+        .rollback_note
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or_default()
+        .is_empty()
+    {
+        warnings.push("Apply requires rollback_note to be set.".to_string());
+    }
+    if draft.noop {
+        warnings.push(
+            "No mutation is needed: every requested exact ad-unit ID is already excluded."
+                .to_string(),
+        );
+    } else {
+        warnings.push(
+            "This update changes only the yield-group inventory exclusions; it does not change line-item targeting or sponsorship line items."
+                .to_string(),
+        );
+    }
+    warnings
+}
+
 fn pql_payload(query: &str) -> String {
     format!(
         "<filterStatement>\n  <query>{}</query>\n</filterStatement>",
+        escape_xml_text(query)
+    )
+}
+
+fn pql_statement_payload(query: &str) -> String {
+    format!(
+        "<statement>\n  <query>{}</query>\n</statement>",
         escape_xml_text(query)
     )
 }
@@ -3205,7 +4123,11 @@ fn soap_trafficking_supported_operation_matrix() -> Value {
                 "get_yield_groups_by_statement",
                 "get_yield_partners"
             ],
-            "mutating_operations": []
+            "mutating_operations": [],
+            "typed_helpers": [
+                "gam_yield_group_exclusions_preview",
+                "gam_yield_group_exclusions_apply"
+            ]
         }
     ])
 }
@@ -3226,9 +4148,9 @@ fn trafficking_gap_matrix() -> Value {
         },
         {
             "surface": "post_apply_readback_automation",
-            "status": "manual follow-up operation",
-            "impact": "mutating SOAP apply returns upstream response; operators should run get-by-statement or forecast checks for delivery proof",
-            "follow_up": "support optional readback_request payloads on SOAP apply"
+            "status": "partial typed helpers",
+            "impact": "generic mutating SOAP apply returns upstream response and still needs follow-up proof; yield-group exact exclusion apply has built-in post-apply readback",
+            "follow_up": "support optional readback_request payloads on generic SOAP apply"
         },
         {
             "surface": "account_level_protection_surfaces",
@@ -3947,7 +4869,7 @@ mod tests {
         assert_eq!(built["operation"], "get_yield_groups_by_statement");
         assert_eq!(
             built["payload_xml"],
-            "<filterStatement>\n  <query>LIMIT 25</query>\n</filterStatement>"
+            "<statement>\n  <query>LIMIT 25</query>\n</statement>"
         );
         assert_eq!(built["mutation_performed"], false);
     }
@@ -3972,11 +4894,11 @@ mod tests {
           <rval>
             <totalResultSetSize>1</totalResultSetSize>
             <results>
-              <id>10</id>
-              <name>Open bidding group</name>
-              <status>ACTIVE</status>
+              <yieldGroupId>10</yieldGroupId>
+              <yieldGroupName>Open bidding group</yieldGroupName>
+              <exchangeStatus>ACTIVE</exchangeStatus>
               <format>DISPLAY</format>
-              <environmentType>BROWSER</environmentType>
+              <environmentType>WEB</environmentType>
               <targeting>
                 <inventoryTargeting>
                   <targetedAdUnits>
@@ -4001,6 +4923,186 @@ mod tests {
         assert_eq!(summary["decision"], "target_matches_found");
         assert_eq!(summary["proof_state"], "complete");
         assert_eq!(summary["target_ad_unit_matches"][0]["yield_group_id"], "10");
+    }
+
+    #[test]
+    fn yield_group_exclusion_update_adds_exact_exclusions_and_preserves_targeting() {
+        let update = build_yield_group_exclusion_update(
+            sample_yield_group_xml(),
+            "10",
+            &["200".to_string(), "201".to_string(), "202".to_string()],
+        )
+        .expect("update");
+
+        assert_eq!(update.already_excluded_ad_unit_ids, vec!["200"]);
+        assert_eq!(update.added_excluded_ad_unit_ids, vec!["201", "202"]);
+        assert!(update.payload_xml.contains("<yieldGroups>"));
+        assert!(
+            update
+                .payload_xml
+                .contains("<yieldGroupId>10</yieldGroupId>")
+        );
+        assert!(update.payload_xml.contains(
+            "<targetedAdUnits><adUnitId>100</adUnitId><includeDescendants>true</includeDescendants></targetedAdUnits>"
+        ));
+        assert_eq!(
+            update
+                .payload_xml
+                .matches("<adUnitId>200</adUnitId>")
+                .count(),
+            1
+        );
+        assert!(update.payload_xml.contains("<adUnitId>201</adUnitId>"));
+        assert!(update.payload_xml.contains("<adUnitId>202</adUnitId>"));
+        assert_eq!(
+            update
+                .payload_xml
+                .matches("<includeDescendants>false</includeDescendants>")
+                .count(),
+            3
+        );
+        assert!(
+            update
+                .payload_xml
+                .contains("<targetedPlacementIds>300</targetedPlacementIds>")
+        );
+    }
+
+    #[test]
+    fn yield_group_exclusion_update_is_noop_when_already_excluded() {
+        let update = build_yield_group_exclusion_update(
+            sample_yield_group_xml(),
+            "10",
+            &["200".to_string()],
+        )
+        .expect("update");
+
+        assert_eq!(update.already_excluded_ad_unit_ids, vec!["200"]);
+        assert!(update.added_excluded_ad_unit_ids.is_empty());
+        assert_eq!(
+            update
+                .payload_xml
+                .matches("<adUnitId>200</adUnitId>")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn yield_group_exclusion_update_rejects_direct_target_conflict() {
+        let err = build_yield_group_exclusion_update(
+            sample_yield_group_xml(),
+            "10",
+            &["100".to_string()],
+        )
+        .expect_err("target and exclude conflict should fail");
+
+        assert!(matches!(
+            err,
+            AdManagerError::InvalidInput {
+                field: "excluded_ad_unit_ids",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn yield_group_exclusion_update_blocks_missing_targeting() {
+        let err = build_yield_group_exclusion_update(
+            "<yieldGroupId>10</yieldGroupId><yieldGroupName>Group</yieldGroupName>",
+            "10",
+            &["201".to_string()],
+        )
+        .expect_err("missing targeting should fail closed");
+
+        assert!(matches!(
+            err,
+            AdManagerError::InvalidInput {
+                field: "yield_group_readback",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn yield_group_readback_requires_exact_matching_result() {
+        let xml = r#"
+        <getYieldGroupsByStatementResponse>
+          <rval>
+            <totalResultSetSize>1</totalResultSetSize>
+            <results><yieldGroupId>11</yieldGroupId></results>
+          </rval>
+        </getYieldGroupsByStatementResponse>
+        "#;
+        let err = exact_yield_group_from_readback(xml, "10")
+            .expect_err("missing exact yield group should fail closed");
+
+        assert!(matches!(
+            err,
+            AdManagerError::UpstreamApi { status: 404, .. }
+        ));
+    }
+
+    #[test]
+    fn yield_group_exclusion_identifiers_bind_current_readback() {
+        let request = YieldGroupExclusionRequestArgs {
+            network_code: "1234567".to_string(),
+            yield_group_id: "10".to_string(),
+            excluded_ad_unit_ids: vec!["201".to_string()],
+            api_version: None,
+            include_payload_xml: false,
+            reason: "prevent broad yield eligibility for exact ad unit".to_string(),
+            expected_impact: Some("only broad yield group eligibility changes".to_string()),
+            rollback_note: Some("remove the added excludedAdUnits entry".to_string()),
+            idempotency_key: None,
+        };
+        let draft_a = sample_yield_group_exclusion_draft("hash-a");
+        let draft_b = sample_yield_group_exclusion_draft("hash-b");
+
+        let (_, token_a, _) =
+            guarded_yield_group_exclusion_identifiers(&request, &draft_a).expect("token a");
+        let (_, token_b, _) =
+            guarded_yield_group_exclusion_identifiers(&request, &draft_b).expect("token b");
+
+        assert_ne!(token_a, token_b);
+    }
+
+    #[test]
+    fn yield_group_exclusion_apply_context_requires_operator_impact() {
+        let request = YieldGroupExclusionRequestArgs {
+            network_code: "1234567".to_string(),
+            yield_group_id: "10".to_string(),
+            excluded_ad_unit_ids: vec!["201".to_string()],
+            api_version: None,
+            include_payload_xml: false,
+            reason: "prevent broad yield eligibility for exact ad unit".to_string(),
+            expected_impact: None,
+            rollback_note: Some("remove the added excludedAdUnits entry".to_string()),
+            idempotency_key: None,
+        };
+
+        let err = validate_yield_group_exclusion_apply_context(&request)
+            .expect_err("missing expected impact should fail");
+        assert!(matches!(
+            err,
+            AdManagerError::InvalidInput {
+                field: "expected_impact",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn yield_group_exclusion_rejects_duplicate_requested_ids() {
+        let err = validated_excluded_ad_unit_ids(&["201".to_string(), "201".to_string()])
+            .expect_err("duplicate ids should fail");
+        assert!(matches!(
+            err,
+            AdManagerError::InvalidInput {
+                field: "excluded_ad_unit_ids",
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -4174,5 +5276,55 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    fn sample_yield_group_xml() -> &'static str {
+        r#"
+        <yieldGroupId>10</yieldGroupId>
+        <yieldGroupName>Open bidding group</yieldGroupName>
+        <exchangeStatus>ACTIVE</exchangeStatus>
+        <format>BANNER</format>
+        <environmentType>WEB</environmentType>
+        <targeting>
+          <inventoryTargeting>
+            <targetedAdUnits><adUnitId>100</adUnitId><includeDescendants>true</includeDescendants></targetedAdUnits>
+            <excludedAdUnits><adUnitId>200</adUnitId><includeDescendants>false</includeDescendants></excludedAdUnits>
+            <targetedPlacementIds>300</targetedPlacementIds>
+          </inventoryTargeting>
+        </targeting>
+        <adSources><companyId>400</companyId></adSources>
+        "#
+    }
+
+    fn sample_yield_group_exclusion_draft(current_fingerprint: &str) -> YieldGroupExclusionDraft {
+        YieldGroupExclusionDraft {
+            network_code: "1234567".to_string(),
+            api_version: "v202605".to_string(),
+            yield_group_id: "10".to_string(),
+            yield_group_name: Some("Open bidding group".to_string()),
+            exchange_status: Some("ACTIVE".to_string()),
+            format: Some("BANNER".to_string()),
+            environment_type: Some("WEB".to_string()),
+            total_result_set_size: Some(1),
+            read_request_id: Some("req".to_string()),
+            read_response_time: Some("12".to_string()),
+            read_payload_xml: pql_statement_payload("WHERE id = 10"),
+            current_yield_group_xml: sample_yield_group_xml().to_string(),
+            update_payload_xml: "<yieldGroups />".to_string(),
+            current_yield_group_fingerprint: current_fingerprint.to_string(),
+            update_payload_fingerprint: "update-hash".to_string(),
+            targeted_ad_units: vec![AdUnitTargetingValue {
+                ad_unit_id: "100".to_string(),
+                include_descendants: Some(true),
+            }],
+            current_excluded_ad_units: vec![AdUnitTargetingValue {
+                ad_unit_id: "200".to_string(),
+                include_descendants: Some(false),
+            }],
+            requested_excluded_ad_unit_ids: vec!["201".to_string()],
+            already_excluded_ad_unit_ids: vec![],
+            added_excluded_ad_unit_ids: vec!["201".to_string()],
+            noop: false,
+        }
     }
 }

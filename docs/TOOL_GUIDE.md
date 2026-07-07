@@ -22,6 +22,8 @@ All tools return Contract V1 envelopes: `ok/data/meta` on success and
 | `gam_soap_payload_build` | Build a safe inner SOAP `payload_xml` fragment for common trafficking templates without calling upstream. |
 | `gam_soap_trafficking_plan` | Create a dry-run plan and confirmation token for an allowlisted SOAP trafficking or forecast operation. |
 | `gam_soap_trafficking_apply` | Run an allowlisted SOAP trafficking or forecast operation after scope, runtime, and confirmation gates. |
+| `gam_yield_group_exclusions_preview` | Read one yield group and preview adding exact ad-unit IDs to `excludedAdUnits` without mutating GAM. |
+| `gam_yield_group_exclusions_apply` | Apply a previewed yield-group exact exclusion update after write-mode, confirmation, and readback gates. |
 | `gam_scratchpad_open_session` | Open or refresh a bounded local DuckDB scratchpad session. |
 | `gam_scratchpad_close_session` | Close a scratchpad session and remove its local database. |
 | `gam_scratchpad_list_sessions` | List active scratchpad sessions. |
@@ -114,6 +116,8 @@ Write and trafficking tools are available as guarded preview/apply pairs:
 4. `gam_soap_payload_build`
 5. `gam_soap_trafficking_plan`
 6. `gam_soap_trafficking_apply`
+7. `gam_yield_group_exclusions_preview`
+8. `gam_yield_group_exclusions_apply`
 
 The default runtime mode is `preview_only`. In that mode, `gam_rest_write_plan`
 can return the exact REST request shape and confirmation token, but
@@ -175,6 +179,12 @@ no optional forecast controls are being set.
 `YieldGroupService.getYieldPartners` has no request body. Other SOAP operations
 still require a non-empty inner XML fragment.
 
+`yield_groups_by_statement` and `yield_groups_all` emit a
+`<statement><query>...</query></statement>` fragment. `YieldGroupService`
+uses the `statement` wrapper for `getYieldGroupsByStatement`; the
+`filterStatement` wrapper remains correct for order, line-item, creative, and
+LICA by-statement operations.
+
 SOAP operations currently exposed:
 
 - `OrderService`: `create_orders`, `get_orders_by_statement`,
@@ -227,6 +237,46 @@ Manager's legacy SOAP API does not accept the newer read-only Ad Manager
 scope. Mutating SOAP operations additionally require
 `GOOGLE_AD_MANAGER_MCP_WRITE_MODE=enabled`, `expected_impact`, and
 `rollback_note`.
+
+## `gam_yield_group_exclusions_preview` And `gam_yield_group_exclusions_apply`
+
+These tools provide a typed, guarded path for adding exact ad-unit exclusions
+to an existing `YieldGroupService` yield group. They are intentionally separate
+from the generic SOAP tools because a safe update must preserve the current
+yield-group object and prove readback.
+
+`gam_yield_group_exclusions_preview` accepts:
+
+- `network_code`
+- `yield_group_id`
+- `excluded_ad_unit_ids`
+- optional SOAP `api_version`
+- optional `include_payload_xml`
+- `reason`
+- optional apply context fields
+
+The preview tool:
+
+- reads the current yield group with
+  `YieldGroupService.getYieldGroupsByStatement`;
+- preserves existing yield-group targeting, including targeted ad units,
+  existing excluded ad units, and targeted placement ids;
+- adds only missing exact `excludedAdUnits` entries with
+  `includeDescendants=false`;
+- refuses to exclude an ad unit that the same yield group directly targets;
+- binds the confirmation token to the current readback fingerprint and the
+  requested exact ad-unit IDs.
+
+`gam_yield_group_exclusions_apply` requires the same request, the exact
+preview confirmation token, the manage scope, write mode enabled,
+`expected_impact`, and `rollback_note`. Before applying it re-reads the yield
+group and rebuilds the payload. If the readback changed, the old confirmation
+token no longer matches. After `updateYieldGroups`, it re-reads the yield group
+and reports success only when every requested exact ad-unit ID is present in
+`excludedAdUnits`.
+
+If every requested ad-unit ID is already excluded, the apply path returns a
+no-op proof and does not call `updateYieldGroups`.
 
 Example SOAP line-item lookup plan:
 

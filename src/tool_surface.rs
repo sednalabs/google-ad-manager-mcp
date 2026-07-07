@@ -170,6 +170,37 @@ pub(crate) fn build_tool_inventory() -> Result<ToolInventory, ToolInventoryError
         .with_read_only(false)
         .with_risk_posture(GuardedActionPosture::guarded_apply()),
         cap(
+            "gam_yield_group_exclusions_preview",
+            "trafficking",
+            "Read one YieldGroupService yield group and preview exact ad-unit exclusions for open-bidding or mediation eligibility.",
+            [
+                "google",
+                "ad-manager",
+                "yield-groups",
+                "exclusions",
+                "open-bidding",
+                "preview",
+                "ad-units",
+            ],
+        )
+        .with_risk_posture(GuardedActionPosture::preview()),
+        cap(
+            "gam_yield_group_exclusions_apply",
+            "trafficking",
+            "Apply a previewed YieldGroupService exact ad-unit exclusion update after gates and readback proof.",
+            [
+                "google",
+                "ad-manager",
+                "yield-groups",
+                "exclusions",
+                "open-bidding",
+                "apply",
+                "confirmation",
+            ],
+        )
+        .with_read_only(false)
+        .with_risk_posture(GuardedActionPosture::guarded_apply()),
+        cap(
             "gam_scratchpad_open_session",
             "scratchpad",
             "Open or refresh a bounded local DuckDB scratchpad session for Ad Manager evidence work.",
@@ -351,6 +382,31 @@ mod tests {
             results
                 .iter()
                 .any(|result| result.name == "gam_soap_trafficking_plan")
+        );
+    }
+
+    #[test]
+    fn inventory_search_finds_yield_group_exclusion_tools() {
+        let inventory = build_tool_inventory().expect("inventory");
+        let results = inventory.search(
+            &ToolSearchFilter {
+                query: Some("yield group exclusions open bidding".to_string()),
+                group: Some("trafficking".to_string()),
+                read_only: None,
+                limit: Some(10),
+            },
+            ToolOperation::List,
+            &ToolInventoryPolicy::strict(),
+        );
+        assert!(
+            results
+                .iter()
+                .any(|result| result.name == "gam_yield_group_exclusions_preview")
+        );
+        assert!(
+            results
+                .iter()
+                .any(|result| result.name == "gam_yield_group_exclusions_apply")
         );
     }
 

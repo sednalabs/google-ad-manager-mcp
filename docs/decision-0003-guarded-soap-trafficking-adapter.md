@@ -67,8 +67,10 @@ confirmation token, `reason`, `expected_impact`, and `rollback_note`.
 
 - Callers must provide official SOAP payload XML for the selected operation.
 - SOAP responses are returned as bounded XML rather than fully typed JSON.
-- Post-apply readback is currently a follow-up operation chosen by the
-  operator or agent rather than an automatic companion request.
+- Generic SOAP post-apply readback is currently a follow-up operation chosen
+  by the operator or agent rather than an automatic companion request. Typed
+  high-risk helpers may add their own readback contract, as the yield-group
+  exact exclusion helper does.
 
 ## Follow-up
 

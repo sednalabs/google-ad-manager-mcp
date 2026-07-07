@@ -22,6 +22,8 @@ The current alpha focuses on a small useful surface:
   templates without calling upstream;
 - plan and run allowlisted SOAP trafficking operations for orders, line items,
   creatives, line-item creative associations, preview URLs, and forecasts;
+- preview and apply exact ad-unit exclusions to a readback-proven yield group
+  with confirmation-token and post-apply readback gates;
 - load catalog/report pages and parsed SOAP line-item delivery readbacks into a
   bounded local DuckDB scratchpad for read-only analysis and evidence bundles.
 
@@ -37,6 +39,7 @@ query surface, or default live write operations.
 - [Decision 0001: Beta REST read-only first](docs/decision-0001-beta-rest-read-only.md)
 - [Decision 0002: Guarded REST writes before SOAP trafficking](docs/decision-0002-guarded-rest-writes-before-soap-trafficking.md)
 - [Decision 0003: Guarded SOAP trafficking adapter](docs/decision-0003-guarded-soap-trafficking-adapter.md)
+- [Decision 0004: Exchange and protection proof surface](docs/decision-0004-exchange-protection-proof.md)
 - [Releasing](docs/RELEASING.md)
 
 ## Install
@@ -109,7 +112,11 @@ After auth is proven:
 10. `gam_soap_trafficking_plan` for order, line-item, creative, LICA, preview,
    and forecast SOAP plans
 11. `gam_soap_trafficking_apply` only after reviewing the matching SOAP plan
-12. `gam_scratchpad_open_session` and the `gam_scratchpad_ingest_*` tools when
+12. `gam_yield_group_exclusions_preview` when exact ad-unit exclusions should
+   be added to an existing yield group without changing line-item targeting
+13. `gam_yield_group_exclusions_apply` only with write mode enabled, the
+   manage scope, the exact confirmation token, and post-apply readback proof
+14. `gam_scratchpad_open_session` and the `gam_scratchpad_ingest_*` tools when
    you want local SQL analysis or a markdown evidence bundle
 
 ## Authentication
@@ -225,6 +232,8 @@ whole credential files in tool responses.
 - `gam_soap_payload_build`
 - `gam_soap_trafficking_plan`
 - `gam_soap_trafficking_apply`
+- `gam_yield_group_exclusions_preview`
+- `gam_yield_group_exclusions_apply`
 - `gam_scratchpad_open_session`
 - `gam_scratchpad_close_session`
 - `gam_scratchpad_list_sessions`
@@ -269,3 +278,9 @@ runtime, and confirmation checks. Mutating SOAP operations require
 `GOOGLE_AD_MANAGER_MCP_WRITE_MODE=enabled`; non-mutating forecast/read SOAP
 operations can run without write mode enabled but still need the manage scope
 required by the legacy SOAP API.
+
+`gam_yield_group_exclusions_preview` and
+`gam_yield_group_exclusions_apply` provide the typed path for exact
+YieldGroupService ad-unit exclusions. They preserve current yield-group
+targeting, add only missing `excludedAdUnits` entries, and require post-apply
+readback before reporting success.

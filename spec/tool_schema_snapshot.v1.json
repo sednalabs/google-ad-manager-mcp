@@ -1211,6 +1211,173 @@
         "type": "object"
       },
       "name": "gam_trafficking_tool_matrix"
+    },
+    {
+      "description": "Apply a previewed YieldGroupService exact ad-unit exclusion update after write-mode, manage-scope, confirmation-token, and readback gates.",
+      "inputSchema": {
+        "$defs": {
+          "YieldGroupExclusionRequestArgs": {
+            "properties": {
+              "api_version": {
+                "description": "SOAP API version, for example v202605. Defaults to the current server default.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "excluded_ad_unit_ids": {
+                "description": "Exact ad-unit IDs to add to YieldGroupService InventoryTargeting.excludedAdUnits.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "expected_impact": {
+                "description": "Expected advertiser, campaign, delivery, or operational impact. Required for apply.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "idempotency_key": {
+                "description": "Optional caller-supplied idempotency or ticket reference.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "include_payload_xml": {
+                "default": false,
+                "description": "Include generated SOAP payload fragments in the response. Defaults to false.",
+                "type": "boolean"
+              },
+              "network_code": {
+                "description": "Raw Ad Manager network code, for example 1234567.",
+                "type": "string"
+              },
+              "reason": {
+                "description": "Human-readable reason for the proposed yield-group exclusion change.",
+                "type": "string"
+              },
+              "rollback_note": {
+                "description": "Rollback or reversal note. Required by policy for live apply review.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "yield_group_id": {
+                "description": "Numeric YieldGroupService yield group identifier.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "network_code",
+              "yield_group_id",
+              "excluded_ad_unit_ids",
+              "reason"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "confirmation_token": {
+            "description": "Confirmation token returned by gam_yield_group_exclusions_preview for this exact request and readback fingerprint.",
+            "type": "string"
+          },
+          "request": {
+            "$ref": "#/$defs/YieldGroupExclusionRequestArgs"
+          }
+        },
+        "required": [
+          "request",
+          "confirmation_token"
+        ],
+        "type": "object"
+      },
+      "name": "gam_yield_group_exclusions_apply"
+    },
+    {
+      "description": "Read one YieldGroupService yield group and preview adding exact ad-unit IDs to InventoryTargeting.excludedAdUnits without mutating Google Ad Manager.",
+      "inputSchema": {
+        "$defs": {
+          "YieldGroupExclusionRequestArgs": {
+            "properties": {
+              "api_version": {
+                "description": "SOAP API version, for example v202605. Defaults to the current server default.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "excluded_ad_unit_ids": {
+                "description": "Exact ad-unit IDs to add to YieldGroupService InventoryTargeting.excludedAdUnits.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "expected_impact": {
+                "description": "Expected advertiser, campaign, delivery, or operational impact. Required for apply.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "idempotency_key": {
+                "description": "Optional caller-supplied idempotency or ticket reference.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "include_payload_xml": {
+                "default": false,
+                "description": "Include generated SOAP payload fragments in the response. Defaults to false.",
+                "type": "boolean"
+              },
+              "network_code": {
+                "description": "Raw Ad Manager network code, for example 1234567.",
+                "type": "string"
+              },
+              "reason": {
+                "description": "Human-readable reason for the proposed yield-group exclusion change.",
+                "type": "string"
+              },
+              "rollback_note": {
+                "description": "Rollback or reversal note. Required by policy for live apply review.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "yield_group_id": {
+                "description": "Numeric YieldGroupService yield group identifier.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "network_code",
+              "yield_group_id",
+              "excluded_ad_unit_ids",
+              "reason"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "request": {
+            "$ref": "#/$defs/YieldGroupExclusionRequestArgs"
+          }
+        },
+        "required": [
+          "request"
+        ],
+        "type": "object"
+      },
+      "name": "gam_yield_group_exclusions_preview"
     }
   ],
   "version": 1

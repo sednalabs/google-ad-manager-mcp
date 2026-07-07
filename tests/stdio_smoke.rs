@@ -21,6 +21,8 @@ fn stdio_initializes_and_lists_tools() {
         "gam_soap_payload_build",
         "gam_soap_trafficking_plan",
         "gam_soap_trafficking_apply",
+        "gam_yield_group_exclusions_preview",
+        "gam_yield_group_exclusions_apply",
         "gam_scratchpad_open_session",
         "gam_scratchpad_close_session",
         "gam_scratchpad_list_sessions",
