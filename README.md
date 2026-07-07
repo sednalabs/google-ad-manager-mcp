@@ -22,8 +22,10 @@ The current alpha focuses on a small useful surface:
   templates without calling upstream;
 - plan and run allowlisted SOAP trafficking operations for orders, line items,
   creatives, line-item creative associations, preview URLs, and forecasts;
-- load catalog/report pages into a bounded local DuckDB scratchpad for
-  read-only analysis and evidence bundles.
+- preview and apply descendant-safe ad-unit exclusions to a readback-proven yield group
+  with confirmation-token and post-apply readback gates;
+- load catalog/report pages and parsed SOAP line-item delivery readbacks into a
+  bounded local DuckDB scratchpad for read-only analysis and evidence bundles.
 
 The server intentionally does not expose a generic HTTP/SOAP proxy, arbitrary
 query surface, or default live write operations.
@@ -37,6 +39,7 @@ query surface, or default live write operations.
 - [Decision 0001: Beta REST read-only first](docs/decision-0001-beta-rest-read-only.md)
 - [Decision 0002: Guarded REST writes before SOAP trafficking](docs/decision-0002-guarded-rest-writes-before-soap-trafficking.md)
 - [Decision 0003: Guarded SOAP trafficking adapter](docs/decision-0003-guarded-soap-trafficking-adapter.md)
+- [Decision 0004: Exchange and protection proof surface](docs/decision-0004-exchange-protection-proof.md)
 - [Releasing](docs/RELEASING.md)
 
 ## Install
@@ -98,16 +101,23 @@ After auth is proven:
 
 1. `gam_networks_list`
 2. `gam_network_catalog_list`
-3. `gam_report_run`
-4. `gam_report_result_rows` when a report result has more pages
-5. `gam_trafficking_tool_matrix` before planning writes
-6. `gam_rest_write_plan` for dry-run write previews
-7. `gam_rest_write_apply` only in explicit operator mode
-8. `gam_soap_payload_build` to generate common SOAP payload fragments
-9. `gam_soap_trafficking_plan` for order, line-item, creative, LICA, preview,
+3. `gam_exchange_protection_probe` when you need exchange/yield/protection
+   proof for exact ad units; yield-group exposure separates
+   `targeted_exposed` from `targeted_and_excluded`
+4. `gam_report_run`
+5. `gam_report_result_rows` when a report result has more pages
+6. `gam_trafficking_tool_matrix` before planning writes
+7. `gam_rest_write_plan` for dry-run write previews
+8. `gam_rest_write_apply` only in explicit operator mode
+9. `gam_soap_payload_build` to generate common SOAP payload fragments
+10. `gam_soap_trafficking_plan` for order, line-item, creative, LICA, preview,
    and forecast SOAP plans
-10. `gam_soap_trafficking_apply` only after reviewing the matching SOAP plan
-11. `gam_scratchpad_open_session` and the `gam_scratchpad_ingest_*` tools when
+11. `gam_soap_trafficking_apply` only after reviewing the matching SOAP plan
+12. `gam_yield_group_exclusions_preview` when descendant-safe ad-unit exclusions should
+   be added to an existing yield group without changing line-item targeting
+13. `gam_yield_group_exclusions_apply` only with write mode enabled, the
+   manage scope, the exact confirmation token, and post-apply readback proof
+14. `gam_scratchpad_open_session` and the `gam_scratchpad_ingest_*` tools when
    you want local SQL analysis or a markdown evidence bundle
 
 ## Authentication
@@ -214,6 +224,7 @@ whole credential files in tool responses.
 - `gam_auth_login_command`
 - `gam_networks_list`
 - `gam_network_catalog_list`
+- `gam_exchange_protection_probe`
 - `gam_report_run`
 - `gam_report_result_rows`
 - `gam_trafficking_tool_matrix`
@@ -222,6 +233,8 @@ whole credential files in tool responses.
 - `gam_soap_payload_build`
 - `gam_soap_trafficking_plan`
 - `gam_soap_trafficking_apply`
+- `gam_yield_group_exclusions_preview`
+- `gam_yield_group_exclusions_apply`
 - `gam_scratchpad_open_session`
 - `gam_scratchpad_close_session`
 - `gam_scratchpad_list_sessions`
@@ -230,6 +243,7 @@ whole credential files in tool responses.
 - `gam_scratchpad_query`
 - `gam_scratchpad_ingest_network_catalog`
 - `gam_scratchpad_ingest_report_result_rows`
+- `gam_scratchpad_ingest_soap_line_items`
 - `gam_scratchpad_export_evidence_bundle`
 
 All tool responses use Contract V1 envelopes:
@@ -256,6 +270,7 @@ used for classic trafficking workflows that remain SOAP-shaped:
 - `CreativeService`
 - `LineItemCreativeAssociationService`
 - `ForecastService`
+- `YieldGroupService`
 
 `gam_soap_trafficking_plan` wraps an allowlisted SOAP operation around an inner
 payload XML fragment and returns the exact envelope plus a confirmation token.
@@ -264,3 +279,10 @@ runtime, and confirmation checks. Mutating SOAP operations require
 `GOOGLE_AD_MANAGER_MCP_WRITE_MODE=enabled`; non-mutating forecast/read SOAP
 operations can run without write mode enabled but still need the manage scope
 required by the legacy SOAP API.
+
+`gam_yield_group_exclusions_preview` and
+`gam_yield_group_exclusions_apply` provide the typed path for descendant-safe
+YieldGroupService ad-unit exclusions. They preserve current yield-group
+targeting, add or repair only requested `excludedAdUnits` entries with
+`includeDescendants=true`, and require post-apply readback before reporting
+success.

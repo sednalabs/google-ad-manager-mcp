@@ -66,6 +66,7 @@ SOAP v202605 by default:
 - `CreativeService`
 - `LineItemCreativeAssociationService`
 - `ForecastService`
+- `YieldGroupService`
 
 The SOAP adapter is intentionally typed by operation but thin on object
 modeling. It accepts inner operation XML fragments, wraps them in a
@@ -97,26 +98,44 @@ The initial first-class tool set is:
 11. `gam_soap_payload_build`
 12. `gam_soap_trafficking_plan`
 13. `gam_soap_trafficking_apply`
-14. `gam_scratchpad_open_session`
-15. `gam_scratchpad_close_session`
-16. `gam_scratchpad_list_sessions`
-17. `gam_scratchpad_list_tables`
-18. `gam_scratchpad_drop_table`
-19. `gam_scratchpad_query`
-20. `gam_scratchpad_ingest_network_catalog`
-21. `gam_scratchpad_ingest_report_result_rows`
-22. `gam_scratchpad_export_evidence_bundle`
+14. `gam_yield_group_exclusions_preview`
+15. `gam_yield_group_exclusions_apply`
+16. `gam_scratchpad_open_session`
+17. `gam_scratchpad_close_session`
+18. `gam_scratchpad_list_sessions`
+19. `gam_scratchpad_list_tables`
+20. `gam_scratchpad_drop_table`
+21. `gam_scratchpad_query`
+22. `gam_scratchpad_ingest_network_catalog`
+23. `gam_scratchpad_ingest_report_result_rows`
+24. `gam_scratchpad_ingest_soap_line_items`
+25. `gam_scratchpad_export_evidence_bundle`
 
 `find_tools` is also exposed for deferred-loading and `tool_search` clients.
 
 The deliberately grouped tool is `gam_network_catalog_list`. It keeps the
-surface compact while still covering the four network collections that matter
-most for a first useful release:
+surface compact while still covering the curated network collections that
+matter most for a first useful release and the exchange-proof workflow:
 
 - ad units
 - orders
 - line items
+- private auctions
+- private auction deals
 - saved reports
+
+`gam_exchange_protection_probe` layers a product-neutral proof workflow over
+those catalog reads and SOAP YieldGroupService reads. It reports partial proof
+states for capped, blocked, or unsupported protection surfaces instead of
+turning missing API coverage into a clean result.
+
+`gam_yield_group_exclusions_preview` and
+`gam_yield_group_exclusions_apply` are the typed mutation path for descendant-safe
+YieldGroupService ad-unit exclusions. They read the current yield group,
+preserve the existing yield-group targeting object, add or repair only requested
+`excludedAdUnits` entries with `includeDescendants=true`, and require post-apply
+readback before reporting an applied state. They deliberately do not make
+`updateYieldGroups` a generic SOAP operation.
 
 The deliberately grouped write tools are `gam_rest_write_plan` and
 `gam_rest_write_apply`. They cover the current REST beta write surface through
@@ -170,9 +189,10 @@ exposing tokens.
 ## Scratchpad Boundary
 
 Scratchpad support is provided by `mcp-toolkit-scratchpad`, not by local
-server-specific DuckDB lifecycle code. The Ad Manager MCP only maps upstream
-catalog/report rows into stable scratchpad columns and keeps the full upstream
-row as `upstream_json` so beta API field drift does not destroy evidence.
+server-specific DuckDB lifecycle code. The Ad Manager MCP maps upstream
+catalog/report rows and parsed SOAP line-item delivery readbacks into stable
+scratchpad columns, while keeping the full upstream row or result XML for
+private local evidence so API field drift does not destroy evidence.
 
 The scratchpad tools are analysis and evidence helpers. They do not mutate
 Google Ad Manager and do not broaden the upstream API surface.

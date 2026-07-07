@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::time::Instant;
 
 use mcp_toolkit::rmcp::handler::server::wrapper::Parameters;
@@ -16,7 +17,8 @@ use tokio::process::Command;
 use crate::auth_ux::{gcloud_adc_login_command, shell_join_with_cloudsdk_config};
 use crate::client::{
     CatalogCollection, DEFAULT_SOAP_API_VERSION, RestWriteOperation, RestWritePlan,
-    RestWriteResource, SoapTraffickingOperation, SoapTraffickingPlan,
+    RestWriteResource, SoapTraffickingOperation, SoapTraffickingPlan, YieldGroupUpdateSoapRequest,
+    soap_error_message,
 };
 use crate::config::{
     GCLOUD_ADC_REQUIRED_SCOPE, server_adc_credentials_path, server_cloudsdk_config_dir,
@@ -31,6 +33,7 @@ use mcp_toolkit_core::tool_inventory::{ToolOperation, ToolSearchFilter, ToolSear
 
 const AD_MANAGER_PROVIDER_API_NAME: &str = "Google Ad Manager API";
 const AD_MANAGER_PROVIDER_API_SERVICE: &str = "admanager.googleapis.com";
+const YIELD_GROUP_EXCLUSION_INCLUDE_DESCENDANTS: bool = true;
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct GetStartedArgs {}
@@ -90,6 +93,21 @@ pub struct NetworkCatalogListArgs {
     pub filter: Option<String>,
     /// Optional Ad Manager Beta orderBy expression.
     pub order_by: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ExchangeProtectionProbeArgs {
+    /// Raw Ad Manager network code, for example 1234567.
+    pub network_code: String,
+    /// Exact ad-unit codes to prove, for example Home_Page_LS or Search_Page_RS.
+    pub ad_unit_codes: Vec<String>,
+    /// Maximum rows to inspect from private auction, private deal, and yield group reads. Defaults to 100.
+    pub page_size: Option<u32>,
+    /// SOAP API version for YieldGroupService reads. Defaults to the current server default.
+    pub api_version: Option<String>,
+    /// Include bounded raw SOAP response XML in the yield-group summary. Defaults to false.
+    #[serde(default)]
+    pub include_raw: bool,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -162,7 +180,7 @@ pub struct SoapTraffickingRequestArgs {
     pub api_version: Option<String>,
     /// Allowlisted Google Ad Manager SOAP trafficking or forecast operation.
     pub operation: SoapTraffickingOperation,
-    /// Inner XML payload for the selected operation, excluding SOAP Envelope, Header, and operation wrapper.
+    /// Inner XML payload for the selected operation, excluding SOAP Envelope, Header, and operation wrapper. Empty string is accepted only for no-body reads such as get_yield_partners.
     pub payload_xml: String,
     /// Human-readable reason for the proposed live SOAP call.
     pub reason: String,
@@ -186,6 +204,41 @@ pub struct SoapTraffickingApplyArgs {
     pub confirmation_token: String,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct YieldGroupExclusionRequestArgs {
+    /// Raw Ad Manager network code, for example 1234567.
+    pub network_code: String,
+    /// Numeric YieldGroupService yield group identifier.
+    pub yield_group_id: String,
+    /// Ad-unit IDs to ensure in YieldGroupService InventoryTargeting.excludedAdUnits. Requested entries are written descendant-safe with includeDescendants=true.
+    pub excluded_ad_unit_ids: Vec<String>,
+    /// SOAP API version, for example v202605. Defaults to the current server default.
+    pub api_version: Option<String>,
+    /// Include generated SOAP payload fragments in the response. Defaults to false.
+    #[serde(default)]
+    pub include_payload_xml: bool,
+    /// Human-readable reason for the proposed yield-group exclusion change.
+    pub reason: String,
+    /// Expected advertiser, campaign, delivery, or operational impact. Required for apply.
+    pub expected_impact: Option<String>,
+    /// Rollback or reversal note. Required by policy for live apply review.
+    pub rollback_note: Option<String>,
+    /// Optional caller-supplied idempotency or ticket reference.
+    pub idempotency_key: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct YieldGroupExclusionPreviewArgs {
+    pub request: YieldGroupExclusionRequestArgs,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct YieldGroupExclusionApplyArgs {
+    pub request: YieldGroupExclusionRequestArgs,
+    /// Confirmation token returned by gam_yield_group_exclusions_preview for this exact request and readback fingerprint.
+    pub confirmation_token: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum SoapPayloadTemplate {
@@ -201,6 +254,9 @@ pub enum SoapPayloadTemplate {
     ArchiveLineItem,
     DeliveryForecastByLineItemIds,
     AvailabilityForecastByLineItemId,
+    YieldGroupsByStatement,
+    YieldGroupsAll,
+    YieldPartners,
 }
 
 impl SoapPayloadTemplate {
@@ -218,6 +274,9 @@ impl SoapPayloadTemplate {
             Self::ArchiveLineItem => "archive_line_item",
             Self::DeliveryForecastByLineItemIds => "delivery_forecast_by_line_item_ids",
             Self::AvailabilityForecastByLineItemId => "availability_forecast_by_line_item_id",
+            Self::YieldGroupsByStatement => "yield_groups_by_statement",
+            Self::YieldGroupsAll => "yield_groups_all",
+            Self::YieldPartners => "yield_partners",
         }
     }
 
@@ -244,6 +303,10 @@ impl SoapPayloadTemplate {
             Self::AvailabilityForecastByLineItemId => {
                 SoapTraffickingOperation::GetAvailabilityForecastById
             }
+            Self::YieldGroupsByStatement | Self::YieldGroupsAll => {
+                SoapTraffickingOperation::GetYieldGroupsByStatement
+            }
+            Self::YieldPartners => SoapTraffickingOperation::GetYieldPartners,
         }
     }
 
@@ -259,6 +322,8 @@ impl SoapPayloadTemplate {
             Self::CreativesByAdvertiserName => &["advertiser_id", "name_contains"],
             Self::LicaPreviewUrl | Self::CreateLica => &["line_item_id", "creative_id"],
             Self::DeliveryForecastByLineItemIds => &["line_item_ids"],
+            Self::YieldGroupsByStatement => &["query"],
+            Self::YieldGroupsAll | Self::YieldPartners => &[],
         }
     }
 }
@@ -358,6 +423,24 @@ pub struct ScratchpadIngestReportRowsArgs {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct ScratchpadIngestSoapLineItemsArgs {
+    /// Scratchpad session identifier.
+    pub session_id: String,
+    /// Scratchpad table name to create or append to.
+    pub table_name: String,
+    /// Raw Ad Manager network code, for example 1234567.
+    pub network_code: String,
+    /// Bounded PQL statement for LineItemService.getLineItemsByStatement.
+    /// Must start with WHERE, ORDER BY, or LIMIT. Queries without LIMIT are capped automatically.
+    pub query: String,
+    /// SOAP API version, for example v202605. Defaults to the current server default.
+    pub api_version: Option<String>,
+    /// Append rows to an existing scratchpad table instead of replacing it.
+    #[serde(default)]
+    pub append: bool,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct ScratchpadEvidenceBundleArgs {
     /// Scratchpad session identifier.
     pub session_id: String,
@@ -432,11 +515,13 @@ impl AdManagerServer {
                     "Restart any stdio MCP client that keeps a long-lived child process.",
                     "Call gam_auth_status with verify_access=true.",
                     "Call gam_networks_list to discover the exact network code.",
-                    "Call gam_network_catalog_list for ad_units, orders, line_items, or reports.",
+                    "Call gam_network_catalog_list for ad_units, orders, line_items, private_auctions, private_auction_deals, or reports.",
+                    "Call gam_exchange_protection_probe when you need explicit partial-proof states for Exchange, private auction, private deal, or yield-group exposure.",
                     "Call gam_report_run for saved reports and gam_report_result_rows for large paginated results.",
                     "Call gam_trafficking_tool_matrix before planning writes so the REST and SOAP trafficking surfaces are explicit.",
                     "Use gam_rest_write_plan for dry-run write plans; gam_rest_write_apply only works when the server is explicitly started with GOOGLE_AD_MANAGER_MCP_WRITE_MODE=enabled and the manage scope.",
                     "Use gam_soap_trafficking_plan and gam_soap_trafficking_apply for order, line-item, creative, LICA, and forecast SOAP workflows.",
+                    "Use gam_yield_group_exclusions_preview and gam_yield_group_exclusions_apply when an existing yield group needs descendant-safe ad-unit exclusions with post-apply readback proof.",
                     "For local operator apply testing, rerun auth with google-ad-manager-mcp auth login --headless --quota-project <PROJECT_ID> --manage-scope.",
                     "Use gam_scratchpad_open_session plus the gam_scratchpad_ingest_* tools when you need local joins, filtering, evidence bundles, or larger result review."
                 ],
@@ -471,9 +556,11 @@ impl AdManagerServer {
                     "gam_auth_status",
                     "gam_networks_list",
                     "gam_network_catalog_list",
+                    "gam_exchange_protection_probe",
                     "gam_trafficking_tool_matrix",
                     "gam_rest_write_plan",
                     "gam_soap_trafficking_plan",
+                    "gam_yield_group_exclusions_preview",
                     "gam_scratchpad_open_session"
                 ],
                 "notes": [
@@ -673,7 +760,7 @@ impl AdManagerServer {
 
     #[tool(
         name = "gam_network_catalog_list",
-        description = "List a curated Google Ad Manager network collection such as ad units, orders, line items, or reports."
+        description = "List a curated Google Ad Manager network collection such as ad units, orders, line items, private auctions, private auction deals, or reports."
     )]
     async fn gam_network_catalog_list(
         &self,
@@ -702,6 +789,219 @@ impl AdManagerServer {
             )),
             Err(err) => Ok(contract::error(err, started)),
         }
+    }
+
+    #[tool(
+        name = "gam_exchange_protection_probe",
+        description = "Read-only proof for whether exact Ad Manager ad units appear exposed to AdSense, private auctions, private deals, or yield groups, while naming unsupported protection surfaces explicitly."
+    )]
+    async fn gam_exchange_protection_probe(
+        &self,
+        Parameters(args): Parameters<ExchangeProtectionProbeArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let started = Instant::now();
+        let page_size = args.page_size.unwrap_or(100).clamp(1, 1_000);
+        let ad_unit_codes = match validate_probe_ad_unit_codes(&args.ad_unit_codes) {
+            Ok(codes) => codes,
+            Err(err) => return Ok(contract::error(err, started)),
+        };
+
+        let mut attention_reasons = Vec::new();
+        let mut partial_reasons = vec![
+            "GAM protections, inventory rules, and unified pricing rules are not fully exposed through the current API surface; this probe cannot prove UI-only surfaces.".to_string(),
+        ];
+        let mut ad_unit_summaries = Vec::new();
+        let mut target_ad_units = Vec::new();
+
+        for code in &ad_unit_codes {
+            let payload = match self
+                .client()
+                .list_network_catalog(
+                    &args.network_code,
+                    CatalogCollection::AdUnits,
+                    Some(10),
+                    None,
+                    Some(format!("adUnitCode = \"{code}\"")),
+                    None,
+                )
+                .await
+            {
+                Ok(value) => value,
+                Err(err) => return Ok(contract::error(err, started)),
+            };
+            let summary = summarize_probe_ad_unit(code, &payload);
+            if summary
+                .get("decision")
+                .and_then(Value::as_str)
+                .is_some_and(|decision| decision == "attention_required")
+            {
+                attention_reasons.push(format!("ad unit {code} needs review"));
+            }
+            if summary
+                .get("proof_complete")
+                .and_then(Value::as_bool)
+                .is_some_and(|value| !value)
+            {
+                partial_reasons.push(format!("ad unit {code} did not produce complete proof"));
+            }
+            if let Some(target) = probe_ad_unit_target_from_summary(&summary) {
+                target_ad_units.push(target);
+            }
+            ad_unit_summaries.push(summary);
+        }
+
+        let private_auctions = match self
+            .client()
+            .list_network_catalog(
+                &args.network_code,
+                CatalogCollection::PrivateAuctions,
+                Some(page_size),
+                None,
+                None,
+                None,
+            )
+            .await
+        {
+            Ok(value) => {
+                let summary = summarize_probe_collection(
+                    &value,
+                    CatalogCollection::PrivateAuctions,
+                    page_size,
+                );
+                apply_probe_collection_decision(
+                    "private auctions",
+                    &summary,
+                    &mut attention_reasons,
+                    &mut partial_reasons,
+                );
+                summary
+            }
+            Err(err) => {
+                partial_reasons.push("private auction collection could not be read".to_string());
+                blocked_probe_surface("private_auctions", err)
+            }
+        };
+
+        let private_auction_deals = match self
+            .client()
+            .list_network_catalog(
+                &args.network_code,
+                CatalogCollection::PrivateAuctionDeals,
+                Some(page_size),
+                None,
+                None,
+                None,
+            )
+            .await
+        {
+            Ok(value) => {
+                let summary = summarize_probe_collection(
+                    &value,
+                    CatalogCollection::PrivateAuctionDeals,
+                    page_size,
+                );
+                apply_probe_collection_decision(
+                    "private auction deals",
+                    &summary,
+                    &mut attention_reasons,
+                    &mut partial_reasons,
+                );
+                summary
+            }
+            Err(err) => {
+                partial_reasons
+                    .push("private auction deals collection could not be read".to_string());
+                blocked_probe_surface("private_auction_deals", err)
+            }
+        };
+
+        let yield_groups = match probe_yield_groups(
+            self,
+            &args.network_code,
+            args.api_version.as_deref(),
+            page_size,
+            &target_ad_units,
+            args.include_raw,
+        )
+        .await
+        {
+            Ok(summary) => {
+                match summary.get("decision").and_then(Value::as_str) {
+                    Some("targeted_exposed") => {
+                        attention_reasons.push(
+                            "one or more active yield groups target a requested ad unit without a covering exclusion".to_string(),
+                        );
+                    }
+                    Some("targeted_activity_unknown") => {
+                        partial_reasons.push(
+                            "one or more yield groups target a requested ad unit but activity status was not proven".to_string(),
+                        );
+                    }
+                    Some("blocked") | Some("sample_only") | Some("skipped") => {
+                        partial_reasons
+                            .push("yield group proof is unavailable or incomplete".to_string());
+                    }
+                    _ => {}
+                }
+                summary
+            }
+            Err(err) => {
+                partial_reasons.push("yield group proof failed before upstream call".to_string());
+                blocked_probe_surface("yield_groups", err)
+            }
+        };
+
+        let rest_discovery = match self.client().get_rest_discovery_document().await {
+            Ok(value) => summarize_rest_discovery(&value),
+            Err(err) => {
+                partial_reasons.push("REST discovery document could not be read".to_string());
+                blocked_probe_surface("rest_discovery", err)
+            }
+        };
+
+        let unsupported_surfaces = unsupported_exchange_surfaces(&rest_discovery);
+        let overall_decision = if !attention_reasons.is_empty() {
+            "attention_required"
+        } else if !partial_reasons.is_empty() {
+            "partial_api_proof"
+        } else {
+            "api_exposed_surfaces_clear"
+        };
+
+        Ok(contract::success_with_meta(
+            json!({
+                "network_code": args.network_code,
+                "overall_decision": overall_decision,
+                "ad_units": ad_unit_summaries,
+                "private_auctions": private_auctions,
+                "private_auction_deals": private_auction_deals,
+                "yield_groups": yield_groups,
+                "rest_discovery": rest_discovery,
+                "unsupported_or_unintegrated_surfaces": unsupported_surfaces,
+                "attention_reasons": attention_reasons,
+                "partial_reasons": partial_reasons,
+                "certainty": {
+                    "can_prove_requested_ad_unit_flags": ad_unit_summaries.iter().all(|summary| summary.get("proof_complete").and_then(Value::as_bool).unwrap_or(false)),
+                    "can_prove_private_auction_absence_or_presence": private_auctions.get("proof_state").and_then(Value::as_str).is_some_and(|state| state == "complete_empty" || state == "complete_present"),
+                    "can_prove_private_deal_absence_or_presence": private_auction_deals.get("proof_state").and_then(Value::as_str).is_some_and(|state| state == "complete_empty" || state == "complete_present"),
+                    "can_prove_yield_group_targeting": yield_groups.get("proof_state").and_then(Value::as_str).is_some_and(|state| state == "complete"),
+                    "cannot_prove_via_current_api": [
+                        "protections",
+                        "inventory_rules",
+                        "unified_pricing_rules"
+                    ]
+                }
+            }),
+            json!({
+                "mutation_performed": false,
+                "upstream_called": true,
+                "page_size": page_size,
+                "soap_default_api_version": DEFAULT_SOAP_API_VERSION,
+                "required_yield_group_scope": MANAGE_SCOPE,
+                "policy": provider_safety_contract_json(),
+            }),
+            started,
+        ))
     }
 
     #[tool(
@@ -1126,6 +1426,228 @@ impl AdManagerServer {
     }
 
     #[tool(
+        name = "gam_yield_group_exclusions_preview",
+        description = "Read one YieldGroupService yield group and preview descendant-safe ad-unit IDs in InventoryTargeting.excludedAdUnits without mutating Google Ad Manager."
+    )]
+    async fn gam_yield_group_exclusions_preview(
+        &self,
+        Parameters(args): Parameters<YieldGroupExclusionPreviewArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let started = Instant::now();
+        if let Err(err) = self.settings().write_mode.assert_allowed(
+            "gam_yield_group_exclusions_preview",
+            GuardedActionPosture::preview(),
+        ) {
+            return Ok(contract::error(write_action_disabled(err), started));
+        }
+        if !scope_allows_write(self.client().scope()) {
+            return Ok(contract::error(
+                AdManagerError::WriteScopeRequired {
+                    scope: self.client().scope().to_string(),
+                },
+                started,
+            ));
+        }
+        if let Err(err) = validate_yield_group_exclusion_context(&args.request) {
+            return Ok(contract::error(err, started));
+        }
+
+        let draft = match build_yield_group_exclusion_draft(self, &args.request).await {
+            Ok(value) => value,
+            Err(err) => return Ok(contract::error(err, started)),
+        };
+        let (plan_id, confirmation_token, fingerprint) =
+            match guarded_yield_group_exclusion_identifiers(&args.request, &draft) {
+                Ok(value) => value,
+                Err(err) => return Ok(contract::error(err, started)),
+            };
+        let preview = GuardedActionPreview::new(
+            plan_id,
+            self.settings().write_mode,
+            GuardedActionPosture::preview(),
+            json!({
+                "request": yield_group_exclusion_request_summary(&args.request, &draft),
+                "yield_group": yield_group_exclusion_draft_summary(&draft, args.request.include_payload_xml),
+                "confirmation_token": confirmation_token,
+                "fingerprint": fingerprint,
+                "warnings": yield_group_exclusion_warnings(self.settings().write_mode, self.client().scope(), &args.request, &draft),
+                "next_step": if draft.noop {
+                    "No update is needed because every requested ad-unit ID is already excluded with includeDescendants=true by the yield group readback."
+                } else {
+                    "Review added_excluded_ad_unit_ids, updated_excluded_ad_unit_ids, requested_exclusion_include_descendants, current targeting summary, and payload hash. To apply, restart or run the server with GOOGLE_AD_MANAGER_MCP_WRITE_MODE=enabled, use the manage scope, and call gam_yield_group_exclusions_apply with this exact request and confirmation_token."
+                },
+            }),
+            json!({
+                "mutation_performed": false,
+                "upstream_called": true,
+                "soap_default_api_version": DEFAULT_SOAP_API_VERSION,
+                "required_soap_scope": MANAGE_SCOPE,
+                "policy": provider_safety_contract_json(),
+            }),
+        );
+        Ok(contract::success(json!(preview), started))
+    }
+
+    #[tool(
+        name = "gam_yield_group_exclusions_apply",
+        description = "Apply a previewed YieldGroupService descendant-safe ad-unit exclusion update after write-mode, manage-scope, confirmation-token, and readback gates."
+    )]
+    async fn gam_yield_group_exclusions_apply(
+        &self,
+        Parameters(args): Parameters<YieldGroupExclusionApplyArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let started = Instant::now();
+        if let Err(err) = self.settings().write_mode.assert_allowed(
+            "gam_yield_group_exclusions_apply",
+            GuardedActionPosture::guarded_apply(),
+        ) {
+            return Ok(contract::error(write_action_disabled(err), started));
+        }
+        if !scope_allows_write(self.client().scope()) {
+            return Ok(contract::error(
+                AdManagerError::WriteScopeRequired {
+                    scope: self.client().scope().to_string(),
+                },
+                started,
+            ));
+        }
+        if let Err(err) = validate_yield_group_exclusion_context(&args.request)
+            .and_then(|_| validate_yield_group_exclusion_apply_context(&args.request))
+        {
+            return Ok(contract::error(err, started));
+        }
+
+        let draft = match build_yield_group_exclusion_draft(self, &args.request).await {
+            Ok(value) => value,
+            Err(err) => return Ok(contract::error(err, started)),
+        };
+        let (plan_id, expected_token, fingerprint) =
+            match guarded_yield_group_exclusion_identifiers(&args.request, &draft) {
+                Ok(value) => value,
+                Err(err) => return Ok(contract::error(err, started)),
+            };
+        if args.confirmation_token.trim() != expected_token {
+            return Ok(contract::error(
+                AdManagerError::ConfirmationTokenMismatch,
+                started,
+            ));
+        }
+
+        let mut apply_evidence = json!({
+            "request": yield_group_exclusion_request_summary(&args.request, &draft),
+            "preview_readback": yield_group_exclusion_draft_summary(&draft, args.request.include_payload_xml),
+            "finish_state": "noop_proven",
+            "update_response": null,
+            "post_apply_readback": null,
+        });
+        if !draft.noop {
+            let update_request = match self.client().build_yield_group_update_request(
+                &args.request.network_code,
+                args.request.api_version.as_deref(),
+                &draft.update_payload_xml,
+            ) {
+                Ok(value) => value,
+                Err(err) => return Ok(contract::error(err, started)),
+            };
+            let applied = match self
+                .client()
+                .execute_yield_group_update_request(&update_request)
+                .await
+            {
+                Ok(value) => value,
+                Err(err) => return Ok(contract::error(err, started)),
+            };
+            if applied.upstream_status >= 400 || applied.soap_fault.is_some() {
+                return Ok(contract::error_with_detail(
+                    AdManagerError::UpstreamApi {
+                        status: applied.upstream_status,
+                        message: crate::client::soap_error_message(&applied),
+                    },
+                    json!({
+                        "yield_group_update_request": yield_group_update_request_to_json(&update_request, args.request.include_payload_xml),
+                        "upstream_status": applied.upstream_status,
+                        "response_truncated": applied.response_truncated,
+                        "request_id": applied.request_id,
+                        "response_time": applied.response_time,
+                        "soap_fault": applied.soap_fault,
+                    }),
+                    started,
+                ));
+            }
+
+            let readback = match build_yield_group_exclusion_draft(self, &args.request).await {
+                Ok(value) => value,
+                Err(err) => {
+                    return Ok(contract::error_with_detail(
+                        err,
+                        json!({
+                            "yield_group_update_request": yield_group_update_request_to_json(&update_request, args.request.include_payload_xml),
+                            "upstream_status": applied.upstream_status,
+                            "response_truncated": applied.response_truncated,
+                            "request_id": applied.request_id,
+                            "response_time": applied.response_time,
+                            "soap_fault": applied.soap_fault,
+                            "readback_state": "blocked_after_update",
+                        }),
+                        started,
+                    ));
+                }
+            };
+            if !readback.all_requested_ids_currently_excluded() {
+                return Ok(contract::error_with_detail(
+                    AdManagerError::UpstreamApi {
+                        status: 500,
+                        message: "yield group update response did not prove the requested exclusions on readback".to_string(),
+                    },
+                    json!({
+                        "yield_group_update_request": yield_group_update_request_to_json(&update_request, args.request.include_payload_xml),
+                        "upstream_status": applied.upstream_status,
+                        "response_truncated": applied.response_truncated,
+                        "request_id": applied.request_id,
+                        "response_time": applied.response_time,
+                        "soap_fault": applied.soap_fault,
+                        "post_apply_readback": yield_group_exclusion_draft_summary(&readback, args.request.include_payload_xml),
+                    }),
+                    started,
+                ));
+            }
+
+            apply_evidence["finish_state"] = json!("applied_proven");
+            apply_evidence["update_response"] = json!({
+                "yield_group_update_request": yield_group_update_request_to_json(&update_request, args.request.include_payload_xml),
+                "upstream_status": applied.upstream_status,
+                "response_truncated": applied.response_truncated,
+                "request_id": applied.request_id,
+                "response_time": applied.response_time,
+                "soap_fault": applied.soap_fault,
+            });
+            apply_evidence["post_apply_readback"] =
+                yield_group_exclusion_draft_summary(&readback, args.request.include_payload_xml);
+        }
+
+        let apply = GuardedActionApply::new(
+            plan_id,
+            self.settings().write_mode,
+            GuardedActionPosture::guarded_apply(),
+            apply_evidence,
+            json!({
+                "mutation_performed": !draft.noop,
+                "upstream_called": true,
+                "fingerprint": fingerprint,
+                "required_soap_scope": MANAGE_SCOPE,
+                "operator_context": {
+                    "reason": args.request.reason,
+                    "expected_impact": args.request.expected_impact,
+                    "rollback_note": args.request.rollback_note,
+                    "idempotency_key": args.request.idempotency_key,
+                },
+                "policy": provider_safety_contract_json(),
+            }),
+        );
+        Ok(contract::success(json!(apply), started))
+    }
+
+    #[tool(
         name = "gam_trafficking_tool_matrix",
         description = "Describe the current Google Ad Manager write and trafficking surface, including REST-supported writes, SOAP trafficking operations, and remaining ergonomics gaps."
     )]
@@ -1151,6 +1673,10 @@ impl AdManagerServer {
                     "gam_soap_trafficking_plan",
                     "gam_soap_trafficking_apply"
                 ],
+                "yield_group_exclusion_tools": [
+                    "gam_yield_group_exclusions_preview",
+                    "gam_yield_group_exclusions_apply"
+                ],
                 "rest_beta_supported_resources": rest_supported_resource_matrix(),
                 "soap_trafficking_supported_operations": soap_trafficking_supported_operation_matrix(),
                 "trafficking_gaps": if include_gaps { trafficking_gap_matrix() } else { Value::Null },
@@ -1163,6 +1689,7 @@ impl AdManagerServer {
                 "notes": [
                     "Google Ad Manager REST beta exposes write methods for inventory/supporting resources and saved reports.",
                     "The guarded SOAP tools cover order, line item, creative, line-item creative association, preview URL, and forecast operations.",
+                    "The yield-group exclusion tools provide a typed read-modify-write path for descendant-safe YieldGroupService ad-unit exclusions with post-apply readback proof.",
                     "Live SOAP calls require the Ad Manager manage OAuth scope; mutating SOAP calls also require write mode enabled."
                 ],
             }),
@@ -1447,6 +1974,114 @@ impl AdManagerServer {
     }
 
     #[tool(
+        name = "gam_scratchpad_ingest_soap_line_items",
+        description = "Run a bounded read-only LineItemService SOAP query and ingest parsed line-item delivery rows into a Google Ad Manager scratchpad table."
+    )]
+    async fn gam_scratchpad_ingest_soap_line_items(
+        &self,
+        Parameters(args): Parameters<ScratchpadIngestSoapLineItemsArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let started = Instant::now();
+        if !scope_allows_write(self.client().scope()) {
+            return Ok(contract::error(
+                AdManagerError::WriteScopeRequired {
+                    scope: self.client().scope().to_string(),
+                },
+                started,
+            ));
+        }
+        let query = match bounded_line_item_pql_query(&args.query) {
+            Ok(query) => query,
+            Err(err) => return Ok(contract::error(err, started)),
+        };
+        let payload_xml = pql_payload(&query);
+        let plan = match self.client().build_soap_trafficking_plan(
+            &args.network_code,
+            args.api_version.as_deref(),
+            SoapTraffickingOperation::GetLineItemsByStatement,
+            &payload_xml,
+        ) {
+            Ok(plan) => plan,
+            Err(err) => return Ok(contract::error(err, started)),
+        };
+        let applied = match self.client().execute_soap_trafficking_plan(&plan).await {
+            Ok(value) => value,
+            Err(err) => return Ok(contract::error(err, started)),
+        };
+        if applied.upstream_status >= 400 || applied.soap_fault.is_some() {
+            return Ok(contract::error_with_detail(
+                AdManagerError::UpstreamApi {
+                    status: applied.upstream_status,
+                    message: crate::client::soap_error_message(&applied),
+                },
+                json!({
+                    "upstream_status": applied.upstream_status,
+                    "request_id": applied.request_id,
+                    "response_time": applied.response_time,
+                    "soap_fault": applied.soap_fault,
+                    "response_truncated": applied.response_truncated,
+                }),
+                started,
+            ));
+        }
+
+        let columns = soap_line_items_ingest_columns();
+        let rows = soap_line_item_rows_for_scratchpad(
+            &applied.upstream_response_xml,
+            &args.network_code,
+            plan.api_version.as_str(),
+            applied.request_id.as_deref(),
+            applied.response_time.as_deref(),
+            applied.response_truncated,
+        );
+        let ingest_mode = if args.append {
+            ScratchpadIngestMode::Append
+        } else {
+            ScratchpadIngestMode::Create
+        };
+        let total_result_set_size =
+            extract_xml_tag_text(&applied.upstream_response_xml, "totalResultSetSize")
+                .and_then(|value| value.parse::<u64>().ok());
+        let columns_response = scratchpad_ingest_columns_to_json(columns.clone());
+        let row_count = rows.len();
+        let sessions = self.scratchpad_sessions().clone();
+        let session_id = args.session_id.clone();
+        let table_name = args.table_name.clone();
+        match run_scratchpad_blocking(move || {
+            sessions.ingest_rows_with_mode(&session_id, &table_name, &columns, &rows, ingest_mode)
+        })
+        .await
+        {
+            Ok(stats) => Ok(contract::success(
+                json!({
+                    "session_id": args.session_id,
+                    "table_name": args.table_name,
+                    "mode": ingest_mode_label(ingest_mode),
+                    "rows_inserted": stats.rows_inserted,
+                    "columns_inserted": stats.columns_inserted,
+                    "columns": columns_response,
+                    "session": scratchpad_snapshot_to_json(stats.session_snapshot),
+                    "upstream_summary": {
+                        "network_code": args.network_code,
+                        "api_version": plan.api_version,
+                        "operation": "get_line_items_by_statement",
+                        "query": args.query,
+                        "effective_query": query,
+                        "row_count": row_count,
+                        "total_result_set_size": total_result_set_size,
+                        "sample_only": total_result_set_size.map(|total| total > row_count as u64).unwrap_or(applied.response_truncated),
+                        "response_truncated": applied.response_truncated,
+                        "request_id": applied.request_id,
+                        "response_time": applied.response_time,
+                    },
+                }),
+                started,
+            )),
+            Err(err) => Ok(contract::scratchpad_error(err, started)),
+        }
+    }
+
+    #[tool(
         name = "gam_scratchpad_export_evidence_bundle",
         description = "Export a bounded markdown evidence bundle from Google Ad Manager scratchpad tables."
     )]
@@ -1556,6 +2191,747 @@ impl AdManagerServer {
 
 fn default_true() -> bool {
     true
+}
+
+fn validate_probe_ad_unit_codes(codes: &[String]) -> Result<Vec<String>, AdManagerError> {
+    if codes.is_empty() {
+        return Err(AdManagerError::invalid(
+            "ad_unit_codes",
+            "must contain at least one exact ad-unit code",
+        ));
+    }
+    if codes.len() > 50 {
+        return Err(AdManagerError::invalid(
+            "ad_unit_codes",
+            "must contain at most 50 ad-unit codes",
+        ));
+    }
+    let mut seen = BTreeSet::new();
+    let mut cleaned = Vec::with_capacity(codes.len());
+    for code in codes {
+        let trimmed = code.trim();
+        if trimmed.is_empty() || trimmed.len() > 128 {
+            return Err(AdManagerError::invalid(
+                "ad_unit_codes",
+                "each code must be between 1 and 128 characters",
+            ));
+        }
+        if !trimmed
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | '/' | ':'))
+        {
+            return Err(AdManagerError::invalid(
+                "ad_unit_codes",
+                "codes may only contain ASCII letters, digits, underscore, hyphen, dot, slash, or colon",
+            ));
+        }
+        if !seen.insert(trimmed.to_string()) {
+            return Err(AdManagerError::invalid(
+                "ad_unit_codes",
+                format!("duplicate ad-unit code `{trimmed}`"),
+            ));
+        }
+        cleaned.push(trimmed.to_string());
+    }
+    Ok(cleaned)
+}
+
+fn summarize_probe_ad_unit(code: &str, payload: &Value) -> Value {
+    let rows = catalog_rows(payload, CatalogCollection::AdUnits);
+    let matches = rows
+        .into_iter()
+        .filter(|row| {
+            row.get("adUnitCode")
+                .and_then(Value::as_str)
+                .is_some_and(|value| value == code)
+        })
+        .collect::<Vec<_>>();
+    if matches.is_empty() {
+        return json!({
+            "ad_unit_code": code,
+            "decision": "attention_required",
+            "proof_complete": false,
+            "reason": "exact ad-unit code was not returned by GAM",
+            "matches": 0,
+        });
+    }
+    if matches.len() > 1 {
+        return json!({
+            "ad_unit_code": code,
+            "decision": "attention_required",
+            "proof_complete": false,
+            "reason": "GAM returned multiple rows for the exact ad-unit code",
+            "matches": matches.len(),
+        });
+    }
+    let row = matches[0];
+    let resource_name = row.get("name").and_then(Value::as_str).unwrap_or_default();
+    let ad_unit_id = resource_id_from_name(resource_name);
+    let ancestor_ad_unit_ids = ad_unit_ancestor_ids(row);
+    let applied_adsense = row.get("appliedAdsenseEnabled").and_then(Value::as_bool);
+    let effective_adsense = row.get("effectiveAdsenseEnabled").and_then(Value::as_bool);
+    let proof_complete = applied_adsense.is_some() && effective_adsense.is_some();
+    let decision = if applied_adsense == Some(true) || effective_adsense == Some(true) {
+        "attention_required"
+    } else if proof_complete {
+        "clear_on_exposed_flags"
+    } else {
+        "partial_api_proof"
+    };
+    json!({
+        "ad_unit_code": code,
+        "ad_unit_id": if ad_unit_id.is_empty() { Value::Null } else { Value::String(ad_unit_id) },
+        "ancestor_ad_unit_ids": ancestor_ad_unit_ids,
+        "resource_name": resource_name,
+        "display_name": row.get("displayName").cloned().unwrap_or(Value::Null),
+        "status": row.get("status").cloned().unwrap_or(Value::Null),
+        "ad_unit_sizes": row.get("adUnitSizes").or_else(|| row.get("sizes")).cloned().unwrap_or(Value::Null),
+        "applied_adsense_enabled": applied_adsense,
+        "effective_adsense_enabled": effective_adsense,
+        "explicitly_targeted": row.get("explicitlyTargeted").and_then(Value::as_bool),
+        "decision": decision,
+        "proof_complete": proof_complete,
+    })
+}
+
+fn ad_unit_ancestor_ids(row: &Value) -> Vec<String> {
+    let mut ids = BTreeSet::new();
+    for key in [
+        "parentAdUnit",
+        "parentAdUnits",
+        "parentPath",
+        "ancestorAdUnits",
+        "adUnitParent",
+    ] {
+        collect_numeric_ad_unit_ids(row.get(key), &mut ids);
+    }
+    ids.into_iter().collect()
+}
+
+fn collect_numeric_ad_unit_ids(value: Option<&Value>, ids: &mut BTreeSet<String>) {
+    match value {
+        Some(Value::String(raw)) => {
+            if let Some(id) = numeric_ad_unit_id_from_candidate(raw) {
+                ids.insert(id);
+            }
+        }
+        Some(Value::Array(values)) => {
+            for value in values {
+                collect_numeric_ad_unit_ids(Some(value), ids);
+            }
+        }
+        Some(Value::Object(object)) => {
+            for key in ["adUnitId", "id", "name", "parentAdUnit"] {
+                collect_numeric_ad_unit_ids(object.get(key), ids);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn numeric_ad_unit_id_from_candidate(value: &str) -> Option<String> {
+    let candidate = resource_id_from_name(value.trim());
+    if candidate.is_empty()
+        || !candidate.chars().all(|ch| ch.is_ascii_digit())
+        || candidate.parse::<u64>().ok()? == 0
+    {
+        return None;
+    }
+    Some(candidate)
+}
+
+fn catalog_rows(payload: &Value, collection: CatalogCollection) -> Vec<&Value> {
+    payload
+        .get(collection.response_field())
+        .and_then(Value::as_array)
+        .map(|rows| rows.iter().collect())
+        .unwrap_or_default()
+}
+
+fn summarize_probe_collection(
+    payload: &Value,
+    collection: CatalogCollection,
+    page_size: u32,
+) -> Value {
+    let rows = catalog_rows(payload, collection);
+    let next_page_token = payload
+        .get("nextPageToken")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty());
+    let capped = next_page_token.is_some() || rows.len() as u32 >= page_size;
+    let proof_state = if capped {
+        "sample_only"
+    } else if rows.is_empty() {
+        "complete_empty"
+    } else {
+        "complete_present"
+    };
+    json!({
+        "collection": collection.as_str(),
+        "proof_state": proof_state,
+        "row_count_in_page": rows.len(),
+        "page_size": page_size,
+        "next_page_token_present": next_page_token.is_some(),
+        "capped_or_possibly_more": capped,
+        "sample": rows.iter().take(5).map(|row| {
+            let resource_name = row.get("name").and_then(Value::as_str).unwrap_or_default();
+            json!({
+                "resource_name": resource_name,
+                "resource_id": resource_id_from_name(resource_name),
+                "display_name": row.get("displayName").or_else(|| row.get("name")).cloned().unwrap_or(Value::Null),
+                "status": row.get("status").cloned().unwrap_or(Value::Null),
+            })
+        }).collect::<Vec<_>>(),
+    })
+}
+
+fn apply_probe_collection_decision(
+    label: &str,
+    summary: &Value,
+    attention_reasons: &mut Vec<String>,
+    partial_reasons: &mut Vec<String>,
+) {
+    match summary.get("proof_state").and_then(Value::as_str) {
+        Some("complete_present") => attention_reasons.push(format!(
+            "{label} are present; review whether they can target the requested inventory"
+        )),
+        Some("sample_only") => partial_reasons.push(format!(
+            "{label} read is capped or paginated; full absence/presence is not proven"
+        )),
+        Some("blocked") => partial_reasons.push(format!("{label} read is blocked")),
+        _ => {}
+    }
+}
+
+fn blocked_probe_surface(surface: &str, err: AdManagerError) -> Value {
+    json!({
+        "surface": surface,
+        "proof_state": "blocked",
+        "error": contract::redact_secret_text(&err.to_string()),
+        "hint": err.hint(),
+    })
+}
+
+async fn probe_yield_groups(
+    server: &AdManagerServer,
+    network_code: &str,
+    api_version: Option<&str>,
+    page_size: u32,
+    target_ad_units: &[ProbeAdUnitTarget],
+    include_raw: bool,
+) -> Result<Value, AdManagerError> {
+    if target_ad_units.is_empty() {
+        return Ok(json!({
+            "surface": "yield_groups",
+            "decision": "skipped",
+            "proof_state": "skipped",
+            "reason": "no target ad-unit ids were available from exact ad-unit reads",
+            "mutation_performed": false,
+        }));
+    }
+    if !scope_allows_write(server.client().scope()) {
+        return Ok(json!({
+            "surface": "yield_groups",
+            "decision": "blocked",
+            "proof_state": "blocked",
+            "reason": "YieldGroupService SOAP reads require the Google Ad Manager manage scope",
+            "required_scope": MANAGE_SCOPE,
+            "current_scope": server.client().scope(),
+            "mutation_performed": false,
+        }));
+    }
+    let payload_xml = pql_statement_payload(&format!("LIMIT {}", page_size.min(1_000)));
+    let plan = server.client().build_soap_trafficking_plan(
+        network_code,
+        api_version,
+        SoapTraffickingOperation::GetYieldGroupsByStatement,
+        &payload_xml,
+    )?;
+    let applied = server.client().execute_soap_trafficking_plan(&plan).await?;
+    if applied.upstream_status >= 400 || applied.soap_fault.is_some() {
+        return Ok(json!({
+            "surface": "yield_groups",
+            "decision": "blocked",
+            "proof_state": "blocked",
+            "upstream_status": applied.upstream_status,
+            "request_id": applied.request_id,
+            "response_time": applied.response_time,
+            "soap_fault": applied.soap_fault,
+            "message": contract::redact_secret_text(&soap_error_message(&applied)),
+            "mutation_performed": false,
+        }));
+    }
+
+    Ok(summarize_yield_groups(
+        &applied.upstream_response_xml,
+        applied.response_truncated,
+        applied.request_id,
+        applied.response_time,
+        target_ad_units,
+        include_raw,
+    ))
+}
+
+fn summarize_yield_groups(
+    xml: &str,
+    response_truncated: bool,
+    request_id: Option<String>,
+    response_time: Option<String>,
+    target_ad_units: &[ProbeAdUnitTarget],
+    include_raw: bool,
+) -> Value {
+    let target_ad_unit_ids = target_ad_units
+        .iter()
+        .map(|target| target.ad_unit_id.clone())
+        .collect::<Vec<_>>();
+    let results = extract_xml_blocks(xml, "results");
+    let total_result_set_size =
+        extract_xml_tag_text(xml, "totalResultSetSize").and_then(|value| value.parse::<u64>().ok());
+    let mut matches = Vec::new();
+    let mut targeted_exposed = Vec::new();
+    let mut targeted_and_excluded = Vec::new();
+    let mut targeted_inactive = Vec::new();
+    let mut targeted_activity_unknown = Vec::new();
+    for result in &results {
+        let yield_group_id = yield_group_id_from_xml(result);
+        let yield_group_name = yield_group_name(result);
+        let status = extract_xml_tag_text(result, "exchangeStatus")
+            .or_else(|| extract_xml_tag_text(result, "status"));
+        let activity_state = yield_group_activity_state(status.as_deref());
+        let format = extract_xml_tag_text(result, "format");
+        let environment_type = extract_xml_tag_text(result, "environmentType");
+        let targeting_block = extract_xml_first_block(result, "targeting").unwrap_or_default();
+        let inventory_block = extract_xml_first_block(&targeting_block, "inventoryTargeting")
+            .unwrap_or_else(|| "<inventoryTargeting />".to_string());
+        let targeted_ad_units = ad_unit_targeting_values(&inventory_block, "targetedAdUnits");
+        let excluded_ad_units = ad_unit_targeting_values(&inventory_block, "excludedAdUnits");
+        let mut matched_ids = Vec::new();
+        let mut result_targeted_exposed = Vec::new();
+        let mut result_targeted_and_excluded = Vec::new();
+        let mut result_targeted_inactive = Vec::new();
+        let mut result_targeted_activity_unknown = Vec::new();
+
+        for target in target_ad_units {
+            let direct_or_ancestor_targeting_match =
+                targeting_coverage_for_target(&targeted_ad_units, target);
+            let exclusion_match = targeting_coverage_for_target(&excluded_ad_units, target);
+            let broad_targeting_match =
+                if direct_or_ancestor_targeting_match.is_none() && exclusion_match.is_some() {
+                    broad_descendant_targeting_context(&targeted_ad_units)
+                } else {
+                    None
+                };
+            let targeting_match = direct_or_ancestor_targeting_match.or(broad_targeting_match);
+            let Some(classification) = yield_group_match_classification(
+                targeting_match.as_ref(),
+                exclusion_match.as_ref(),
+                activity_state,
+            ) else {
+                continue;
+            };
+
+            let match_entry = json!({
+                "yield_group_id": yield_group_id.clone(),
+                "yield_group_name": yield_group_name.clone(),
+                "status": status.clone(),
+                "activity_state": activity_state,
+                "format": format.clone(),
+                "environment_type": environment_type.clone(),
+                "requested_ad_unit_id": target.ad_unit_id.clone(),
+                "classification": classification,
+                "targeting_match": targeting_match.as_ref().map(targeting_coverage_json).unwrap_or(Value::Null),
+                "exclusion_match": exclusion_match.as_ref().map(targeting_coverage_json).unwrap_or(Value::Null),
+            });
+
+            matched_ids.push(target.ad_unit_id.clone());
+            match classification {
+                "targeted_exposed" => {
+                    result_targeted_exposed.push(target.ad_unit_id.clone());
+                    targeted_exposed.push(match_entry);
+                }
+                "targeted_and_excluded" => {
+                    result_targeted_and_excluded.push(target.ad_unit_id.clone());
+                    targeted_and_excluded.push(match_entry);
+                }
+                "targeted_inactive" => {
+                    result_targeted_inactive.push(target.ad_unit_id.clone());
+                    targeted_inactive.push(match_entry);
+                }
+                "targeted_activity_unknown" => {
+                    result_targeted_activity_unknown.push(target.ad_unit_id.clone());
+                    targeted_activity_unknown.push(match_entry);
+                }
+                _ => {}
+            }
+        }
+
+        if matched_ids.is_empty() {
+            continue;
+        }
+        matches.push(json!({
+            "yield_group_id": yield_group_id,
+            "yield_group_name": yield_group_name,
+            "status": status,
+            "activity_state": activity_state,
+            "format": format,
+            "environment_type": environment_type,
+            "matched_ad_unit_ids": matched_ids,
+            "targeted_exposed_ad_unit_ids": result_targeted_exposed,
+            "targeted_and_excluded_ad_unit_ids": result_targeted_and_excluded,
+            "targeted_inactive_ad_unit_ids": result_targeted_inactive,
+            "targeted_activity_unknown_ad_unit_ids": result_targeted_activity_unknown,
+            "targeted_ad_units": targeted_ad_units,
+            "excluded_ad_units": excluded_ad_units,
+        }));
+    }
+    let sample_only = response_truncated
+        || total_result_set_size
+            .map(|total| total > results.len() as u64)
+            .unwrap_or(false);
+    let decision = if !targeted_exposed.is_empty() {
+        "targeted_exposed"
+    } else if !targeted_and_excluded.is_empty() {
+        "targeted_and_excluded"
+    } else if !targeted_activity_unknown.is_empty() {
+        "targeted_activity_unknown"
+    } else if !targeted_inactive.is_empty() {
+        "targeted_inactive"
+    } else if sample_only {
+        "sample_only"
+    } else {
+        "no_target_matches"
+    };
+    let proof_state = if sample_only {
+        "sample_only"
+    } else {
+        "complete"
+    };
+    let mut response = json!({
+        "surface": "yield_groups",
+        "decision": decision,
+        "proof_state": proof_state,
+        "request_id": request_id,
+        "response_time": response_time,
+        "total_result_set_size": total_result_set_size,
+        "inspected_results": results.len(),
+        "response_truncated": response_truncated,
+        "target_ad_unit_ids": target_ad_unit_ids,
+        "target_ad_unit_matches": matches,
+        "targeted_exposed": targeted_exposed,
+        "targeted_and_excluded": targeted_and_excluded,
+        "targeted_inactive": targeted_inactive,
+        "targeted_activity_unknown": targeted_activity_unknown,
+        "mutation_performed": false,
+    });
+    if include_raw && let Some(object) = response.as_object_mut() {
+        object.insert(
+            "upstream_response_xml".to_string(),
+            Value::String(xml.to_string()),
+        );
+    }
+    response
+}
+
+fn probe_ad_unit_target_from_summary(summary: &Value) -> Option<ProbeAdUnitTarget> {
+    let ad_unit_id = summary.get("ad_unit_id").and_then(Value::as_str)?;
+    let mut target = ProbeAdUnitTarget::exact(ad_unit_id.to_string());
+    if let Some(values) = summary
+        .get("ancestor_ad_unit_ids")
+        .and_then(Value::as_array)
+    {
+        target.ancestor_ad_unit_ids.extend(
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .filter_map(numeric_ad_unit_id_from_candidate),
+        );
+    }
+    Some(target)
+}
+
+fn yield_group_activity_state(status: Option<&str>) -> &'static str {
+    match status.map(|value| value.trim().to_ascii_uppercase()) {
+        Some(value) if value == "ACTIVE" => "active",
+        Some(value)
+            if matches!(
+                value.as_str(),
+                "INACTIVE" | "ARCHIVED" | "DELETED" | "PAUSED" | "DRAFT"
+            ) =>
+        {
+            "inactive"
+        }
+        _ => "unknown",
+    }
+}
+
+fn yield_group_match_classification(
+    targeting_match: Option<&TargetingCoverage>,
+    exclusion_match: Option<&TargetingCoverage>,
+    activity_state: &str,
+) -> Option<&'static str> {
+    if targeting_match.is_some() && exclusion_match.is_some() {
+        return Some("targeted_and_excluded");
+    }
+    targeting_match?;
+    if activity_state == "inactive" {
+        Some("targeted_inactive")
+    } else if activity_state == "active" {
+        Some("targeted_exposed")
+    } else {
+        Some("targeted_activity_unknown")
+    }
+}
+
+fn targeting_coverage_for_target(
+    values: &[AdUnitTargetingValue],
+    target: &ProbeAdUnitTarget,
+) -> Option<TargetingCoverage> {
+    values
+        .iter()
+        .find(|value| value.ad_unit_id == target.ad_unit_id)
+        .map(|value| TargetingCoverage {
+            ad_unit_id: value.ad_unit_id.clone(),
+            include_descendants: value.include_descendants,
+            match_type: "exact",
+        })
+        .or_else(|| {
+            values
+                .iter()
+                .find(|value| {
+                    value.include_descendants == Some(true)
+                        && target.ancestor_ad_unit_ids.contains(&value.ad_unit_id)
+                })
+                .map(|value| TargetingCoverage {
+                    ad_unit_id: value.ad_unit_id.clone(),
+                    include_descendants: value.include_descendants,
+                    match_type: "ancestor_descendant",
+                })
+        })
+}
+
+fn broad_descendant_targeting_context(
+    values: &[AdUnitTargetingValue],
+) -> Option<TargetingCoverage> {
+    values
+        .iter()
+        .find(|value| value.include_descendants == Some(true))
+        .map(|value| TargetingCoverage {
+            ad_unit_id: value.ad_unit_id.clone(),
+            include_descendants: value.include_descendants,
+            match_type: "broad_descendant_target_unresolved_hierarchy",
+        })
+}
+
+fn targeting_coverage_json(coverage: &TargetingCoverage) -> Value {
+    json!({
+        "ad_unit_id": coverage.ad_unit_id.clone(),
+        "include_descendants": coverage.include_descendants,
+        "match_type": coverage.match_type,
+    })
+}
+
+fn summarize_rest_discovery(document: &Value) -> Value {
+    let mut resources = Vec::new();
+    collect_discovery_resources("", document, &mut resources);
+    let interesting = resources
+        .iter()
+        .filter(|resource| {
+            let lower = resource.to_ascii_lowercase();
+            lower.contains("auction")
+                || lower.contains("yield")
+                || lower.contains("protection")
+                || lower.contains("pricing")
+                || lower.contains("inventoryrule")
+                || lower.contains("inventory_rule")
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    json!({
+        "proof_state": "metadata_read",
+        "resource_count": resources.len(),
+        "interesting_resources": interesting,
+    })
+}
+
+fn collect_discovery_resources(prefix: &str, value: &Value, out: &mut Vec<String>) {
+    let Some(resources) = value.get("resources").and_then(Value::as_object) else {
+        return;
+    };
+    for (name, resource) in resources {
+        let path = if prefix.is_empty() {
+            name.to_string()
+        } else {
+            format!("{prefix}/{name}")
+        };
+        out.push(path.clone());
+        collect_discovery_resources(&path, resource, out);
+    }
+}
+
+fn unsupported_exchange_surfaces(rest_discovery: &Value) -> Vec<Value> {
+    let resources = rest_discovery
+        .get("interesting_resources")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::to_ascii_lowercase)
+        .collect::<Vec<_>>();
+    [
+        (
+            "protections",
+            "protection",
+            "GAM protection objects are not implemented as a current MCP read surface.",
+        ),
+        (
+            "inventory_rules",
+            "inventoryrule",
+            "GAM inventory-rule objects are not implemented as a current MCP read surface.",
+        ),
+        (
+            "unified_pricing_rules",
+            "pricing",
+            "GAM unified pricing rules are not implemented as a current MCP read surface.",
+        ),
+    ]
+    .into_iter()
+    .map(|(surface, needle, note)| {
+        let exposure = if resources.iter().any(|resource| {
+            resource.contains(needle) || resource.contains(&needle.replace('_', ""))
+        }) {
+            "resource_seen_but_not_integrated"
+        } else {
+            "not_seen_in_rest_discovery"
+        };
+        json!({
+            "surface": surface,
+            "proof_state": "not_proven",
+            "api_exposure": exposure,
+            "note": note,
+        })
+    })
+    .collect()
+}
+
+fn extract_xml_blocks(value: &str, tag: &str) -> Vec<String> {
+    extract_xml_elements(value, tag, true)
+}
+
+fn extract_xml_first_block(value: &str, tag: &str) -> Option<String> {
+    extract_xml_blocks(value, tag).into_iter().next()
+}
+
+fn extract_xml_tag_texts(value: &str, tag: &str) -> Vec<String> {
+    extract_xml_elements(value, tag, false)
+}
+
+fn extract_xml_tag_text(value: &str, tag: &str) -> Option<String> {
+    extract_xml_tag_texts(value, tag).into_iter().next()
+}
+
+fn extract_xml_elements(value: &str, tag: &str, include_outer: bool) -> Vec<String> {
+    let mut out = Vec::new();
+    for prefix in ["", "gam:", "soapenv:", "soap:"] {
+        let full_tag = format!("{prefix}{tag}");
+        let open = format!("<{full_tag}");
+        let close = format!("</{prefix}{tag}>");
+        let mut search_start = 0;
+        while let Some(relative_start) = value[search_start..].find(&open) {
+            let start = search_start + relative_start;
+            let after_tag = &value[start + open.len()..];
+            let starts_with_tag_close = after_tag.starts_with('>');
+            let starts_with_space = after_tag.chars().next().is_some_and(char::is_whitespace);
+            if !(starts_with_tag_close || starts_with_space) {
+                search_start = start + open.len();
+                continue;
+            }
+            let Some(open_end) = after_tag.find('>') else {
+                break;
+            };
+            let content_start = start + open.len() + open_end + 1;
+            let Some(relative_end) = value[content_start..].find(&close) else {
+                break;
+            };
+            let content_end = content_start + relative_end;
+            if include_outer {
+                let end = content_end + close.len();
+                out.push(value[start..end].trim().to_string());
+                search_start = end;
+            } else {
+                out.push(value[content_start..content_end].trim().to_string());
+                search_start = content_end + close.len();
+            }
+        }
+    }
+    out
+}
+
+fn extract_xml_date_time(value: &str, tag: &str) -> Option<String> {
+    let block = extract_xml_first_block(value, tag)?;
+    let date_block = extract_xml_first_block(&block, "date")?;
+    let year = extract_xml_tag_text(&date_block, "year")?
+        .parse::<u32>()
+        .ok()?;
+    let month = extract_xml_tag_text(&date_block, "month")?
+        .parse::<u32>()
+        .ok()?;
+    let day = extract_xml_tag_text(&date_block, "day")?
+        .parse::<u32>()
+        .ok()?;
+    let hour = extract_xml_tag_text(&block, "hour")
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or(0);
+    let minute = extract_xml_tag_text(&block, "minute")
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or(0);
+    let second = extract_xml_tag_text(&block, "second")
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or(0);
+    let time_zone = extract_xml_tag_text(&block, "timeZoneId").unwrap_or_default();
+    Some(format!(
+        "{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02} {time_zone}"
+    ))
+}
+
+fn creative_sizes_from_placeholders(blocks: &[String]) -> Vec<String> {
+    blocks
+        .iter()
+        .filter_map(|block| {
+            let size = extract_xml_first_block(block, "size")?;
+            let width = extract_xml_tag_text(&size, "width")?;
+            let height = extract_xml_tag_text(&size, "height")?;
+            Some(format!("{width}x{height}"))
+        })
+        .collect()
+}
+
+fn option_string_value(value: Option<String>) -> Value {
+    value.map(Value::String).unwrap_or(Value::Null)
+}
+
+fn option_u64_value(value: Option<String>) -> Value {
+    value
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(Value::from)
+        .unwrap_or(Value::Null)
+}
+
+fn option_f64_value(value: Option<String>) -> Value {
+    value
+        .and_then(|value| value.parse::<f64>().ok())
+        .map(Value::from)
+        .unwrap_or(Value::Null)
+}
+
+fn option_bool_value(value: Option<String>) -> Value {
+    value
+        .and_then(|value| match value.trim().to_ascii_lowercase().as_str() {
+            "true" => Some(true),
+            "false" => Some(false),
+            _ => None,
+        })
+        .map(Value::from)
+        .unwrap_or(Value::Null)
 }
 
 fn build_write_plan(
@@ -1670,6 +3046,12 @@ fn build_soap_payload_template(
             let line_item_id = required_id(values, "line_item_id")?;
             format!("<lineItemId>{line_item_id}</lineItemId>")
         }
+        SoapPayloadTemplate::YieldGroupsByStatement => {
+            let query = required_safe_pql_query(values, "query")?;
+            pql_statement_payload(&query)
+        }
+        SoapPayloadTemplate::YieldGroupsAll => pql_statement_payload("LIMIT 500"),
+        SoapPayloadTemplate::YieldPartners => String::new(),
     };
 
     Ok(json!({
@@ -1766,9 +3148,724 @@ fn validate_soap_apply_context(request: &SoapTraffickingRequestArgs) -> Result<(
     Ok(())
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct AdUnitTargetingValue {
+    ad_unit_id: String,
+    include_descendants: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProbeAdUnitTarget {
+    ad_unit_id: String,
+    ancestor_ad_unit_ids: BTreeSet<String>,
+}
+
+impl ProbeAdUnitTarget {
+    fn exact(ad_unit_id: String) -> Self {
+        Self {
+            ad_unit_id,
+            ancestor_ad_unit_ids: BTreeSet::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TargetingCoverage {
+    ad_unit_id: String,
+    include_descendants: Option<bool>,
+    match_type: &'static str,
+}
+
+#[derive(Debug, Clone)]
+struct YieldGroupExclusionDraft {
+    network_code: String,
+    api_version: String,
+    yield_group_id: String,
+    yield_group_name: Option<String>,
+    exchange_status: Option<String>,
+    format: Option<String>,
+    environment_type: Option<String>,
+    total_result_set_size: Option<u64>,
+    read_request_id: Option<String>,
+    read_response_time: Option<String>,
+    read_payload_xml: String,
+    current_yield_group_xml: String,
+    update_payload_xml: String,
+    current_yield_group_fingerprint: String,
+    update_payload_fingerprint: String,
+    targeted_ad_units: Vec<AdUnitTargetingValue>,
+    current_excluded_ad_units: Vec<AdUnitTargetingValue>,
+    requested_excluded_ad_unit_ids: Vec<String>,
+    requested_exclusion_include_descendants: bool,
+    already_excluded_ad_unit_ids: Vec<String>,
+    added_excluded_ad_unit_ids: Vec<String>,
+    updated_excluded_ad_unit_ids: Vec<String>,
+    noop: bool,
+}
+
+impl YieldGroupExclusionDraft {
+    fn all_requested_ids_currently_excluded(&self) -> bool {
+        self.requested_excluded_ad_unit_ids.iter().all(|id| {
+            self.current_excluded_ad_units.iter().any(|value| {
+                value.ad_unit_id == *id
+                    && value.include_descendants
+                        == Some(self.requested_exclusion_include_descendants)
+            })
+        })
+    }
+}
+
+fn validate_yield_group_exclusion_context(
+    request: &YieldGroupExclusionRequestArgs,
+) -> Result<(), AdManagerError> {
+    if request.reason.trim().is_empty() {
+        return Err(AdManagerError::invalid(
+            "reason",
+            "must explain why the yield-group exclusion change is being planned",
+        ));
+    }
+    let _ = parse_positive_id_string("yield_group_id", &request.yield_group_id)?;
+    let _ = validated_excluded_ad_unit_ids(&request.excluded_ad_unit_ids)?;
+    Ok(())
+}
+
+fn validate_yield_group_exclusion_apply_context(
+    request: &YieldGroupExclusionRequestArgs,
+) -> Result<(), AdManagerError> {
+    if request
+        .expected_impact
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or_default()
+        .is_empty()
+    {
+        return Err(AdManagerError::invalid(
+            "expected_impact",
+            "is required before applying yield-group exclusion updates",
+        ));
+    }
+    if request
+        .rollback_note
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or_default()
+        .is_empty()
+    {
+        return Err(AdManagerError::invalid(
+            "rollback_note",
+            "is required before applying yield-group exclusion updates",
+        ));
+    }
+    Ok(())
+}
+
+async fn build_yield_group_exclusion_draft(
+    server: &AdManagerServer,
+    request: &YieldGroupExclusionRequestArgs,
+) -> Result<YieldGroupExclusionDraft, AdManagerError> {
+    let yield_group_id = parse_positive_id_string("yield_group_id", &request.yield_group_id)?;
+    let requested_excluded_ad_unit_ids =
+        validated_excluded_ad_unit_ids(&request.excluded_ad_unit_ids)?;
+    let read_payload_xml = pql_statement_payload(&format!("WHERE id = {yield_group_id}"));
+    let read_plan = server.client().build_soap_trafficking_plan(
+        &request.network_code,
+        request.api_version.as_deref(),
+        SoapTraffickingOperation::GetYieldGroupsByStatement,
+        &read_payload_xml,
+    )?;
+    let read_result = server
+        .client()
+        .execute_soap_trafficking_plan(&read_plan)
+        .await?;
+    if read_result.upstream_status >= 400 || read_result.soap_fault.is_some() {
+        return Err(AdManagerError::UpstreamApi {
+            status: read_result.upstream_status,
+            message: crate::client::soap_error_message(&read_result),
+        });
+    }
+
+    let current_yield_group_xml =
+        exact_yield_group_from_readback(&read_result.upstream_response_xml, &yield_group_id)?;
+    let total_result_set_size =
+        extract_xml_tag_text(&read_result.upstream_response_xml, "totalResultSetSize")
+            .and_then(|value| value.parse::<u64>().ok());
+    let update = build_yield_group_exclusion_update(
+        &current_yield_group_xml,
+        &yield_group_id,
+        &requested_excluded_ad_unit_ids,
+    )?;
+    let update_payload_fingerprint = stable_fingerprint(&update.payload_xml);
+    let current_yield_group_fingerprint = stable_fingerprint(&current_yield_group_xml);
+
+    Ok(YieldGroupExclusionDraft {
+        network_code: read_plan.network_code,
+        api_version: read_plan.api_version,
+        yield_group_id: yield_group_id.clone(),
+        yield_group_name: yield_group_name(&current_yield_group_xml),
+        exchange_status: extract_xml_tag_text(&current_yield_group_xml, "exchangeStatus")
+            .or_else(|| extract_xml_tag_text(&current_yield_group_xml, "status")),
+        format: extract_xml_tag_text(&current_yield_group_xml, "format"),
+        environment_type: extract_xml_tag_text(&current_yield_group_xml, "environmentType"),
+        total_result_set_size,
+        read_request_id: read_result.request_id,
+        read_response_time: read_result.response_time,
+        read_payload_xml,
+        current_yield_group_xml,
+        update_payload_xml: update.payload_xml,
+        current_yield_group_fingerprint,
+        update_payload_fingerprint,
+        targeted_ad_units: update.targeted_ad_units,
+        current_excluded_ad_units: update.current_excluded_ad_units,
+        requested_excluded_ad_unit_ids,
+        requested_exclusion_include_descendants: YIELD_GROUP_EXCLUSION_INCLUDE_DESCENDANTS,
+        already_excluded_ad_unit_ids: update.already_excluded_ad_unit_ids,
+        added_excluded_ad_unit_ids: update.added_excluded_ad_unit_ids.clone(),
+        updated_excluded_ad_unit_ids: update.updated_excluded_ad_unit_ids.clone(),
+        noop: update.added_excluded_ad_unit_ids.is_empty()
+            && update.updated_excluded_ad_unit_ids.is_empty(),
+    })
+}
+
+#[derive(Debug, Clone)]
+struct YieldGroupExclusionUpdate {
+    payload_xml: String,
+    targeted_ad_units: Vec<AdUnitTargetingValue>,
+    current_excluded_ad_units: Vec<AdUnitTargetingValue>,
+    already_excluded_ad_unit_ids: Vec<String>,
+    added_excluded_ad_unit_ids: Vec<String>,
+    updated_excluded_ad_unit_ids: Vec<String>,
+}
+
+fn build_yield_group_exclusion_update(
+    current_yield_group_xml: &str,
+    yield_group_id: &str,
+    requested_excluded_ad_unit_ids: &[String],
+) -> Result<YieldGroupExclusionUpdate, AdManagerError> {
+    let observed_yield_group_id =
+        yield_group_id_from_xml(current_yield_group_xml).ok_or_else(|| {
+            AdManagerError::invalid(
+                "yield_group_readback",
+                "readback did not include a yield group id",
+            )
+        })?;
+    if observed_yield_group_id != yield_group_id {
+        return Err(AdManagerError::invalid(
+            "yield_group_readback",
+            "readback yield group id did not match the requested target",
+        ));
+    }
+
+    let targeting_block = extract_xml_first_block(current_yield_group_xml, "targeting")
+        .ok_or_else(|| {
+            AdManagerError::invalid(
+                "yield_group_readback",
+                "yield group readback did not include targeting; refusing to synthesize targeting from scratch",
+            )
+        })?;
+    let inventory_block = extract_xml_first_block(&targeting_block, "inventoryTargeting")
+        .unwrap_or_else(|| "<inventoryTargeting />".to_string());
+    let targeted_ad_units = ad_unit_targeting_values(&inventory_block, "targetedAdUnits");
+    let current_excluded_ad_units = ad_unit_targeting_values(&inventory_block, "excludedAdUnits");
+    let targeted_ids = targeted_ad_units
+        .iter()
+        .map(|value| value.ad_unit_id.as_str())
+        .collect::<BTreeSet<_>>();
+    if let Some(conflicting_id) = requested_excluded_ad_unit_ids
+        .iter()
+        .find(|id| targeted_ids.contains(id.as_str()))
+    {
+        return Err(AdManagerError::invalid(
+            "excluded_ad_unit_ids",
+            format!(
+                "ad unit {conflicting_id} is directly targeted by this yield group; refusing to target and exclude the same exact ad unit"
+            ),
+        ));
+    }
+
+    let requested_exclusion_include_descendants = YIELD_GROUP_EXCLUSION_INCLUDE_DESCENDANTS;
+    let mut already_excluded_ad_unit_ids = Vec::new();
+    let mut added_excluded_ad_unit_ids = Vec::new();
+    let mut updated_excluded_ad_unit_ids = Vec::new();
+    for id in requested_excluded_ad_unit_ids {
+        match current_excluded_ad_units
+            .iter()
+            .find(|value| value.ad_unit_id == *id)
+        {
+            Some(value)
+                if value.include_descendants == Some(requested_exclusion_include_descendants) =>
+            {
+                already_excluded_ad_unit_ids.push(id.clone());
+            }
+            Some(_) => {
+                updated_excluded_ad_unit_ids.push(id.clone());
+            }
+            None => {
+                added_excluded_ad_unit_ids.push(id.clone());
+            }
+        }
+    }
+
+    let updated_inventory_xml = yield_group_inventory_targeting_with_exclusions(
+        &inventory_block,
+        requested_excluded_ad_unit_ids,
+        requested_exclusion_include_descendants,
+    );
+    let updated_yield_group_xml =
+        if extract_xml_first_block(&targeting_block, "inventoryTargeting").is_some() {
+            replace_first_xml_block(
+                current_yield_group_xml,
+                "inventoryTargeting",
+                &updated_inventory_xml,
+            )
+            .ok_or_else(|| {
+                AdManagerError::invalid(
+                    "yield_group_readback",
+                    "could not replace inventoryTargeting in yield group readback",
+                )
+            })?
+        } else {
+            insert_inventory_targeting(current_yield_group_xml, &updated_inventory_xml).ok_or_else(
+                || {
+                    AdManagerError::invalid(
+                        "yield_group_readback",
+                        "could not insert inventoryTargeting in yield group targeting",
+                    )
+                },
+            )?
+        };
+    let payload_xml = format!(
+        "<yieldGroups>\n{}\n</yieldGroups>",
+        indent_xml_fragment(&updated_yield_group_xml, 2)
+    );
+
+    Ok(YieldGroupExclusionUpdate {
+        payload_xml,
+        targeted_ad_units,
+        current_excluded_ad_units,
+        already_excluded_ad_unit_ids,
+        added_excluded_ad_unit_ids,
+        updated_excluded_ad_unit_ids,
+    })
+}
+
+fn exact_yield_group_from_readback(
+    xml: &str,
+    yield_group_id: &str,
+) -> Result<String, AdManagerError> {
+    let results = extract_xml_blocks(xml, "results");
+    let mut matching = results
+        .into_iter()
+        .filter(|result| yield_group_id_from_xml(result).as_deref() == Some(yield_group_id))
+        .collect::<Vec<_>>();
+    match matching.len() {
+        1 => {
+            let result = matching.remove(0);
+            Ok(strip_outer_xml_block(&result, "results").unwrap_or(result))
+        }
+        0 => Err(AdManagerError::UpstreamApi {
+            status: 404,
+            message: format!("yield group {yield_group_id} was not found by statement readback"),
+        }),
+        _ => Err(AdManagerError::UpstreamApi {
+            status: 500,
+            message: format!("yield group {yield_group_id} matched multiple readback rows"),
+        }),
+    }
+}
+
+fn yield_group_inventory_targeting_with_exclusions(
+    inventory_block: &str,
+    requested_excluded_ad_unit_ids: &[String],
+    include_descendants: bool,
+) -> String {
+    let targeted_blocks = extract_xml_blocks(inventory_block, "targetedAdUnits");
+    let requested_ids = requested_excluded_ad_unit_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let mut seen_requested_ids = BTreeSet::new();
+    let mut excluded_blocks = Vec::new();
+    for block in extract_xml_blocks(inventory_block, "excludedAdUnits") {
+        if let Some(ad_unit_id) = extract_xml_tag_text(&block, "adUnitId")
+            && requested_ids.contains(ad_unit_id.as_str())
+        {
+            seen_requested_ids.insert(ad_unit_id.clone());
+            excluded_blocks.push(excluded_ad_unit_xml(&ad_unit_id, include_descendants));
+            continue;
+        }
+        excluded_blocks.push(block);
+    }
+    excluded_blocks.extend(
+        requested_excluded_ad_unit_ids
+            .iter()
+            .filter(|id| !seen_requested_ids.contains(id.as_str()))
+            .map(|id| excluded_ad_unit_xml(id, include_descendants)),
+    );
+    let placement_ids = extract_xml_tag_texts(inventory_block, "targetedPlacementIds");
+
+    let mut children = Vec::new();
+    children.extend(targeted_blocks);
+    children.extend(excluded_blocks);
+    children.extend(placement_ids.into_iter().map(|id| {
+        format!(
+            "<targetedPlacementIds>{}</targetedPlacementIds>",
+            escape_xml_text(&id)
+        )
+    }));
+    if children.is_empty() {
+        "<inventoryTargeting />".to_string()
+    } else {
+        format!(
+            "<inventoryTargeting>\n{}\n</inventoryTargeting>",
+            indent_xml_fragment(&children.join("\n"), 2)
+        )
+    }
+}
+
+fn excluded_ad_unit_xml(ad_unit_id: &str, include_descendants: bool) -> String {
+    format!(
+        "<excludedAdUnits>\n  <adUnitId>{}</adUnitId>\n  <includeDescendants>{}</includeDescendants>\n</excludedAdUnits>",
+        escape_xml_text(ad_unit_id),
+        include_descendants
+    )
+}
+
+fn insert_inventory_targeting(yield_group_xml: &str, inventory_xml: &str) -> Option<String> {
+    let (start, end) = find_first_xml_block_range(yield_group_xml, "targeting")?;
+    let targeting_block = &yield_group_xml[start..end];
+    let targeting_inner = strip_outer_xml_block(targeting_block, "targeting")?;
+    let updated_targeting = if targeting_inner.trim().is_empty() {
+        format!(
+            "<targeting>\n{}\n</targeting>",
+            indent_xml_fragment(inventory_xml, 2)
+        )
+    } else {
+        format!(
+            "<targeting>\n{}\n{}\n</targeting>",
+            indent_xml_fragment(inventory_xml, 2),
+            indent_xml_fragment(&targeting_inner, 2)
+        )
+    };
+    let mut updated = String::with_capacity(
+        yield_group_xml.len()
+            + updated_targeting
+                .len()
+                .saturating_sub(targeting_block.len()),
+    );
+    updated.push_str(&yield_group_xml[..start]);
+    updated.push_str(&updated_targeting);
+    updated.push_str(&yield_group_xml[end..]);
+    Some(updated)
+}
+
+fn ad_unit_targeting_values(value: &str, tag: &str) -> Vec<AdUnitTargetingValue> {
+    extract_xml_blocks(value, tag)
+        .into_iter()
+        .filter_map(|block| {
+            let ad_unit_id = extract_xml_tag_text(&block, "adUnitId")?;
+            Some(AdUnitTargetingValue {
+                ad_unit_id,
+                include_descendants: extract_xml_tag_text(&block, "includeDescendants").and_then(
+                    |value| match value.trim().to_ascii_lowercase().as_str() {
+                        "true" => Some(true),
+                        "false" => Some(false),
+                        _ => None,
+                    },
+                ),
+            })
+        })
+        .collect()
+}
+
+fn yield_group_id_from_xml(value: &str) -> Option<String> {
+    extract_xml_tag_text(value, "yieldGroupId").or_else(|| extract_xml_tag_text(value, "id"))
+}
+
+fn yield_group_name(value: &str) -> Option<String> {
+    extract_xml_tag_text(value, "yieldGroupName").or_else(|| extract_xml_tag_text(value, "name"))
+}
+
+fn strip_outer_xml_block(value: &str, tag: &str) -> Option<String> {
+    let (start, end) = find_first_xml_block_range(value, tag)?;
+    let open_end = value[start..end].find('>')?;
+    let content_start = start + open_end + 1;
+    let close_start = value[..end].rfind("</")?;
+    Some(value[content_start..close_start].trim().to_string())
+}
+
+fn replace_first_xml_block(value: &str, tag: &str, replacement: &str) -> Option<String> {
+    let (start, end) = find_first_xml_block_range(value, tag)?;
+    let mut updated =
+        String::with_capacity(value.len() + replacement.len().saturating_sub(end - start));
+    updated.push_str(&value[..start]);
+    updated.push_str(replacement);
+    updated.push_str(&value[end..]);
+    Some(updated)
+}
+
+fn find_first_xml_block_range(value: &str, tag: &str) -> Option<(usize, usize)> {
+    let mut best: Option<(usize, usize)> = None;
+    for prefix in ["", "gam:", "soapenv:", "soap:"] {
+        let full_tag = format!("{prefix}{tag}");
+        let open = format!("<{full_tag}");
+        let close = format!("</{prefix}{tag}>");
+        let mut search_start = 0;
+        while let Some(relative_start) = value[search_start..].find(&open) {
+            let start = search_start + relative_start;
+            let after_tag = &value[start + open.len()..];
+            let starts_with_tag_close = after_tag.starts_with('>') || after_tag.starts_with("/>");
+            let starts_with_space = after_tag.chars().next().is_some_and(char::is_whitespace);
+            if !(starts_with_tag_close || starts_with_space) {
+                search_start = start + open.len();
+                continue;
+            }
+            let open_end = after_tag.find('>')?;
+            if after_tag[..=open_end].trim_end().ends_with("/>") {
+                let end = start + open.len() + open_end + 1;
+                best = choose_earlier_range(best, (start, end));
+                break;
+            }
+            let content_start = start + open.len() + open_end + 1;
+            let Some(relative_end) = value[content_start..].find(&close) else {
+                break;
+            };
+            let end = content_start + relative_end + close.len();
+            best = choose_earlier_range(best, (start, end));
+            break;
+        }
+    }
+    best
+}
+
+fn choose_earlier_range(
+    current: Option<(usize, usize)>,
+    candidate: (usize, usize),
+) -> Option<(usize, usize)> {
+    match current {
+        Some(existing) if existing.0 <= candidate.0 => Some(existing),
+        _ => Some(candidate),
+    }
+}
+
+fn indent_xml_fragment(value: &str, spaces: usize) -> String {
+    let prefix = " ".repeat(spaces);
+    value
+        .lines()
+        .map(|line| {
+            if line.trim().is_empty() {
+                String::new()
+            } else {
+                format!("{prefix}{}", line.trim_end())
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn parse_positive_id_string(field: &'static str, value: &str) -> Result<String, AdManagerError> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || !trimmed.chars().all(|ch| ch.is_ascii_digit()) {
+        return Err(AdManagerError::invalid(
+            field,
+            "must be a positive numeric ID",
+        ));
+    }
+    match trimmed.parse::<u64>() {
+        Ok(id) if id > 0 => Ok(id.to_string()),
+        _ => Err(AdManagerError::invalid(
+            field,
+            "must be a positive numeric ID",
+        )),
+    }
+}
+
+fn validated_excluded_ad_unit_ids(values: &[String]) -> Result<Vec<String>, AdManagerError> {
+    if values.is_empty() {
+        return Err(AdManagerError::invalid(
+            "excluded_ad_unit_ids",
+            "must contain at least one exact ad-unit ID",
+        ));
+    }
+    if values.len() > 100 {
+        return Err(AdManagerError::invalid(
+            "excluded_ad_unit_ids",
+            "must contain at most 100 exact ad-unit IDs per guarded update",
+        ));
+    }
+    let mut ids = BTreeSet::new();
+    for value in values {
+        let id = parse_positive_id_string("excluded_ad_unit_ids", value)?;
+        if !ids.insert(id.clone()) {
+            return Err(AdManagerError::invalid(
+                "excluded_ad_unit_ids",
+                format!("must not contain duplicate ID {id}"),
+            ));
+        }
+    }
+    Ok(ids.into_iter().collect())
+}
+
+fn guarded_yield_group_exclusion_identifiers(
+    request: &YieldGroupExclusionRequestArgs,
+    draft: &YieldGroupExclusionDraft,
+) -> Result<(String, String, String), AdManagerError> {
+    let target = format!(
+        "YieldGroupService.updateYieldGroups:{}:{}",
+        draft.api_version, draft.yield_group_id
+    );
+    let seed =
+        GuardedActionPlanSeed::new("gam_yield_group_exclusions", &request.network_code, &target)
+            .map_err(|err| AdManagerError::invalid("plan_seed", err.to_string()))?;
+    let fingerprint_input = json!({
+        "network_code": request.network_code,
+        "api_version": draft.api_version,
+        "yield_group_id": draft.yield_group_id,
+        "requested_excluded_ad_unit_ids": draft.requested_excluded_ad_unit_ids,
+        "current_yield_group_fingerprint": draft.current_yield_group_fingerprint,
+        "update_payload_fingerprint": draft.update_payload_fingerprint,
+    });
+    let fingerprint = stable_fingerprint(&fingerprint_input.to_string());
+    let plan_id = format!("{}.{}", seed.stable_plan_id(), fingerprint);
+    let confirmation_token = format!("confirm-gam-yield-group-exclusions-{fingerprint}");
+    Ok((plan_id, confirmation_token, fingerprint))
+}
+
+fn yield_group_exclusion_request_summary(
+    request: &YieldGroupExclusionRequestArgs,
+    draft: &YieldGroupExclusionDraft,
+) -> Value {
+    json!({
+        "network_code": request.network_code,
+        "api_version": draft.api_version,
+        "yield_group_id": draft.yield_group_id,
+        "requested_excluded_ad_unit_ids": draft.requested_excluded_ad_unit_ids,
+        "reason": request.reason,
+        "idempotency_key": request.idempotency_key,
+    })
+}
+
+fn yield_group_exclusion_draft_summary(
+    draft: &YieldGroupExclusionDraft,
+    include_payload_xml: bool,
+) -> Value {
+    let mut value = json!({
+        "network_code": draft.network_code,
+        "api_version": draft.api_version,
+        "yield_group_id": draft.yield_group_id,
+        "yield_group_name": draft.yield_group_name,
+        "exchange_status": draft.exchange_status,
+        "format": draft.format,
+        "environment_type": draft.environment_type,
+        "total_result_set_size": draft.total_result_set_size,
+        "read_request_id": draft.read_request_id,
+        "read_response_time": draft.read_response_time,
+        "targeted_ad_units": draft.targeted_ad_units,
+        "current_excluded_ad_units": draft.current_excluded_ad_units,
+        "requested_excluded_ad_unit_ids": draft.requested_excluded_ad_unit_ids,
+        "requested_exclusion_include_descendants": draft.requested_exclusion_include_descendants,
+        "already_excluded_ad_unit_ids": draft.already_excluded_ad_unit_ids,
+        "added_excluded_ad_unit_ids": draft.added_excluded_ad_unit_ids,
+        "updated_excluded_ad_unit_ids": draft.updated_excluded_ad_unit_ids,
+        "apply_required": !draft.noop,
+        "readback_proves_requested_exclusions": draft.all_requested_ids_currently_excluded(),
+        "current_yield_group_xml_bytes": draft.current_yield_group_xml.len(),
+        "current_yield_group_fingerprint": draft.current_yield_group_fingerprint,
+        "update_payload_xml_bytes": draft.update_payload_xml.len(),
+        "update_payload_fingerprint": draft.update_payload_fingerprint,
+    });
+    if include_payload_xml {
+        value["read_payload_xml"] = json!(draft.read_payload_xml);
+        value["update_payload_xml"] = json!(draft.update_payload_xml);
+    }
+    value
+}
+
+fn yield_group_update_request_to_json(
+    request: &YieldGroupUpdateSoapRequest,
+    include_payload_xml: bool,
+) -> Value {
+    let mut value = json!({
+        "network_code": request.network_code,
+        "api_version": request.api_version,
+        "service": request.service,
+        "method": request.method,
+        "endpoint": request.endpoint,
+        "namespace": request.namespace,
+        "target": request.target,
+        "payload_xml_bytes": request.payload_xml.len(),
+        "payload_fingerprint": stable_fingerprint(&request.payload_xml),
+    });
+    if include_payload_xml {
+        value["payload_xml"] = json!(request.payload_xml);
+        value["envelope_xml"] = json!(request.envelope_xml);
+    }
+    value
+}
+
+fn yield_group_exclusion_warnings(
+    write_mode: GuardedActionRuntimeMode,
+    scope: &str,
+    request: &YieldGroupExclusionRequestArgs,
+    draft: &YieldGroupExclusionDraft,
+) -> Vec<String> {
+    let mut warnings = Vec::new();
+    if write_mode != GuardedActionRuntimeMode::Enabled {
+        warnings.push(format!(
+            "Apply is disabled while GOOGLE_AD_MANAGER_MCP_WRITE_MODE is {}.",
+            write_mode.as_str()
+        ));
+    }
+    if !scope_allows_write(scope) {
+        warnings.push(format!(
+            "Apply requires the Google Ad Manager manage scope: {MANAGE_SCOPE}."
+        ));
+    }
+    if request
+        .expected_impact
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or_default()
+        .is_empty()
+    {
+        warnings.push("Apply requires expected_impact to be set.".to_string());
+    }
+    if request
+        .rollback_note
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or_default()
+        .is_empty()
+    {
+        warnings.push("Apply requires rollback_note to be set.".to_string());
+    }
+    if draft.noop {
+        warnings.push(
+            "No mutation is needed: every requested ad-unit ID is already excluded with includeDescendants=true."
+                .to_string(),
+        );
+    } else {
+        warnings.push(
+            "Requested excludedAdUnits are written with includeDescendants=true because Google Ad Manager can reject self-only inventory-unit exclusions with InventoryTargetingError.SELF_ONLY_INVENTORY_UNIT_NOT_ALLOWED."
+                .to_string(),
+        );
+        warnings.push(
+            "This update changes only the yield-group inventory exclusions; it does not change line-item targeting or sponsorship line items."
+                .to_string(),
+        );
+    }
+    warnings
+}
+
 fn pql_payload(query: &str) -> String {
     format!(
         "<filterStatement>\n  <query>{}</query>\n</filterStatement>",
+        escape_xml_text(query)
+    )
+}
+
+fn pql_statement_payload(query: &str) -> String {
+    format!(
+        "<statement>\n  <query>{}</query>\n</statement>",
         escape_xml_text(query)
     )
 }
@@ -1891,6 +3988,92 @@ fn required_safe_name_fragment(
         ));
     }
     Ok(trimmed.to_string())
+}
+
+fn required_safe_pql_query(
+    values: &Map<String, Value>,
+    field: &'static str,
+) -> Result<String, AdManagerError> {
+    let value = values.get(field).ok_or_else(|| {
+        AdManagerError::invalid(field, "is required for this SOAP payload template")
+    })?;
+    let Some(text) = value.as_str() else {
+        return Err(AdManagerError::invalid(
+            field,
+            "must be a bounded PQL statement string",
+        ));
+    };
+    validate_safe_pql_query_text(field, text)
+}
+
+fn validate_safe_pql_query_text(field: &'static str, text: &str) -> Result<String, AdManagerError> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() || trimmed.len() > 240 {
+        return Err(AdManagerError::invalid(
+            field,
+            "must be between 1 and 240 characters",
+        ));
+    }
+    if trimmed
+        .chars()
+        .any(|ch| matches!(ch, ';' | '<' | '>' | '\n' | '\r' | '\0'))
+    {
+        return Err(AdManagerError::invalid(
+            field,
+            "must not contain XML, semicolon, null, or newline characters",
+        ));
+    }
+    let upper = trimmed.to_ascii_uppercase();
+    if !(upper.starts_with("WHERE ")
+        || upper.starts_with("ORDER BY ")
+        || upper.starts_with("LIMIT "))
+    {
+        return Err(AdManagerError::invalid(
+            field,
+            "must start with WHERE, ORDER BY, or LIMIT",
+        ));
+    }
+    Ok(trimmed.to_string())
+}
+
+fn bounded_line_item_pql_query(query: &str) -> Result<String, AdManagerError> {
+    let mut bounded = validate_safe_pql_query_text("query", query)?;
+    let limit = pql_limit_value(&bounded);
+    match limit {
+        Some(1..=1_000) => {}
+        Some(_) => {
+            return Err(AdManagerError::invalid(
+                "query",
+                "LIMIT must be between 1 and 1000 for scratchpad line-item ingests",
+            ));
+        }
+        None => {
+            if bounded.len() > 230 {
+                return Err(AdManagerError::invalid(
+                    "query",
+                    "query is too long to append the automatic LIMIT 500 cap",
+                ));
+            }
+            bounded.push_str(" LIMIT 500");
+        }
+    }
+    Ok(bounded)
+}
+
+fn pql_limit_value(query: &str) -> Option<u64> {
+    let upper = query.to_ascii_uppercase();
+    let limit_index = upper.rfind("LIMIT")?;
+    let before = upper[..limit_index].chars().next_back();
+    let after = upper[limit_index + "LIMIT".len()..].chars().next();
+    if before.is_some_and(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+        || after.is_some_and(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+    {
+        return None;
+    }
+    query[limit_index + "LIMIT".len()..]
+        .split_whitespace()
+        .next()
+        .and_then(|value| value.parse::<u64>().ok())
 }
 
 fn escape_pql_single_quoted_like_fragment(input: &str) -> String {
@@ -2234,6 +4417,18 @@ fn soap_trafficking_supported_operation_matrix() -> Value {
                 "get_traffic_data"
             ],
             "mutating_operations": []
+        },
+        {
+            "service": "YieldGroupService",
+            "operations": [
+                "get_yield_groups_by_statement",
+                "get_yield_partners"
+            ],
+            "mutating_operations": [],
+            "typed_helpers": [
+                "gam_yield_group_exclusions_preview",
+                "gam_yield_group_exclusions_apply"
+            ]
         }
     ])
 }
@@ -2254,9 +4449,15 @@ fn trafficking_gap_matrix() -> Value {
         },
         {
             "surface": "post_apply_readback_automation",
-            "status": "manual follow-up operation",
-            "impact": "mutating SOAP apply returns upstream response; operators should run get-by-statement or forecast checks for delivery proof",
-            "follow_up": "support optional readback_request payloads on SOAP apply"
+            "status": "partial typed helpers",
+            "impact": "generic mutating SOAP apply returns upstream response and still needs follow-up proof; yield-group descendant-safe exclusion apply has built-in post-apply readback",
+            "follow_up": "support optional readback_request payloads on generic SOAP apply"
+        },
+        {
+            "surface": "account_level_protection_surfaces",
+            "status": "partial API proof",
+            "impact": "exchange/protection probe can prove exposed ad-unit flags, private auctions/deals, and yield groups, but must report protections, inventory rules, and unified pricing rules as unproven until an authoritative API or browser proof surface exists",
+            "follow_up": "add authoritative read coverage if Google exposes these surfaces or a supported browser/admin read adapter is approved"
         }
     ])
 }
@@ -2287,6 +4488,51 @@ fn report_rows_ingest_columns() -> Vec<ScratchpadIngestColumn> {
         ("metric_values_json", "string"),
         ("values_json", "string"),
         ("upstream_json", "string"),
+    ]
+    .into_iter()
+    .map(|(name, logical_type)| ScratchpadIngestColumn {
+        name: name.to_string(),
+        logical_type: logical_type.to_string(),
+    })
+    .collect()
+}
+
+fn soap_line_items_ingest_columns() -> Vec<ScratchpadIngestColumn> {
+    [
+        ("network_code", "string"),
+        ("api_version", "string"),
+        ("row_index", "integer"),
+        ("request_id", "string"),
+        ("response_time", "string"),
+        ("response_truncated", "boolean"),
+        ("order_id", "integer"),
+        ("order_name", "string"),
+        ("line_item_id", "integer"),
+        ("line_item_name", "string"),
+        ("status", "string"),
+        ("reservation_status", "string"),
+        ("line_item_type", "string"),
+        ("priority", "integer"),
+        ("cost_type", "string"),
+        ("delivery_rate_type", "string"),
+        ("roadblocking_type", "string"),
+        ("start_date_time", "string"),
+        ("end_date_time", "string"),
+        ("creative_sizes", "string"),
+        ("expected_creative_count", "integer"),
+        ("impressions_delivered", "integer"),
+        ("clicks_delivered", "integer"),
+        ("expected_delivery_percentage", "double"),
+        ("actual_delivery_percentage", "double"),
+        ("primary_goal_type", "string"),
+        ("primary_goal_unit_type", "string"),
+        ("primary_goal_units", "integer"),
+        ("is_missing_creatives", "boolean"),
+        ("is_archived", "boolean"),
+        ("target_ad_unit_ids_json", "string"),
+        ("custom_targeting_key_ids_json", "string"),
+        ("custom_targeting_value_ids_json", "string"),
+        ("upstream_xml", "string"),
     ]
     .into_iter()
     .map(|(name, logical_type)| ScratchpadIngestColumn {
@@ -2348,6 +4594,196 @@ fn network_catalog_row_for_scratchpad(
         row.get("status").cloned().unwrap_or(Value::Null),
     );
     out.insert("upstream_json".to_string(), Value::String(row.to_string()));
+    out
+}
+
+fn soap_line_item_rows_for_scratchpad(
+    xml: &str,
+    network_code: &str,
+    api_version: &str,
+    request_id: Option<&str>,
+    response_time: Option<&str>,
+    response_truncated: bool,
+) -> Vec<Map<String, Value>> {
+    extract_xml_blocks(xml, "results")
+        .into_iter()
+        .enumerate()
+        .map(|(index, result)| {
+            soap_line_item_row_for_scratchpad(
+                &result,
+                index,
+                network_code,
+                api_version,
+                request_id,
+                response_time,
+                response_truncated,
+            )
+        })
+        .collect()
+}
+
+fn soap_line_item_row_for_scratchpad(
+    result: &str,
+    index: usize,
+    network_code: &str,
+    api_version: &str,
+    request_id: Option<&str>,
+    response_time: Option<&str>,
+    response_truncated: bool,
+) -> Map<String, Value> {
+    let primary_goal = extract_xml_first_block(result, "primaryGoal").unwrap_or_default();
+    let delivery_indicator =
+        extract_xml_first_block(result, "deliveryIndicator").unwrap_or_default();
+    let stats = extract_xml_first_block(result, "stats").unwrap_or_default();
+    let creative_placeholders = extract_xml_blocks(result, "creativePlaceholders");
+    let target_ad_unit_ids = extract_xml_tag_texts(result, "adUnitId");
+    let custom_targeting_key_ids = extract_xml_tag_texts(result, "keyId");
+    let custom_targeting_value_ids = extract_xml_tag_texts(result, "valueIds");
+
+    let mut out = Map::new();
+    out.insert(
+        "network_code".to_string(),
+        Value::String(network_code.to_string()),
+    );
+    out.insert(
+        "api_version".to_string(),
+        Value::String(api_version.to_string()),
+    );
+    out.insert("row_index".to_string(), json!(index));
+    out.insert(
+        "request_id".to_string(),
+        option_string_value(request_id.map(str::to_string)),
+    );
+    out.insert(
+        "response_time".to_string(),
+        option_string_value(response_time.map(str::to_string)),
+    );
+    out.insert(
+        "response_truncated".to_string(),
+        Value::Bool(response_truncated),
+    );
+    out.insert(
+        "order_id".to_string(),
+        option_u64_value(extract_xml_tag_text(result, "orderId")),
+    );
+    out.insert(
+        "order_name".to_string(),
+        option_string_value(extract_xml_tag_text(result, "orderName")),
+    );
+    out.insert(
+        "line_item_id".to_string(),
+        option_u64_value(extract_xml_tag_text(result, "id")),
+    );
+    out.insert(
+        "line_item_name".to_string(),
+        option_string_value(extract_xml_tag_text(result, "name")),
+    );
+    out.insert(
+        "status".to_string(),
+        option_string_value(extract_xml_tag_text(result, "status")),
+    );
+    out.insert(
+        "reservation_status".to_string(),
+        option_string_value(extract_xml_tag_text(result, "reservationStatus")),
+    );
+    out.insert(
+        "line_item_type".to_string(),
+        option_string_value(extract_xml_tag_text(result, "lineItemType")),
+    );
+    out.insert(
+        "priority".to_string(),
+        option_u64_value(extract_xml_tag_text(result, "priority")),
+    );
+    out.insert(
+        "cost_type".to_string(),
+        option_string_value(extract_xml_tag_text(result, "costType")),
+    );
+    out.insert(
+        "delivery_rate_type".to_string(),
+        option_string_value(extract_xml_tag_text(result, "deliveryRateType")),
+    );
+    out.insert(
+        "roadblocking_type".to_string(),
+        option_string_value(extract_xml_tag_text(result, "roadblockingType")),
+    );
+    out.insert(
+        "start_date_time".to_string(),
+        option_string_value(extract_xml_date_time(result, "startDateTime")),
+    );
+    out.insert(
+        "end_date_time".to_string(),
+        option_string_value(extract_xml_date_time(result, "endDateTime")),
+    );
+    out.insert(
+        "creative_sizes".to_string(),
+        Value::String(creative_sizes_from_placeholders(&creative_placeholders).join(",")),
+    );
+    out.insert(
+        "expected_creative_count".to_string(),
+        option_u64_value(
+            creative_placeholders
+                .first()
+                .and_then(|block| extract_xml_tag_text(block, "expectedCreativeCount")),
+        ),
+    );
+    out.insert(
+        "impressions_delivered".to_string(),
+        option_u64_value(extract_xml_tag_text(&stats, "impressionsDelivered")),
+    );
+    out.insert(
+        "clicks_delivered".to_string(),
+        option_u64_value(extract_xml_tag_text(&stats, "clicksDelivered")),
+    );
+    out.insert(
+        "expected_delivery_percentage".to_string(),
+        option_f64_value(extract_xml_tag_text(
+            &delivery_indicator,
+            "expectedDeliveryPercentage",
+        )),
+    );
+    out.insert(
+        "actual_delivery_percentage".to_string(),
+        option_f64_value(extract_xml_tag_text(
+            &delivery_indicator,
+            "actualDeliveryPercentage",
+        )),
+    );
+    out.insert(
+        "primary_goal_type".to_string(),
+        option_string_value(extract_xml_tag_text(&primary_goal, "goalType")),
+    );
+    out.insert(
+        "primary_goal_unit_type".to_string(),
+        option_string_value(extract_xml_tag_text(&primary_goal, "unitType")),
+    );
+    out.insert(
+        "primary_goal_units".to_string(),
+        option_u64_value(extract_xml_tag_text(&primary_goal, "units")),
+    );
+    out.insert(
+        "is_missing_creatives".to_string(),
+        option_bool_value(extract_xml_tag_text(result, "isMissingCreatives")),
+    );
+    out.insert(
+        "is_archived".to_string(),
+        option_bool_value(extract_xml_tag_text(result, "isArchived")),
+    );
+    out.insert(
+        "target_ad_unit_ids_json".to_string(),
+        Value::String(json!(target_ad_unit_ids).to_string()),
+    );
+    out.insert(
+        "custom_targeting_key_ids_json".to_string(),
+        Value::String(json!(custom_targeting_key_ids).to_string()),
+    );
+    out.insert(
+        "custom_targeting_value_ids_json".to_string(),
+        Value::String(json!(custom_targeting_value_ids).to_string()),
+    );
+    out.insert(
+        "upstream_xml".to_string(),
+        Value::String(result.to_string()),
+    );
     out
 }
 
@@ -2722,6 +5158,556 @@ mod tests {
     }
 
     #[test]
+    fn soap_payload_builder_renders_yield_group_query() {
+        let built = build_soap_payload_template(
+            SoapPayloadTemplate::YieldGroupsByStatement,
+            &values(json!({
+                "query": "LIMIT 25"
+            })),
+        )
+        .expect("payload");
+
+        assert_eq!(built["operation"], "get_yield_groups_by_statement");
+        assert_eq!(
+            built["payload_xml"],
+            "<statement>\n  <query>LIMIT 25</query>\n</statement>"
+        );
+        assert_eq!(built["mutation_performed"], false);
+    }
+
+    #[test]
+    fn soap_payload_builder_renders_yield_partners_empty_payload() {
+        let built =
+            build_soap_payload_template(SoapPayloadTemplate::YieldPartners, &values(json!({})))
+                .expect("payload");
+
+        assert_eq!(built["operation"], "get_yield_partners");
+        assert_eq!(built["payload_xml"], "");
+        assert_eq!(built["required_values"], json!([]));
+        assert_eq!(built["mutation_performed"], false);
+        assert_eq!(built["upstream_called"], false);
+    }
+
+    #[test]
+    fn exchange_probe_parses_yield_group_target_matches() {
+        let xml = r#"
+        <getYieldGroupsByStatementResponse>
+          <rval>
+            <totalResultSetSize>1</totalResultSetSize>
+            <results>
+              <yieldGroupId>10</yieldGroupId>
+              <yieldGroupName>Open bidding group</yieldGroupName>
+              <exchangeStatus>ACTIVE</exchangeStatus>
+              <format>DISPLAY</format>
+              <environmentType>WEB</environmentType>
+              <targeting>
+                <inventoryTargeting>
+                  <targetedAdUnits>
+                    <adUnitId>123</adUnitId>
+                  </targetedAdUnits>
+                </inventoryTargeting>
+              </targeting>
+            </results>
+          </rval>
+        </getYieldGroupsByStatementResponse>
+        "#;
+
+        let summary = summarize_yield_groups(
+            xml,
+            false,
+            Some("req".to_string()),
+            None,
+            &probe_targets(&["123"]),
+            false,
+        );
+
+        assert_eq!(summary["decision"], "targeted_exposed");
+        assert_eq!(summary["proof_state"], "complete");
+        assert_eq!(summary["target_ad_unit_matches"][0]["yield_group_id"], "10");
+        assert_eq!(
+            summary["targeted_exposed"][0]["classification"],
+            "targeted_exposed"
+        );
+        assert_eq!(
+            summary["targeted_exposed"][0]["targeting_match"]["match_type"],
+            "exact"
+        );
+    }
+
+    #[test]
+    fn exchange_probe_treats_exact_excluded_yield_group_match_as_protected() {
+        let xml = r#"
+        <getYieldGroupsByStatementResponse>
+          <rval>
+            <totalResultSetSize>1</totalResultSetSize>
+            <results>
+              <yieldGroupId>755382</yieldGroupId>
+              <yieldGroupName>Open bidding group</yieldGroupName>
+              <exchangeStatus>ACTIVE</exchangeStatus>
+              <format>DISPLAY</format>
+              <environmentType>WEB</environmentType>
+              <targeting>
+                <inventoryTargeting>
+                  <targetedAdUnits>
+                    <adUnitId>303152</adUnitId>
+                    <includeDescendants>true</includeDescendants>
+                  </targetedAdUnits>
+                  <excludedAdUnits>
+                    <adUnitId>987654</adUnitId>
+                    <includeDescendants>true</includeDescendants>
+                  </excludedAdUnits>
+                </inventoryTargeting>
+              </targeting>
+            </results>
+          </rval>
+        </getYieldGroupsByStatementResponse>
+        "#;
+
+        let summary = summarize_yield_groups(
+            xml,
+            false,
+            Some("req".to_string()),
+            None,
+            &probe_targets(&["987654"]),
+            false,
+        );
+
+        assert_eq!(summary["decision"], "targeted_and_excluded");
+        assert_eq!(summary["proof_state"], "complete");
+        assert_eq!(summary["targeted_exposed"], json!([]));
+        assert_eq!(
+            summary["targeted_and_excluded"][0]["classification"],
+            "targeted_and_excluded"
+        );
+        assert_eq!(
+            summary["targeted_and_excluded"][0]["exclusion_match"]["match_type"],
+            "exact"
+        );
+        assert_eq!(
+            summary["targeted_and_excluded"][0]["targeting_match"]["match_type"],
+            "broad_descendant_target_unresolved_hierarchy"
+        );
+        assert_eq!(
+            summary["target_ad_unit_matches"][0]["targeted_and_excluded_ad_unit_ids"],
+            json!(["987654"])
+        );
+    }
+
+    #[test]
+    fn exchange_probe_uses_known_ancestor_targeting_and_exact_exclusion() {
+        let xml = r#"
+        <getYieldGroupsByStatementResponse>
+          <rval>
+            <totalResultSetSize>1</totalResultSetSize>
+            <results>
+              <yieldGroupId>755382</yieldGroupId>
+              <yieldGroupName>Open bidding group</yieldGroupName>
+              <exchangeStatus>ACTIVE</exchangeStatus>
+              <targeting>
+                <inventoryTargeting>
+                  <targetedAdUnits>
+                    <adUnitId>303152</adUnitId>
+                    <includeDescendants>true</includeDescendants>
+                  </targetedAdUnits>
+                  <excludedAdUnits>
+                    <adUnitId>987654</adUnitId>
+                    <includeDescendants>false</includeDescendants>
+                  </excludedAdUnits>
+                </inventoryTargeting>
+              </targeting>
+            </results>
+          </rval>
+        </getYieldGroupsByStatementResponse>
+        "#;
+
+        let summary = summarize_yield_groups(
+            xml,
+            false,
+            None,
+            None,
+            &[probe_target_with_ancestors("987654", &["303152"])],
+            false,
+        );
+
+        assert_eq!(summary["decision"], "targeted_and_excluded");
+        assert_eq!(
+            summary["targeted_and_excluded"][0]["targeting_match"]["match_type"],
+            "ancestor_descendant"
+        );
+        assert_eq!(
+            summary["targeted_and_excluded"][0]["exclusion_match"]["include_descendants"],
+            false
+        );
+    }
+
+    #[test]
+    fn exchange_probe_marks_known_ancestor_target_without_exclusion_as_exposed() {
+        let xml = r#"
+        <getYieldGroupsByStatementResponse>
+          <rval>
+            <totalResultSetSize>1</totalResultSetSize>
+            <results>
+              <yieldGroupId>755382</yieldGroupId>
+              <exchangeStatus>ACTIVE</exchangeStatus>
+              <targeting>
+                <inventoryTargeting>
+                  <targetedAdUnits>
+                    <adUnitId>303152</adUnitId>
+                    <includeDescendants>true</includeDescendants>
+                  </targetedAdUnits>
+                </inventoryTargeting>
+              </targeting>
+            </results>
+          </rval>
+        </getYieldGroupsByStatementResponse>
+        "#;
+
+        let summary = summarize_yield_groups(
+            xml,
+            false,
+            None,
+            None,
+            &[probe_target_with_ancestors("987654", &["303152"])],
+            false,
+        );
+
+        assert_eq!(summary["decision"], "targeted_exposed");
+        assert_eq!(
+            summary["targeted_exposed"][0]["targeting_match"]["match_type"],
+            "ancestor_descendant"
+        );
+    }
+
+    #[test]
+    fn yield_group_exclusion_update_adds_descendant_safe_exclusions_and_repairs_self_only_entries()
+    {
+        let update = build_yield_group_exclusion_update(
+            sample_yield_group_xml(),
+            "10",
+            &["200".to_string(), "201".to_string(), "202".to_string()],
+        )
+        .expect("update");
+
+        assert!(update.already_excluded_ad_unit_ids.is_empty());
+        assert_eq!(update.updated_excluded_ad_unit_ids, vec!["200"]);
+        assert_eq!(update.added_excluded_ad_unit_ids, vec!["201", "202"]);
+        assert!(update.payload_xml.contains("<yieldGroups>"));
+        assert!(
+            update
+                .payload_xml
+                .contains("<yieldGroupId>10</yieldGroupId>")
+        );
+        assert!(update.payload_xml.contains(
+            "<targetedAdUnits><adUnitId>100</adUnitId><includeDescendants>true</includeDescendants></targetedAdUnits>"
+        ));
+        assert_eq!(
+            update
+                .payload_xml
+                .matches("<adUnitId>200</adUnitId>")
+                .count(),
+            1
+        );
+        for id in ["200", "201", "202"] {
+            assert!(update.payload_xml.contains(&format!(
+                "<adUnitId>{id}</adUnitId>\n      <includeDescendants>true</includeDescendants>"
+            )));
+        }
+        assert_eq!(
+            update
+                .payload_xml
+                .matches("<includeDescendants>false</includeDescendants>")
+                .count(),
+            0
+        );
+        assert_eq!(
+            update
+                .payload_xml
+                .matches("<includeDescendants>true</includeDescendants>")
+                .count(),
+            4
+        );
+        assert!(
+            update
+                .payload_xml
+                .contains("<targetedPlacementIds>300</targetedPlacementIds>")
+        );
+    }
+
+    #[test]
+    fn yield_group_exclusion_update_is_noop_when_already_excluded() {
+        let xml = sample_yield_group_xml().replace(
+            "<includeDescendants>false</includeDescendants>",
+            "<includeDescendants>true</includeDescendants>",
+        );
+        let update =
+            build_yield_group_exclusion_update(&xml, "10", &["200".to_string()]).expect("update");
+
+        assert_eq!(update.already_excluded_ad_unit_ids, vec!["200"]);
+        assert!(update.added_excluded_ad_unit_ids.is_empty());
+        assert!(update.updated_excluded_ad_unit_ids.is_empty());
+        assert_eq!(
+            update
+                .payload_xml
+                .matches("<adUnitId>200</adUnitId>")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn yield_group_exclusion_update_rejects_direct_target_conflict() {
+        let err = build_yield_group_exclusion_update(
+            sample_yield_group_xml(),
+            "10",
+            &["100".to_string()],
+        )
+        .expect_err("target and exclude conflict should fail");
+
+        assert!(matches!(
+            err,
+            AdManagerError::InvalidInput {
+                field: "excluded_ad_unit_ids",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn yield_group_exclusion_update_blocks_missing_targeting() {
+        let err = build_yield_group_exclusion_update(
+            "<yieldGroupId>10</yieldGroupId><yieldGroupName>Group</yieldGroupName>",
+            "10",
+            &["201".to_string()],
+        )
+        .expect_err("missing targeting should fail closed");
+
+        assert!(matches!(
+            err,
+            AdManagerError::InvalidInput {
+                field: "yield_group_readback",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn yield_group_readback_requires_exact_matching_result() {
+        let xml = r#"
+        <getYieldGroupsByStatementResponse>
+          <rval>
+            <totalResultSetSize>1</totalResultSetSize>
+            <results><yieldGroupId>11</yieldGroupId></results>
+          </rval>
+        </getYieldGroupsByStatementResponse>
+        "#;
+        let err = exact_yield_group_from_readback(xml, "10")
+            .expect_err("missing exact yield group should fail closed");
+
+        assert!(matches!(
+            err,
+            AdManagerError::UpstreamApi { status: 404, .. }
+        ));
+    }
+
+    #[test]
+    fn yield_group_exclusion_identifiers_bind_current_readback() {
+        let request = YieldGroupExclusionRequestArgs {
+            network_code: "1234567".to_string(),
+            yield_group_id: "10".to_string(),
+            excluded_ad_unit_ids: vec!["201".to_string()],
+            api_version: None,
+            include_payload_xml: false,
+            reason: "prevent broad yield eligibility for exact ad unit".to_string(),
+            expected_impact: Some("only broad yield group eligibility changes".to_string()),
+            rollback_note: Some("remove the added excludedAdUnits entry".to_string()),
+            idempotency_key: None,
+        };
+        let draft_a = sample_yield_group_exclusion_draft("hash-a");
+        let draft_b = sample_yield_group_exclusion_draft("hash-b");
+
+        let (_, token_a, _) =
+            guarded_yield_group_exclusion_identifiers(&request, &draft_a).expect("token a");
+        let (_, token_b, _) =
+            guarded_yield_group_exclusion_identifiers(&request, &draft_b).expect("token b");
+
+        assert_ne!(token_a, token_b);
+    }
+
+    #[test]
+    fn yield_group_exclusion_readback_does_not_prove_self_only_exclusions() {
+        let mut draft = sample_yield_group_exclusion_draft("hash-a");
+
+        draft.current_excluded_ad_units = vec![AdUnitTargetingValue {
+            ad_unit_id: "201".to_string(),
+            include_descendants: Some(false),
+        }];
+        assert!(!draft.all_requested_ids_currently_excluded());
+
+        draft.current_excluded_ad_units = vec![AdUnitTargetingValue {
+            ad_unit_id: "201".to_string(),
+            include_descendants: Some(true),
+        }];
+        assert!(draft.all_requested_ids_currently_excluded());
+    }
+
+    #[test]
+    fn yield_group_exclusion_apply_context_requires_operator_impact() {
+        let request = YieldGroupExclusionRequestArgs {
+            network_code: "1234567".to_string(),
+            yield_group_id: "10".to_string(),
+            excluded_ad_unit_ids: vec!["201".to_string()],
+            api_version: None,
+            include_payload_xml: false,
+            reason: "prevent broad yield eligibility for exact ad unit".to_string(),
+            expected_impact: None,
+            rollback_note: Some("remove the added excludedAdUnits entry".to_string()),
+            idempotency_key: None,
+        };
+
+        let err = validate_yield_group_exclusion_apply_context(&request)
+            .expect_err("missing expected impact should fail");
+        assert!(matches!(
+            err,
+            AdManagerError::InvalidInput {
+                field: "expected_impact",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn yield_group_exclusion_rejects_duplicate_requested_ids() {
+        let err = validated_excluded_ad_unit_ids(&["201".to_string(), "201".to_string()])
+            .expect_err("duplicate ids should fail");
+        assert!(matches!(
+            err,
+            AdManagerError::InvalidInput {
+                field: "excluded_ad_unit_ids",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn exchange_probe_marks_truncated_yield_group_response_as_sample_only() {
+        let xml = r#"<rval><totalResultSetSize>10</totalResultSetSize><results><id>1</id></results></rval>"#;
+        let summary =
+            summarize_yield_groups(xml, false, None, None, &probe_targets(&["999"]), false);
+
+        assert_eq!(summary["decision"], "sample_only");
+        assert_eq!(summary["proof_state"], "sample_only");
+    }
+
+    #[test]
+    fn soap_line_item_rows_parse_delivery_fields_for_scratchpad() {
+        let xml = r#"
+        <getLineItemsByStatementResponse>
+          <rval>
+            <totalResultSetSize>1</totalResultSetSize>
+            <results>
+              <orderId>4102710161</orderId>
+              <id>7360951637</id>
+              <name>Celonis Right Skin</name>
+              <orderName>Celonis June/July 2026</orderName>
+              <startDateTime>
+                <date><year>2026</year><month>7</month><day>3</day></date>
+                <hour>20</hour><minute>23</minute><second>0</second>
+                <timeZoneId>Australia/Sydney</timeZoneId>
+              </startDateTime>
+              <endDateTime>
+                <date><year>2026</year><month>7</month><day>23</day></date>
+                <hour>23</hour><minute>59</minute><second>0</second>
+                <timeZoneId>Australia/Sydney</timeZoneId>
+              </endDateTime>
+              <deliveryRateType>EVENLY</deliveryRateType>
+              <roadblockingType>ONE_OR_MORE</roadblockingType>
+              <lineItemType>SPONSORSHIP</lineItemType>
+              <priority>4</priority>
+              <costType>CPD</costType>
+              <creativePlaceholders>
+                <size><width>160</width><height>600</height><isAspectRatio>false</isAspectRatio></size>
+                <expectedCreativeCount>1</expectedCreativeCount>
+              </creativePlaceholders>
+              <stats>
+                <impressionsDelivered>940</impressionsDelivered>
+                <clicksDelivered>1</clicksDelivered>
+              </stats>
+              <deliveryIndicator>
+                <expectedDeliveryPercentage>46.835</expectedDeliveryPercentage>
+                <actualDeliveryPercentage>6.94</actualDeliveryPercentage>
+              </deliveryIndicator>
+              <status>DELIVERING</status>
+              <reservationStatus>RESERVED</reservationStatus>
+              <isArchived>false</isArchived>
+              <isMissingCreatives>false</isMissingCreatives>
+              <primaryGoal>
+                <goalType>DAILY</goalType>
+                <unitType>IMPRESSIONS</unitType>
+                <units>100</units>
+              </primaryGoal>
+              <targeting>
+                <inventoryTargeting>
+                  <targetedAdUnits><adUnitId>182784632</adUnitId><includeDescendants>true</includeDescendants></targetedAdUnits>
+                </inventoryTargeting>
+                <customTargeting>
+                  <children><keyId>20229275</keyId><valueIds>453440212481</valueIds></children>
+                </customTargeting>
+              </targeting>
+            </results>
+          </rval>
+        </getLineItemsByStatementResponse>
+        "#;
+
+        let rows = soap_line_item_rows_for_scratchpad(
+            xml,
+            "1015422",
+            "v202605",
+            Some("request-1"),
+            Some("591"),
+            false,
+        );
+
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert_eq!(row["network_code"], "1015422");
+        assert_eq!(row["api_version"], "v202605");
+        assert_eq!(row["request_id"], "request-1");
+        assert_eq!(row["order_id"], 4102710161_u64);
+        assert_eq!(row["line_item_id"], 7360951637_u64);
+        assert_eq!(row["line_item_name"], "Celonis Right Skin");
+        assert_eq!(row["status"], "DELIVERING");
+        assert_eq!(row["line_item_type"], "SPONSORSHIP");
+        assert_eq!(row["priority"], 4_u64);
+        assert_eq!(row["creative_sizes"], "160x600");
+        assert_eq!(row["impressions_delivered"], 940_u64);
+        assert_eq!(row["clicks_delivered"], 1_u64);
+        assert_eq!(row["primary_goal_units"], 100_u64);
+        assert_eq!(row["is_missing_creatives"], false);
+        assert_eq!(row["target_ad_unit_ids_json"], "[\"182784632\"]");
+        assert_eq!(row["custom_targeting_key_ids_json"], "[\"20229275\"]");
+        assert_eq!(row["custom_targeting_value_ids_json"], "[\"453440212481\"]");
+    }
+
+    #[test]
+    fn bounded_line_item_query_caps_missing_limit_and_rejects_large_limit() {
+        assert_eq!(
+            bounded_line_item_pql_query("WHERE status = 'DELIVERING' ORDER BY id DESC")
+                .expect("bounded"),
+            "WHERE status = 'DELIVERING' ORDER BY id DESC LIMIT 500"
+        );
+        assert_eq!(
+            bounded_line_item_pql_query("LIMIT 25").expect("explicit"),
+            "LIMIT 25"
+        );
+        let err = bounded_line_item_pql_query("WHERE status = 'DELIVERING' LIMIT 5000")
+            .expect_err("large limit should fail");
+        assert!(matches!(
+            err,
+            AdManagerError::InvalidInput { field: "query", .. }
+        ));
+    }
+
+    #[test]
     fn soap_payload_builder_rejects_unsafe_like_fragment() {
         let err = build_soap_payload_template(
             SoapPayloadTemplate::CreativesByAdvertiserName,
@@ -2742,6 +5728,22 @@ mod tests {
     }
 
     #[test]
+    fn soap_payload_builder_rejects_unsafe_yield_group_query() {
+        let err = build_soap_payload_template(
+            SoapPayloadTemplate::YieldGroupsByStatement,
+            &values(json!({
+                "query": "WHERE id = 1; UPDATE LineItem"
+            })),
+        )
+        .expect_err("unsafe query should fail");
+
+        assert!(matches!(
+            err,
+            AdManagerError::InvalidInput { field: "query", .. }
+        ));
+    }
+
+    #[test]
     fn soap_payload_builder_rejects_duplicate_forecast_ids() {
         let err = build_soap_payload_template(
             SoapPayloadTemplate::DeliveryForecastByLineItemIds,
@@ -2758,5 +5760,73 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    fn sample_yield_group_xml() -> &'static str {
+        r#"
+        <yieldGroupId>10</yieldGroupId>
+        <yieldGroupName>Open bidding group</yieldGroupName>
+        <exchangeStatus>ACTIVE</exchangeStatus>
+        <format>BANNER</format>
+        <environmentType>WEB</environmentType>
+        <targeting>
+          <inventoryTargeting>
+            <targetedAdUnits><adUnitId>100</adUnitId><includeDescendants>true</includeDescendants></targetedAdUnits>
+            <excludedAdUnits><adUnitId>200</adUnitId><includeDescendants>false</includeDescendants></excludedAdUnits>
+            <targetedPlacementIds>300</targetedPlacementIds>
+          </inventoryTargeting>
+        </targeting>
+        <adSources><companyId>400</companyId></adSources>
+        "#
+    }
+
+    fn probe_targets(ids: &[&str]) -> Vec<ProbeAdUnitTarget> {
+        ids.iter()
+            .map(|id| ProbeAdUnitTarget::exact((*id).to_string()))
+            .collect()
+    }
+
+    fn probe_target_with_ancestors(id: &str, ancestor_ids: &[&str]) -> ProbeAdUnitTarget {
+        ProbeAdUnitTarget {
+            ad_unit_id: id.to_string(),
+            ancestor_ad_unit_ids: ancestor_ids
+                .iter()
+                .map(|ancestor_id| (*ancestor_id).to_string())
+                .collect(),
+        }
+    }
+
+    fn sample_yield_group_exclusion_draft(current_fingerprint: &str) -> YieldGroupExclusionDraft {
+        YieldGroupExclusionDraft {
+            network_code: "1234567".to_string(),
+            api_version: "v202605".to_string(),
+            yield_group_id: "10".to_string(),
+            yield_group_name: Some("Open bidding group".to_string()),
+            exchange_status: Some("ACTIVE".to_string()),
+            format: Some("BANNER".to_string()),
+            environment_type: Some("WEB".to_string()),
+            total_result_set_size: Some(1),
+            read_request_id: Some("req".to_string()),
+            read_response_time: Some("12".to_string()),
+            read_payload_xml: pql_statement_payload("WHERE id = 10"),
+            current_yield_group_xml: sample_yield_group_xml().to_string(),
+            update_payload_xml: "<yieldGroups />".to_string(),
+            current_yield_group_fingerprint: current_fingerprint.to_string(),
+            update_payload_fingerprint: "update-hash".to_string(),
+            targeted_ad_units: vec![AdUnitTargetingValue {
+                ad_unit_id: "100".to_string(),
+                include_descendants: Some(true),
+            }],
+            current_excluded_ad_units: vec![AdUnitTargetingValue {
+                ad_unit_id: "200".to_string(),
+                include_descendants: Some(false),
+            }],
+            requested_excluded_ad_unit_ids: vec!["201".to_string()],
+            requested_exclusion_include_descendants: true,
+            already_excluded_ad_unit_ids: vec![],
+            added_excluded_ad_unit_ids: vec!["201".to_string()],
+            updated_excluded_ad_unit_ids: vec![],
+            noop: false,
+        }
     }
 }

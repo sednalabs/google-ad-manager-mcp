@@ -86,6 +86,12 @@ The write surface uses a preview/apply contract:
   does not accept the newer Ad Manager read-only scope
 - mutating SOAP calls also require write mode enabled, expected impact, and a
   rollback note
+- `gam_yield_group_exclusions_preview` reads the current yield group and binds
+  the confirmation token to the readback fingerprint, requested ad-unit
+  exclusions, and descendant-safe update payload
+- `gam_yield_group_exclusions_apply` re-reads before apply, calls
+  `updateYieldGroups` only when requested exclusions are missing or not already
+  `includeDescendants=true`, and re-reads after apply before reporting success
 - SOAP payload fragments may not include envelopes, request headers, XML
   declarations, DTD/entity constructs, bearer tokens, refresh tokens, client
   secrets, or private keys
@@ -98,6 +104,11 @@ SOAP apply returns bounded raw XML plus request metadata when Google includes
 it. Operators should follow mutating SOAP calls with a get-by-statement,
 forecast, report, or scratchpad evidence check appropriate to the trafficking
 change.
+
+Yield-group exclusion apply is the exception to the generic SOAP readback gap:
+it performs the matching post-apply yield-group readback itself and fails
+closed when the requested ad-unit IDs are not proven in `excludedAdUnits` with
+`includeDescendants=true`.
 
 ## Scratchpad safety
 

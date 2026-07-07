@@ -38,14 +38,31 @@ pub(crate) fn build_tool_inventory() -> Result<ToolInventory, ToolInventoryError
         cap(
             "gam_network_catalog_list",
             "catalog",
-            "List a curated Google Ad Manager network collection such as ad units, orders, line items, or reports.",
+            "List a curated Google Ad Manager network collection such as ad units, orders, line items, private auctions, private auction deals, or reports.",
             [
                 "google",
                 "ad-manager",
                 "ad-units",
                 "orders",
                 "line-items",
+                "private-auctions",
+                "private-deals",
                 "reports",
+            ],
+        ),
+        cap(
+            "gam_exchange_protection_probe",
+            "catalog",
+            "Read-only proof for exact ad-unit exchange/yield/protection exposure, including AdSense flags, private auctions, private deals, yield groups, and unsupported surfaces.",
+            [
+                "google",
+                "ad-manager",
+                "exchange",
+                "yield",
+                "protection",
+                "private-auctions",
+                "adsense",
+                "ad-units",
             ],
         ),
         cap(
@@ -153,6 +170,37 @@ pub(crate) fn build_tool_inventory() -> Result<ToolInventory, ToolInventoryError
         .with_read_only(false)
         .with_risk_posture(GuardedActionPosture::guarded_apply()),
         cap(
+            "gam_yield_group_exclusions_preview",
+            "trafficking",
+            "Read one YieldGroupService yield group and preview descendant-safe ad-unit exclusions for open-bidding or mediation eligibility.",
+            [
+                "google",
+                "ad-manager",
+                "yield-groups",
+                "exclusions",
+                "open-bidding",
+                "preview",
+                "ad-units",
+            ],
+        )
+        .with_risk_posture(GuardedActionPosture::preview()),
+        cap(
+            "gam_yield_group_exclusions_apply",
+            "trafficking",
+            "Apply a previewed YieldGroupService descendant-safe ad-unit exclusion update after gates and readback proof.",
+            [
+                "google",
+                "ad-manager",
+                "yield-groups",
+                "exclusions",
+                "open-bidding",
+                "apply",
+                "confirmation",
+            ],
+        )
+        .with_read_only(false)
+        .with_risk_posture(GuardedActionPosture::guarded_apply()),
+        cap(
             "gam_scratchpad_open_session",
             "scratchpad",
             "Open or refresh a bounded local DuckDB scratchpad session for Ad Manager evidence work.",
@@ -199,6 +247,20 @@ pub(crate) fn build_tool_inventory() -> Result<ToolInventory, ToolInventoryError
             "scratchpad",
             "Fetch one Ad Manager report-result page and ingest it into a scratchpad table.",
             ["google", "ad-manager", "scratchpad", "ingest", "reports"],
+        ),
+        cap(
+            "gam_scratchpad_ingest_soap_line_items",
+            "scratchpad",
+            "Run a bounded LineItemService SOAP query and ingest parsed delivery rows into a scratchpad table.",
+            [
+                "google",
+                "ad-manager",
+                "scratchpad",
+                "ingest",
+                "soap",
+                "line-items",
+                "delivery",
+            ],
         ),
         cap(
             "gam_scratchpad_export_evidence_bundle",
@@ -264,6 +326,26 @@ mod tests {
     }
 
     #[test]
+    fn inventory_search_finds_scratchpad_line_item_delivery_tool() {
+        let inventory = build_tool_inventory().expect("inventory");
+        let results = inventory.search(
+            &ToolSearchFilter {
+                query: Some("scratchpad line item delivery soap".to_string()),
+                group: Some("scratchpad".to_string()),
+                read_only: Some(true),
+                limit: Some(10),
+            },
+            ToolOperation::List,
+            &ToolInventoryPolicy::strict(),
+        );
+        assert!(
+            results
+                .iter()
+                .any(|result| result.name == "gam_scratchpad_ingest_soap_line_items")
+        );
+    }
+
+    #[test]
     fn inventory_search_finds_write_plan_tool() {
         let inventory = build_tool_inventory().expect("inventory");
         let results = inventory.search(
@@ -300,6 +382,51 @@ mod tests {
             results
                 .iter()
                 .any(|result| result.name == "gam_soap_trafficking_plan")
+        );
+    }
+
+    #[test]
+    fn inventory_search_finds_yield_group_exclusion_tools() {
+        let inventory = build_tool_inventory().expect("inventory");
+        let results = inventory.search(
+            &ToolSearchFilter {
+                query: Some("yield group exclusions open bidding".to_string()),
+                group: Some("trafficking".to_string()),
+                read_only: None,
+                limit: Some(10),
+            },
+            ToolOperation::List,
+            &ToolInventoryPolicy::strict(),
+        );
+        assert!(
+            results
+                .iter()
+                .any(|result| result.name == "gam_yield_group_exclusions_preview")
+        );
+        assert!(
+            results
+                .iter()
+                .any(|result| result.name == "gam_yield_group_exclusions_apply")
+        );
+    }
+
+    #[test]
+    fn inventory_search_finds_exchange_protection_probe() {
+        let inventory = build_tool_inventory().expect("inventory");
+        let results = inventory.search(
+            &ToolSearchFilter {
+                query: Some("exchange yield protection ad units".to_string()),
+                group: Some("catalog".to_string()),
+                read_only: Some(true),
+                limit: Some(10),
+            },
+            ToolOperation::List,
+            &ToolInventoryPolicy::strict(),
+        );
+        assert!(
+            results
+                .iter()
+                .any(|result| result.name == "gam_exchange_protection_probe")
         );
     }
 }
