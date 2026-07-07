@@ -22,8 +22,8 @@ The current alpha focuses on a small useful surface:
   templates without calling upstream;
 - plan and run allowlisted SOAP trafficking operations for orders, line items,
   creatives, line-item creative associations, preview URLs, and forecasts;
-- load catalog/report pages into a bounded local DuckDB scratchpad for
-  read-only analysis and evidence bundles.
+- load catalog/report pages and parsed SOAP line-item delivery readbacks into a
+  bounded local DuckDB scratchpad for read-only analysis and evidence bundles.
 
 The server intentionally does not expose a generic HTTP/SOAP proxy, arbitrary
 query surface, or default live write operations.
@@ -233,6 +233,7 @@ whole credential files in tool responses.
 - `gam_scratchpad_query`
 - `gam_scratchpad_ingest_network_catalog`
 - `gam_scratchpad_ingest_report_result_rows`
+- `gam_scratchpad_ingest_soap_line_items`
 - `gam_scratchpad_export_evidence_bundle`
 
 All tool responses use Contract V1 envelopes:

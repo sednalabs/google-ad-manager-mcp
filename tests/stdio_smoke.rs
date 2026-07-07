@@ -29,6 +29,7 @@ fn stdio_initializes_and_lists_tools() {
         "gam_scratchpad_query",
         "gam_scratchpad_ingest_network_catalog",
         "gam_scratchpad_ingest_report_result_rows",
+        "gam_scratchpad_ingest_soap_line_items",
         "gam_scratchpad_export_evidence_bundle",
     ];
     expected.sort();

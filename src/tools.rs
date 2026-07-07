@@ -386,6 +386,24 @@ pub struct ScratchpadIngestReportRowsArgs {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct ScratchpadIngestSoapLineItemsArgs {
+    /// Scratchpad session identifier.
+    pub session_id: String,
+    /// Scratchpad table name to create or append to.
+    pub table_name: String,
+    /// Raw Ad Manager network code, for example 1234567.
+    pub network_code: String,
+    /// Bounded PQL statement for LineItemService.getLineItemsByStatement.
+    /// Must start with WHERE, ORDER BY, or LIMIT. Queries without LIMIT are capped automatically.
+    pub query: String,
+    /// SOAP API version, for example v202605. Defaults to the current server default.
+    pub api_version: Option<String>,
+    /// Append rows to an existing scratchpad table instead of replacing it.
+    #[serde(default)]
+    pub append: bool,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct ScratchpadEvidenceBundleArgs {
     /// Scratchpad session identifier.
     pub session_id: String,
@@ -1685,6 +1703,114 @@ impl AdManagerServer {
     }
 
     #[tool(
+        name = "gam_scratchpad_ingest_soap_line_items",
+        description = "Run a bounded read-only LineItemService SOAP query and ingest parsed line-item delivery rows into a Google Ad Manager scratchpad table."
+    )]
+    async fn gam_scratchpad_ingest_soap_line_items(
+        &self,
+        Parameters(args): Parameters<ScratchpadIngestSoapLineItemsArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let started = Instant::now();
+        if !scope_allows_write(self.client().scope()) {
+            return Ok(contract::error(
+                AdManagerError::WriteScopeRequired {
+                    scope: self.client().scope().to_string(),
+                },
+                started,
+            ));
+        }
+        let query = match bounded_line_item_pql_query(&args.query) {
+            Ok(query) => query,
+            Err(err) => return Ok(contract::error(err, started)),
+        };
+        let payload_xml = pql_payload(&query);
+        let plan = match self.client().build_soap_trafficking_plan(
+            &args.network_code,
+            args.api_version.as_deref(),
+            SoapTraffickingOperation::GetLineItemsByStatement,
+            &payload_xml,
+        ) {
+            Ok(plan) => plan,
+            Err(err) => return Ok(contract::error(err, started)),
+        };
+        let applied = match self.client().execute_soap_trafficking_plan(&plan).await {
+            Ok(value) => value,
+            Err(err) => return Ok(contract::error(err, started)),
+        };
+        if applied.upstream_status >= 400 || applied.soap_fault.is_some() {
+            return Ok(contract::error_with_detail(
+                AdManagerError::UpstreamApi {
+                    status: applied.upstream_status,
+                    message: crate::client::soap_error_message(&applied),
+                },
+                json!({
+                    "upstream_status": applied.upstream_status,
+                    "request_id": applied.request_id,
+                    "response_time": applied.response_time,
+                    "soap_fault": applied.soap_fault,
+                    "response_truncated": applied.response_truncated,
+                }),
+                started,
+            ));
+        }
+
+        let columns = soap_line_items_ingest_columns();
+        let rows = soap_line_item_rows_for_scratchpad(
+            &applied.upstream_response_xml,
+            &args.network_code,
+            plan.api_version.as_str(),
+            applied.request_id.as_deref(),
+            applied.response_time.as_deref(),
+            applied.response_truncated,
+        );
+        let ingest_mode = if args.append {
+            ScratchpadIngestMode::Append
+        } else {
+            ScratchpadIngestMode::Create
+        };
+        let total_result_set_size =
+            extract_xml_tag_text(&applied.upstream_response_xml, "totalResultSetSize")
+                .and_then(|value| value.parse::<u64>().ok());
+        let columns_response = scratchpad_ingest_columns_to_json(columns.clone());
+        let row_count = rows.len();
+        let sessions = self.scratchpad_sessions().clone();
+        let session_id = args.session_id.clone();
+        let table_name = args.table_name.clone();
+        match run_scratchpad_blocking(move || {
+            sessions.ingest_rows_with_mode(&session_id, &table_name, &columns, &rows, ingest_mode)
+        })
+        .await
+        {
+            Ok(stats) => Ok(contract::success(
+                json!({
+                    "session_id": args.session_id,
+                    "table_name": args.table_name,
+                    "mode": ingest_mode_label(ingest_mode),
+                    "rows_inserted": stats.rows_inserted,
+                    "columns_inserted": stats.columns_inserted,
+                    "columns": columns_response,
+                    "session": scratchpad_snapshot_to_json(stats.session_snapshot),
+                    "upstream_summary": {
+                        "network_code": args.network_code,
+                        "api_version": plan.api_version,
+                        "operation": "get_line_items_by_statement",
+                        "query": args.query,
+                        "effective_query": query,
+                        "row_count": row_count,
+                        "total_result_set_size": total_result_set_size,
+                        "sample_only": total_result_set_size.map(|total| total > row_count as u64).unwrap_or(applied.response_truncated),
+                        "response_truncated": applied.response_truncated,
+                        "request_id": applied.request_id,
+                        "response_time": applied.response_time,
+                    },
+                }),
+                started,
+            )),
+            Err(err) => Ok(contract::scratchpad_error(err, started)),
+        }
+    }
+
+    #[tool(
         name = "gam_scratchpad_export_evidence_bundle",
         description = "Export a bounded markdown evidence bundle from Google Ad Manager scratchpad tables."
     )]
@@ -2187,6 +2313,10 @@ fn extract_xml_blocks(value: &str, tag: &str) -> Vec<String> {
     extract_xml_elements(value, tag, true)
 }
 
+fn extract_xml_first_block(value: &str, tag: &str) -> Option<String> {
+    extract_xml_blocks(value, tag).into_iter().next()
+}
+
 fn extract_xml_tag_texts(value: &str, tag: &str) -> Vec<String> {
     extract_xml_elements(value, tag, false)
 }
@@ -2230,6 +2360,74 @@ fn extract_xml_elements(value: &str, tag: &str, include_outer: bool) -> Vec<Stri
         }
     }
     out
+}
+
+fn extract_xml_date_time(value: &str, tag: &str) -> Option<String> {
+    let block = extract_xml_first_block(value, tag)?;
+    let date_block = extract_xml_first_block(&block, "date")?;
+    let year = extract_xml_tag_text(&date_block, "year")?
+        .parse::<u32>()
+        .ok()?;
+    let month = extract_xml_tag_text(&date_block, "month")?
+        .parse::<u32>()
+        .ok()?;
+    let day = extract_xml_tag_text(&date_block, "day")?
+        .parse::<u32>()
+        .ok()?;
+    let hour = extract_xml_tag_text(&block, "hour")
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or(0);
+    let minute = extract_xml_tag_text(&block, "minute")
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or(0);
+    let second = extract_xml_tag_text(&block, "second")
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or(0);
+    let time_zone = extract_xml_tag_text(&block, "timeZoneId").unwrap_or_default();
+    Some(format!(
+        "{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02} {time_zone}"
+    ))
+}
+
+fn creative_sizes_from_placeholders(blocks: &[String]) -> Vec<String> {
+    blocks
+        .iter()
+        .filter_map(|block| {
+            let size = extract_xml_first_block(block, "size")?;
+            let width = extract_xml_tag_text(&size, "width")?;
+            let height = extract_xml_tag_text(&size, "height")?;
+            Some(format!("{width}x{height}"))
+        })
+        .collect()
+}
+
+fn option_string_value(value: Option<String>) -> Value {
+    value.map(Value::String).unwrap_or(Value::Null)
+}
+
+fn option_u64_value(value: Option<String>) -> Value {
+    value
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(Value::from)
+        .unwrap_or(Value::Null)
+}
+
+fn option_f64_value(value: Option<String>) -> Value {
+    value
+        .and_then(|value| value.parse::<f64>().ok())
+        .map(Value::from)
+        .unwrap_or(Value::Null)
+}
+
+fn option_bool_value(value: Option<String>) -> Value {
+    value
+        .and_then(|value| match value.trim().to_ascii_lowercase().as_str() {
+            "true" => Some(true),
+            "false" => Some(false),
+            _ => None,
+        })
+        .map(Value::from)
+        .unwrap_or(Value::Null)
 }
 
 fn build_write_plan(
@@ -2586,6 +2784,10 @@ fn required_safe_pql_query(
             "must be a bounded PQL statement string",
         ));
     };
+    validate_safe_pql_query_text(field, text)
+}
+
+fn validate_safe_pql_query_text(field: &'static str, text: &str) -> Result<String, AdManagerError> {
     let trimmed = text.trim();
     if trimmed.is_empty() || trimmed.len() > 240 {
         return Err(AdManagerError::invalid(
@@ -2613,6 +2815,46 @@ fn required_safe_pql_query(
         ));
     }
     Ok(trimmed.to_string())
+}
+
+fn bounded_line_item_pql_query(query: &str) -> Result<String, AdManagerError> {
+    let mut bounded = validate_safe_pql_query_text("query", query)?;
+    let limit = pql_limit_value(&bounded);
+    match limit {
+        Some(1..=1_000) => {}
+        Some(_) => {
+            return Err(AdManagerError::invalid(
+                "query",
+                "LIMIT must be between 1 and 1000 for scratchpad line-item ingests",
+            ));
+        }
+        None => {
+            if bounded.len() > 230 {
+                return Err(AdManagerError::invalid(
+                    "query",
+                    "query is too long to append the automatic LIMIT 500 cap",
+                ));
+            }
+            bounded.push_str(" LIMIT 500");
+        }
+    }
+    Ok(bounded)
+}
+
+fn pql_limit_value(query: &str) -> Option<u64> {
+    let upper = query.to_ascii_uppercase();
+    let limit_index = upper.rfind("LIMIT")?;
+    let before = upper[..limit_index].chars().next_back();
+    let after = upper[limit_index + "LIMIT".len()..].chars().next();
+    if before.is_some_and(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+        || after.is_some_and(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+    {
+        return None;
+    }
+    query[limit_index + "LIMIT".len()..]
+        .split_whitespace()
+        .next()
+        .and_then(|value| value.parse::<u64>().ok())
 }
 
 fn escape_pql_single_quoted_like_fragment(input: &str) -> String {
@@ -3032,6 +3274,51 @@ fn report_rows_ingest_columns() -> Vec<ScratchpadIngestColumn> {
     .collect()
 }
 
+fn soap_line_items_ingest_columns() -> Vec<ScratchpadIngestColumn> {
+    [
+        ("network_code", "string"),
+        ("api_version", "string"),
+        ("row_index", "integer"),
+        ("request_id", "string"),
+        ("response_time", "string"),
+        ("response_truncated", "boolean"),
+        ("order_id", "integer"),
+        ("order_name", "string"),
+        ("line_item_id", "integer"),
+        ("line_item_name", "string"),
+        ("status", "string"),
+        ("reservation_status", "string"),
+        ("line_item_type", "string"),
+        ("priority", "integer"),
+        ("cost_type", "string"),
+        ("delivery_rate_type", "string"),
+        ("roadblocking_type", "string"),
+        ("start_date_time", "string"),
+        ("end_date_time", "string"),
+        ("creative_sizes", "string"),
+        ("expected_creative_count", "integer"),
+        ("impressions_delivered", "integer"),
+        ("clicks_delivered", "integer"),
+        ("expected_delivery_percentage", "double"),
+        ("actual_delivery_percentage", "double"),
+        ("primary_goal_type", "string"),
+        ("primary_goal_unit_type", "string"),
+        ("primary_goal_units", "integer"),
+        ("is_missing_creatives", "boolean"),
+        ("is_archived", "boolean"),
+        ("target_ad_unit_ids_json", "string"),
+        ("custom_targeting_key_ids_json", "string"),
+        ("custom_targeting_value_ids_json", "string"),
+        ("upstream_xml", "string"),
+    ]
+    .into_iter()
+    .map(|(name, logical_type)| ScratchpadIngestColumn {
+        name: name.to_string(),
+        logical_type: logical_type.to_string(),
+    })
+    .collect()
+}
+
 fn network_catalog_rows_for_scratchpad(
     upstream: &Value,
     collection: CatalogCollection,
@@ -3084,6 +3371,196 @@ fn network_catalog_row_for_scratchpad(
         row.get("status").cloned().unwrap_or(Value::Null),
     );
     out.insert("upstream_json".to_string(), Value::String(row.to_string()));
+    out
+}
+
+fn soap_line_item_rows_for_scratchpad(
+    xml: &str,
+    network_code: &str,
+    api_version: &str,
+    request_id: Option<&str>,
+    response_time: Option<&str>,
+    response_truncated: bool,
+) -> Vec<Map<String, Value>> {
+    extract_xml_blocks(xml, "results")
+        .into_iter()
+        .enumerate()
+        .map(|(index, result)| {
+            soap_line_item_row_for_scratchpad(
+                &result,
+                index,
+                network_code,
+                api_version,
+                request_id,
+                response_time,
+                response_truncated,
+            )
+        })
+        .collect()
+}
+
+fn soap_line_item_row_for_scratchpad(
+    result: &str,
+    index: usize,
+    network_code: &str,
+    api_version: &str,
+    request_id: Option<&str>,
+    response_time: Option<&str>,
+    response_truncated: bool,
+) -> Map<String, Value> {
+    let primary_goal = extract_xml_first_block(result, "primaryGoal").unwrap_or_default();
+    let delivery_indicator =
+        extract_xml_first_block(result, "deliveryIndicator").unwrap_or_default();
+    let stats = extract_xml_first_block(result, "stats").unwrap_or_default();
+    let creative_placeholders = extract_xml_blocks(result, "creativePlaceholders");
+    let target_ad_unit_ids = extract_xml_tag_texts(result, "adUnitId");
+    let custom_targeting_key_ids = extract_xml_tag_texts(result, "keyId");
+    let custom_targeting_value_ids = extract_xml_tag_texts(result, "valueIds");
+
+    let mut out = Map::new();
+    out.insert(
+        "network_code".to_string(),
+        Value::String(network_code.to_string()),
+    );
+    out.insert(
+        "api_version".to_string(),
+        Value::String(api_version.to_string()),
+    );
+    out.insert("row_index".to_string(), json!(index));
+    out.insert(
+        "request_id".to_string(),
+        option_string_value(request_id.map(str::to_string)),
+    );
+    out.insert(
+        "response_time".to_string(),
+        option_string_value(response_time.map(str::to_string)),
+    );
+    out.insert(
+        "response_truncated".to_string(),
+        Value::Bool(response_truncated),
+    );
+    out.insert(
+        "order_id".to_string(),
+        option_u64_value(extract_xml_tag_text(result, "orderId")),
+    );
+    out.insert(
+        "order_name".to_string(),
+        option_string_value(extract_xml_tag_text(result, "orderName")),
+    );
+    out.insert(
+        "line_item_id".to_string(),
+        option_u64_value(extract_xml_tag_text(result, "id")),
+    );
+    out.insert(
+        "line_item_name".to_string(),
+        option_string_value(extract_xml_tag_text(result, "name")),
+    );
+    out.insert(
+        "status".to_string(),
+        option_string_value(extract_xml_tag_text(result, "status")),
+    );
+    out.insert(
+        "reservation_status".to_string(),
+        option_string_value(extract_xml_tag_text(result, "reservationStatus")),
+    );
+    out.insert(
+        "line_item_type".to_string(),
+        option_string_value(extract_xml_tag_text(result, "lineItemType")),
+    );
+    out.insert(
+        "priority".to_string(),
+        option_u64_value(extract_xml_tag_text(result, "priority")),
+    );
+    out.insert(
+        "cost_type".to_string(),
+        option_string_value(extract_xml_tag_text(result, "costType")),
+    );
+    out.insert(
+        "delivery_rate_type".to_string(),
+        option_string_value(extract_xml_tag_text(result, "deliveryRateType")),
+    );
+    out.insert(
+        "roadblocking_type".to_string(),
+        option_string_value(extract_xml_tag_text(result, "roadblockingType")),
+    );
+    out.insert(
+        "start_date_time".to_string(),
+        option_string_value(extract_xml_date_time(result, "startDateTime")),
+    );
+    out.insert(
+        "end_date_time".to_string(),
+        option_string_value(extract_xml_date_time(result, "endDateTime")),
+    );
+    out.insert(
+        "creative_sizes".to_string(),
+        Value::String(creative_sizes_from_placeholders(&creative_placeholders).join(",")),
+    );
+    out.insert(
+        "expected_creative_count".to_string(),
+        option_u64_value(
+            creative_placeholders
+                .first()
+                .and_then(|block| extract_xml_tag_text(block, "expectedCreativeCount")),
+        ),
+    );
+    out.insert(
+        "impressions_delivered".to_string(),
+        option_u64_value(extract_xml_tag_text(&stats, "impressionsDelivered")),
+    );
+    out.insert(
+        "clicks_delivered".to_string(),
+        option_u64_value(extract_xml_tag_text(&stats, "clicksDelivered")),
+    );
+    out.insert(
+        "expected_delivery_percentage".to_string(),
+        option_f64_value(extract_xml_tag_text(
+            &delivery_indicator,
+            "expectedDeliveryPercentage",
+        )),
+    );
+    out.insert(
+        "actual_delivery_percentage".to_string(),
+        option_f64_value(extract_xml_tag_text(
+            &delivery_indicator,
+            "actualDeliveryPercentage",
+        )),
+    );
+    out.insert(
+        "primary_goal_type".to_string(),
+        option_string_value(extract_xml_tag_text(&primary_goal, "goalType")),
+    );
+    out.insert(
+        "primary_goal_unit_type".to_string(),
+        option_string_value(extract_xml_tag_text(&primary_goal, "unitType")),
+    );
+    out.insert(
+        "primary_goal_units".to_string(),
+        option_u64_value(extract_xml_tag_text(&primary_goal, "units")),
+    );
+    out.insert(
+        "is_missing_creatives".to_string(),
+        option_bool_value(extract_xml_tag_text(result, "isMissingCreatives")),
+    );
+    out.insert(
+        "is_archived".to_string(),
+        option_bool_value(extract_xml_tag_text(result, "isArchived")),
+    );
+    out.insert(
+        "target_ad_unit_ids_json".to_string(),
+        Value::String(json!(target_ad_unit_ids).to_string()),
+    );
+    out.insert(
+        "custom_targeting_key_ids_json".to_string(),
+        Value::String(json!(custom_targeting_key_ids).to_string()),
+    );
+    out.insert(
+        "custom_targeting_value_ids_json".to_string(),
+        Value::String(json!(custom_targeting_value_ids).to_string()),
+    );
+    out.insert(
+        "upstream_xml".to_string(),
+        Value::String(result.to_string()),
+    );
     out
 }
 
@@ -3533,6 +4010,115 @@ mod tests {
 
         assert_eq!(summary["decision"], "sample_only");
         assert_eq!(summary["proof_state"], "sample_only");
+    }
+
+    #[test]
+    fn soap_line_item_rows_parse_delivery_fields_for_scratchpad() {
+        let xml = r#"
+        <getLineItemsByStatementResponse>
+          <rval>
+            <totalResultSetSize>1</totalResultSetSize>
+            <results>
+              <orderId>4102710161</orderId>
+              <id>7360951637</id>
+              <name>Celonis Right Skin</name>
+              <orderName>Celonis June/July 2026</orderName>
+              <startDateTime>
+                <date><year>2026</year><month>7</month><day>3</day></date>
+                <hour>20</hour><minute>23</minute><second>0</second>
+                <timeZoneId>Australia/Sydney</timeZoneId>
+              </startDateTime>
+              <endDateTime>
+                <date><year>2026</year><month>7</month><day>23</day></date>
+                <hour>23</hour><minute>59</minute><second>0</second>
+                <timeZoneId>Australia/Sydney</timeZoneId>
+              </endDateTime>
+              <deliveryRateType>EVENLY</deliveryRateType>
+              <roadblockingType>ONE_OR_MORE</roadblockingType>
+              <lineItemType>SPONSORSHIP</lineItemType>
+              <priority>4</priority>
+              <costType>CPD</costType>
+              <creativePlaceholders>
+                <size><width>160</width><height>600</height><isAspectRatio>false</isAspectRatio></size>
+                <expectedCreativeCount>1</expectedCreativeCount>
+              </creativePlaceholders>
+              <stats>
+                <impressionsDelivered>940</impressionsDelivered>
+                <clicksDelivered>1</clicksDelivered>
+              </stats>
+              <deliveryIndicator>
+                <expectedDeliveryPercentage>46.835</expectedDeliveryPercentage>
+                <actualDeliveryPercentage>6.94</actualDeliveryPercentage>
+              </deliveryIndicator>
+              <status>DELIVERING</status>
+              <reservationStatus>RESERVED</reservationStatus>
+              <isArchived>false</isArchived>
+              <isMissingCreatives>false</isMissingCreatives>
+              <primaryGoal>
+                <goalType>DAILY</goalType>
+                <unitType>IMPRESSIONS</unitType>
+                <units>100</units>
+              </primaryGoal>
+              <targeting>
+                <inventoryTargeting>
+                  <targetedAdUnits><adUnitId>182784632</adUnitId><includeDescendants>true</includeDescendants></targetedAdUnits>
+                </inventoryTargeting>
+                <customTargeting>
+                  <children><keyId>20229275</keyId><valueIds>453440212481</valueIds></children>
+                </customTargeting>
+              </targeting>
+            </results>
+          </rval>
+        </getLineItemsByStatementResponse>
+        "#;
+
+        let rows = soap_line_item_rows_for_scratchpad(
+            xml,
+            "1015422",
+            "v202605",
+            Some("request-1"),
+            Some("591"),
+            false,
+        );
+
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert_eq!(row["network_code"], "1015422");
+        assert_eq!(row["api_version"], "v202605");
+        assert_eq!(row["request_id"], "request-1");
+        assert_eq!(row["order_id"], 4102710161_u64);
+        assert_eq!(row["line_item_id"], 7360951637_u64);
+        assert_eq!(row["line_item_name"], "Celonis Right Skin");
+        assert_eq!(row["status"], "DELIVERING");
+        assert_eq!(row["line_item_type"], "SPONSORSHIP");
+        assert_eq!(row["priority"], 4_u64);
+        assert_eq!(row["creative_sizes"], "160x600");
+        assert_eq!(row["impressions_delivered"], 940_u64);
+        assert_eq!(row["clicks_delivered"], 1_u64);
+        assert_eq!(row["primary_goal_units"], 100_u64);
+        assert_eq!(row["is_missing_creatives"], false);
+        assert_eq!(row["target_ad_unit_ids_json"], "[\"182784632\"]");
+        assert_eq!(row["custom_targeting_key_ids_json"], "[\"20229275\"]");
+        assert_eq!(row["custom_targeting_value_ids_json"], "[\"453440212481\"]");
+    }
+
+    #[test]
+    fn bounded_line_item_query_caps_missing_limit_and_rejects_large_limit() {
+        assert_eq!(
+            bounded_line_item_pql_query("WHERE status = 'DELIVERING' ORDER BY id DESC")
+                .expect("bounded"),
+            "WHERE status = 'DELIVERING' ORDER BY id DESC LIMIT 500"
+        );
+        assert_eq!(
+            bounded_line_item_pql_query("LIMIT 25").expect("explicit"),
+            "LIMIT 25"
+        );
+        let err = bounded_line_item_pql_query("WHERE status = 'DELIVERING' LIMIT 5000")
+            .expect_err("large limit should fail");
+        assert!(matches!(
+            err,
+            AdManagerError::InvalidInput { field: "query", .. }
+        ));
     }
 
     #[test]

@@ -106,7 +106,8 @@ The initial first-class tool set is:
 19. `gam_scratchpad_query`
 20. `gam_scratchpad_ingest_network_catalog`
 21. `gam_scratchpad_ingest_report_result_rows`
-22. `gam_scratchpad_export_evidence_bundle`
+22. `gam_scratchpad_ingest_soap_line_items`
+23. `gam_scratchpad_export_evidence_bundle`
 
 `find_tools` is also exposed for deferred-loading and `tool_search` clients.
 
@@ -178,9 +179,10 @@ exposing tokens.
 ## Scratchpad Boundary
 
 Scratchpad support is provided by `mcp-toolkit-scratchpad`, not by local
-server-specific DuckDB lifecycle code. The Ad Manager MCP only maps upstream
-catalog/report rows into stable scratchpad columns and keeps the full upstream
-row as `upstream_json` so beta API field drift does not destroy evidence.
+server-specific DuckDB lifecycle code. The Ad Manager MCP maps upstream
+catalog/report rows and parsed SOAP line-item delivery readbacks into stable
+scratchpad columns, while keeping the full upstream row or result XML for
+private local evidence so API field drift does not destroy evidence.
 
 The scratchpad tools are analysis and evidence helpers. They do not mutate
 Google Ad Manager and do not broaden the upstream API surface.

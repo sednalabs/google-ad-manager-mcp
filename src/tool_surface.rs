@@ -218,6 +218,20 @@ pub(crate) fn build_tool_inventory() -> Result<ToolInventory, ToolInventoryError
             ["google", "ad-manager", "scratchpad", "ingest", "reports"],
         ),
         cap(
+            "gam_scratchpad_ingest_soap_line_items",
+            "scratchpad",
+            "Run a bounded LineItemService SOAP query and ingest parsed delivery rows into a scratchpad table.",
+            [
+                "google",
+                "ad-manager",
+                "scratchpad",
+                "ingest",
+                "soap",
+                "line-items",
+                "delivery",
+            ],
+        ),
+        cap(
             "gam_scratchpad_export_evidence_bundle",
             "scratchpad",
             "Export a bounded markdown evidence bundle from Ad Manager scratchpad tables.",
@@ -277,6 +291,26 @@ mod tests {
             results
                 .iter()
                 .any(|result| result.name == "gam_scratchpad_export_evidence_bundle")
+        );
+    }
+
+    #[test]
+    fn inventory_search_finds_scratchpad_line_item_delivery_tool() {
+        let inventory = build_tool_inventory().expect("inventory");
+        let results = inventory.search(
+            &ToolSearchFilter {
+                query: Some("scratchpad line item delivery soap".to_string()),
+                group: Some("scratchpad".to_string()),
+                read_only: Some(true),
+                limit: Some(10),
+            },
+            ToolOperation::List,
+            &ToolInventoryPolicy::strict(),
+        );
+        assert!(
+            results
+                .iter()
+                .any(|result| result.name == "gam_scratchpad_ingest_soap_line_items")
         );
     }
 

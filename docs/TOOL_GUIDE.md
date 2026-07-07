@@ -30,6 +30,7 @@ All tools return Contract V1 envelopes: `ok/data/meta` on success and
 | `gam_scratchpad_query` | Run guarded read-only DuckDB SQL against a scratchpad session. |
 | `gam_scratchpad_ingest_network_catalog` | Fetch one network catalog page and ingest it into a scratchpad table. |
 | `gam_scratchpad_ingest_report_result_rows` | Fetch one report-result page and ingest it into a scratchpad table. |
+| `gam_scratchpad_ingest_soap_line_items` | Run a bounded read-only SOAP line-item query and ingest parsed delivery rows into a scratchpad table. |
 | `gam_scratchpad_export_evidence_bundle` | Export bounded markdown evidence from scratchpad tables. |
 
 ## `gam_network_catalog_list`
@@ -291,9 +292,19 @@ Typical flow:
 2. `gam_scratchpad_ingest_network_catalog` for ad units, orders, line items, or
    reports.
 3. `gam_scratchpad_ingest_report_result_rows` for completed report result pages.
-4. `gam_scratchpad_query` with read-only SQL.
-5. `gam_scratchpad_export_evidence_bundle` for a bounded markdown summary.
-6. `gam_scratchpad_close_session` when finished.
+4. `gam_scratchpad_ingest_soap_line_items` for current delivery/status rows
+   from `LineItemService.getLineItemsByStatement`.
+5. `gam_scratchpad_query` with read-only SQL.
+6. `gam_scratchpad_export_evidence_bundle` for a bounded markdown summary.
+7. `gam_scratchpad_close_session` when finished.
+
+`gam_scratchpad_ingest_soap_line_items` accepts a bounded line-item PQL query.
+Queries must start with `WHERE`, `ORDER BY`, or `LIMIT`; the tool appends
+`LIMIT 500` when a query has no explicit limit and rejects limits above 1000.
+The ingested rows include line item/order ids and names, status, type, priority,
+creative sizes, impressions, clicks, delivery percentages, goals, missing
+creative/archive flags, targeted ad-unit ids, custom-targeting ids, and the
+bounded upstream XML for private local evidence.
 
 Example query:
 

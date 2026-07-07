@@ -794,6 +794,50 @@
       "name": "gam_scratchpad_ingest_report_result_rows"
     },
     {
+      "description": "Run a bounded read-only LineItemService SOAP query and ingest parsed line-item delivery rows into a Google Ad Manager scratchpad table.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "api_version": {
+            "description": "SOAP API version, for example v202605. Defaults to the current server default.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "append": {
+            "default": false,
+            "description": "Append rows to an existing scratchpad table instead of replacing it.",
+            "type": "boolean"
+          },
+          "network_code": {
+            "description": "Raw Ad Manager network code, for example 1234567.",
+            "type": "string"
+          },
+          "query": {
+            "description": "Bounded PQL statement for LineItemService.getLineItemsByStatement.\nMust start with WHERE, ORDER BY, or LIMIT. Queries without LIMIT are capped automatically.",
+            "type": "string"
+          },
+          "session_id": {
+            "description": "Scratchpad session identifier.",
+            "type": "string"
+          },
+          "table_name": {
+            "description": "Scratchpad table name to create or append to.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "table_name",
+          "network_code",
+          "query"
+        ],
+        "type": "object"
+      },
+      "name": "gam_scratchpad_ingest_soap_line_items"
+    },
+    {
       "description": "List active Google Ad Manager scratchpad sessions.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
