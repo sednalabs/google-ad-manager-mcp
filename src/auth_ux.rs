@@ -255,7 +255,7 @@ async fn build_report(settings: &Settings, verify: bool) -> AuthReport {
         }
     };
 
-    let config_issue = credential_status.config_issue.or_else(|| {
+    let config_issue = credential_status.config_issue.clone().or_else(|| {
         credential_source
             .as_ref()
             .err()
@@ -698,23 +698,18 @@ fn service_account_json_env_status(raw_json: &str) -> CredentialSourceStatus {
 
 fn google_application_credentials_status(path: PathBuf) -> CredentialSourceStatus {
     match google_authorized_user_adc_metadata_from_file(&path) {
-        Ok(Some(metadata)) => {
-            let usable = metadata.client_id_present()
-                && metadata.client_secret_present()
-                && metadata.refresh_token_present();
+        Ok(Some(_metadata)) => {
             return CredentialSourceStatus {
-                config_valid: usable,
-                config_issue: (!usable).then(|| {
-                    format!(
-                        "GOOGLE_APPLICATION_CREDENTIALS authorized-user ADC is missing one or more required fields at {}",
-                        path.display()
-                    )
-                }),
+                config_valid: false,
+                config_issue: Some(format!(
+                    "GOOGLE_APPLICATION_CREDENTIALS points to an authorized-user ADC file at {}; google-ad-manager-mcp only supports service-account credentials on GOOGLE_APPLICATION_CREDENTIALS",
+                    path.display()
+                )),
                 credential_material_detected: true,
-                repair_step: (!usable).then(|| {
-                    "Repair the authorized-user ADC file pointed to by `GOOGLE_APPLICATION_CREDENTIALS`, or unset it to use another credential source."
+                repair_step: Some(
+                    "Unset `GOOGLE_APPLICATION_CREDENTIALS` and use `google-ad-manager-mcp auth login` for user credentials, or point `GOOGLE_APPLICATION_CREDENTIALS` at a valid service-account JSON file."
                         .to_string()
-                }),
+                ),
                 adc_file: None,
             };
         }
@@ -948,11 +943,14 @@ struct CredentialSourceStatus {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::path::Path;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{
-        auth_command_shared_adc, gcloud_adc_login_command, shell_join,
-        shell_join_with_cloudsdk_config,
+        auth_command_shared_adc, gcloud_adc_login_command,
+        google_application_credentials_status, shell_join, shell_join_with_cloudsdk_config,
     };
     use crate::Settings;
 
@@ -1001,5 +999,50 @@ mod tests {
         assert!(auth_command_shared_adc(&settings, true));
         assert!(auth_command_shared_adc(&Settings::default(), true));
         assert!(!auth_command_shared_adc(&Settings::default(), false));
+    }
+
+    #[test]
+    fn google_application_credentials_rejects_authorized_user_adc_files() {
+        let path = unique_test_file("google-application-credentials-authorized-user", "json");
+        fs::create_dir_all(path.parent().expect("test file parent")).expect("create test dir");
+        fs::write(
+            &path,
+            r#"{
+  "type": "authorized_user",
+  "client_id": "client-id",
+  "client_secret": "client-secret",
+  "refresh_token": "refresh-token"
+}"#,
+        )
+        .expect("write authorized-user adc");
+
+        let status = google_application_credentials_status(path.clone());
+
+        assert!(!status.config_valid);
+        assert!(status.credential_material_detected);
+        assert!(
+            status
+                .config_issue
+                .as_deref()
+                .is_some_and(|issue| issue.contains("authorized-user ADC"))
+        );
+        assert!(
+            status
+                .repair_step
+                .as_deref()
+                .is_some_and(|step| step.contains("auth login"))
+        );
+
+        let _ = fs::remove_file(path);
+    }
+
+    fn unique_test_file(label: &str, extension: &str) -> PathBuf {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos();
+        PathBuf::from("target")
+            .join("google-ad-manager-mcp-auth-ux-tests")
+            .join(format!("{label}-{suffix}.{extension}"))
     }
 }
