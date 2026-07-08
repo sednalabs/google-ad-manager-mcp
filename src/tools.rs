@@ -5201,7 +5201,6 @@ fn credential_material_detected(settings: &crate::Settings) -> bool {
     std::env::var_os("GOOGLE_APPLICATION_CREDENTIALS").is_some()
         || settings.service_account_json_path.is_some()
         || settings.service_account_json.is_some()
-        || selected_adc_credentials_path(settings.shared_adc).is_some_and(|path| path.is_file())
 }
 
 async fn gcloud_version() -> Option<String> {
