@@ -453,12 +453,11 @@ fn selected_adc_file_status(shared_adc: bool) -> Option<AdcFileStatus> {
             path,
         });
     }
-    server_adc_credentials_path()
-        .map(|path| AdcFileStatus {
-            kind: "server-specific",
-            role: "preferred",
-            path,
-        })
+    server_adc_credentials_path().map(|path| AdcFileStatus {
+        kind: "server-specific",
+        role: "preferred",
+        path,
+    })
 }
 
 fn mentions_quota_project(error: &str) -> bool {

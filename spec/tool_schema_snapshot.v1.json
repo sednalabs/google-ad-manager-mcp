@@ -101,6 +101,11 @@
             "default": false,
             "description": "When true, make a live low-cost Ad Manager API call to prove access.",
             "type": "boolean"
+          },
+          "verify_token": {
+            "default": false,
+            "description": "When true, request an OAuth access token to prove credentials without calling Ad Manager APIs.",
+            "type": "boolean"
           }
         },
         "type": "object"

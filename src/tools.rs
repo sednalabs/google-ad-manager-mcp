@@ -597,28 +597,28 @@ impl AdManagerServer {
         let verify_token = args.verify_token || args.verify_access;
         let verify_access = args.verify_access;
         let gcloud = gcloud_version().await;
-        let token_check = if verify_token {
-            match self.client().verify_token().await {
-                Ok(()) => serde_json::to_value(ProviderAuthCheckStatus::ok())
-                    .unwrap_or_else(|_| json!({ "checked": true, "ok": true })),
-                Err(err) => serde_json::to_value(ProviderAuthCheckStatus::failed(
-                    contract::redact_secret_text(&err.to_string()),
+        let token_check =
+            if verify_token {
+                match self.client().verify_token().await {
+                    Ok(()) => serde_json::to_value(ProviderAuthCheckStatus::ok())
+                        .unwrap_or_else(|_| json!({ "checked": true, "ok": true })),
+                    Err(err) => serde_json::to_value(ProviderAuthCheckStatus::failed(
+                        contract::redact_secret_text(&err.to_string()),
+                    ))
+                    .unwrap_or_else(|_| {
+                        json!({
+                            "checked": true,
+                            "ok": false,
+                            "error": contract::redact_secret_text(&err.to_string())
+                        })
+                    }),
+                }
+            } else {
+                serde_json::to_value(ProviderAuthCheckStatus::skipped().with_reason(
+                    "set verify_token=true or verify_access=true to prove credentials",
                 ))
-                .unwrap_or_else(|_| {
-                    json!({
-                        "checked": true,
-                        "ok": false,
-                        "error": contract::redact_secret_text(&err.to_string())
-                    })
-                }),
-            }
-        } else {
-            serde_json::to_value(
-                ProviderAuthCheckStatus::skipped()
-                    .with_reason("set verify_token=true or verify_access=true to prove credentials"),
-            )
-            .unwrap_or_else(|_| json!({ "checked": false }))
-        };
+                .unwrap_or_else(|_| json!({ "checked": false }))
+            };
         let access_check = if verify_access {
             match self.client().list_networks(Some(1), None).await {
                 Ok(payload) => {
@@ -760,17 +760,17 @@ impl AdManagerServer {
         );
         let mut payload = serde_json::to_value(contract).unwrap_or_else(|_| json!({}));
         if let Some(object) = payload.as_object_mut() {
-            object.insert("manage_scope".to_string(), json!(requested_scope == MANAGE_SCOPE));
+            object.insert(
+                "manage_scope".to_string(),
+                json!(requested_scope == MANAGE_SCOPE),
+            );
             let setup_next_steps = object
                 .get("next_steps")
                 .cloned()
                 .unwrap_or_else(|| json!([]));
             object.insert("setup_next_steps".to_string(), setup_next_steps);
         }
-        Ok(contract::success(
-            payload,
-            started,
-        ))
+        Ok(contract::success(payload, started))
     }
 
     #[tool(
