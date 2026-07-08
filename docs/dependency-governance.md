@@ -39,7 +39,11 @@ considered, and how you would roll the change back.
 `mcp-toolkit-auth` is a direct dependency because this server delegates Google
 ADC command construction, shell rendering, setup-plan generation, and common
 Google auth error classification to the shared toolkit instead of maintaining
-provider-specific copies.
+provider-specific copies. The MCP auth helper uses
+`GoogleProviderAuthConfig::adc_login_command_contract()` for the shared
+`gam_auth_login_command` shape, while `gam_auth_status` uses
+`ProviderAuthCheckStatus` and `ProviderQuotaProjectStatus` for token/access
+checks and ADC/runtime quota-project diagnostics.
 
 The toolkit auth stack currently brings in OAuth/browser-login dependencies
 including `reqwest` 0.13 and the platform-verifier WebPKI root bundle. The

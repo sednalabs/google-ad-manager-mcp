@@ -9,8 +9,8 @@ All tools return Contract V1 envelopes: `ok/data/meta` on success and
 | --- | --- |
 | `find_tools` | Search tool metadata for deferred-loading or `tool_search` clients. |
 | `gam_get_started` | Return the recommended first-run flow and supported credential sources. |
-| `gam_auth_status` | Inspect configured auth inputs and optionally prove live Ad Manager access. |
-| `gam_auth_login_command` | Build a copyable ADC login command without running it. |
+| `gam_auth_status` | Inspect configured auth inputs and optionally prove token and live Ad Manager access. |
+| `gam_auth_login_command` | Build an ADC login helper without running it. |
 | `gam_networks_list` | List Ad Manager networks visible to the authenticated principal. |
 | `gam_network_catalog_list` | List one curated network collection: `ad_units`, `orders`, `line_items`, `private_auctions`, `private_auction_deals`, or `reports`. |
 | `gam_exchange_protection_probe` | Read-only proof for exact ad-unit exchange/yield/protection exposure, with explicit partial-proof states. |
@@ -34,6 +34,25 @@ All tools return Contract V1 envelopes: `ok/data/meta` on success and
 | `gam_scratchpad_ingest_report_result_rows` | Fetch one report-result page and ingest it into a scratchpad table. |
 | `gam_scratchpad_ingest_soap_line_items` | Run a bounded read-only SOAP line-item query and ingest parsed delivery rows into a scratchpad table. |
 | `gam_scratchpad_export_evidence_bundle` | Export bounded markdown evidence from scratchpad tables. |
+
+## Setup Tools
+
+Use `gam_auth_status` to inspect auth configuration. Set `verify_token=true` when you want to prove
+token acquisition, and set `verify_access=true` when you also want the low-cost Ad Manager
+`networks.list` access probe. The response separates `token_check`, `access_check`,
+`operator_scope_check`, `adc_quota_project`, and `runtime_quota_project`; the tool never returns
+the token. `adc_quota_project` is read from the selected ADC file, while
+`runtime_quota_project` reflects the optional server runtime quota-project header setting.
+
+Use `gam_auth_login_command` for an Application Default Credentials login helper. The `command`
+field is argv, `shell_command` is the copyable shell string, and both target a Google
+Ad-Manager-specific gcloud config directory by default so sibling Google MCPs keep their own tokens
+and scopes. The response also includes the shared Google MCP headless, client-id-file,
+quota-project, API-enable, selected ADC path, scope, `shared_adc`, `next_steps`, `notes`, and
+`after_login` fields. Set `shared_adc=true` only when you intentionally want the conventional
+shared gcloud ADC file; set `GOOGLE_AD_MANAGER_MCP_SHARED_ADC=true` or start the server with
+`--shared-adc` when the runtime should use that shared file. Set `manage_scope=true` only when
+preparing to run operator apply tools.
 
 ## `gam_network_catalog_list`
 

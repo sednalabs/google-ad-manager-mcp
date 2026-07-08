@@ -72,16 +72,15 @@ The server exposes setup tools that do not return secrets:
 
 For local use, the easiest path is:
 
-```bash
-google-ad-manager-mcp auth login --headless --quota-project <PROJECT_ID>
+```text
+gam_auth_login_command { "quota_project": "<PROJECT_ID>" }
 ```
 
-The helper uses Google Application Default Credentials in a
-Google-Ad-Manager-specific gcloud config directory, requests the required
-`cloud-platform` ADC scope plus the read-only Ad Manager scope, sets the ADC
-quota project when provided, and verifies access with `networks.list`. Keeping
-a server-specific ADC file prevents a login for another Google MCP from
-replacing this server's refresh token or scope grant.
+Run the returned `shell_command`. The helper uses Google Application Default
+Credentials in a Google-Ad-Manager-specific gcloud config directory and
+requests the required `cloud-platform` ADC scope plus the read-only Ad Manager
+scope. Keeping a server-specific ADC file prevents a login for another Google
+MCP from replacing this server's refresh token or scope grant.
 
 You can inspect or script auth without starting an MCP session:
 
@@ -94,8 +93,15 @@ google-ad-manager-mcp auth doctor --verify-token --json
 Then restart any stdio MCP client that keeps a long-lived child process and call:
 
 ```text
-gam_auth_status { "verify_access": true }
+gam_auth_status { "verify_token": true, "verify_access": true }
 ```
+
+The status response separates `token_check`, `access_check`,
+`operator_scope_check`, `adc_quota_project`, and `runtime_quota_project`.
+For Ad Manager, `verify_access=true` uses the low-cost `networks.list` probe.
+`adc_quota_project` describes the selected ADC file metadata; `runtime_quota_project`
+describes the optional `GOOGLE_AD_MANAGER_MCP_QUOTA_PROJECT` header setting
+that the server will send upstream.
 
 After auth is proven:
 
@@ -144,8 +150,8 @@ Supported credential sources:
 
 - Server-specific Application Default Credentials from
   `google-ad-manager-mcp auth login`
-- Conventional shared Application Default Credentials from
-  `gcloud auth application-default login`
+- Conventional shared Application Default Credentials only when explicitly
+  enabled with `GOOGLE_AD_MANAGER_MCP_SHARED_ADC=true` or `--shared-adc`
 - Standard Google credential file via `GOOGLE_APPLICATION_CREDENTIALS`
 - Server-specific service account file via
   `GOOGLE_AD_MANAGER_MCP_SERVICE_ACCOUNT_JSON_PATH`
@@ -153,8 +159,12 @@ Supported credential sources:
   `GOOGLE_AD_MANAGER_MCP_SERVICE_ACCOUNT_JSON`
 
 For local user ADC, the runtime prefers the server-specific credential file and
-falls back to conventional shared ADC only when that file has not been created
-yet. Use `google-ad-manager-mcp auth login` for the low-friction isolated path.
+uses conventional shared ADC only when explicitly requested. Use
+`google-ad-manager-mcp auth login` or `gam_auth_login_command` for the
+low-friction isolated path. `gam_auth_login_command` returns the shared Google
+MCP auth helper shape: argv and shell commands, headless variants,
+client-id-file fallback, quota-project and API-enable commands, selected ADC
+paths, scope, `shared_adc`, `next_steps`, `notes`, and `after_login`.
 
 If you already have a service account for the Google Ad Manager SOAP API, the
 official Ad Manager Beta docs say you can reuse it after enabling the Ad
@@ -172,8 +182,11 @@ CLOUDSDK_CONFIG="$HOME/.config/google-ad-manager-mcp/gcloud" \
   gcloud auth application-default set-quota-project <PROJECT_ID>
 ```
 
-Use `google-ad-manager-mcp auth login --shared-adc` only when you deliberately
-want the conventional shared gcloud ADC file for this OS user.
+Use `google-ad-manager-mcp auth login --shared-adc` or
+`gam_auth_login_command { "shared_adc": true }` only when you deliberately want
+the conventional shared gcloud ADC file for this OS user. To make the running
+server use that shared ADC file, also set `GOOGLE_AD_MANAGER_MCP_SHARED_ADC=true`
+or start the binary with `--shared-adc`.
 
 For operator write testing, replace the Ad Manager scope with:
 
@@ -199,6 +212,7 @@ whole credential files in tool responses.
 | --- | --- | --- |
 | `GOOGLE_AD_MANAGER_MCP_SCOPE` | `https://www.googleapis.com/auth/admanager.readonly` | OAuth scope requested from Google credentials |
 | `GOOGLE_AD_MANAGER_MCP_QUOTA_PROJECT` | unset | Optional `x-goog-user-project` header |
+| `GOOGLE_AD_MANAGER_MCP_SHARED_ADC` | `false` | Use conventional shared gcloud ADC instead of the server-specific ADC file |
 | `GOOGLE_AD_MANAGER_MCP_SERVICE_ACCOUNT_JSON_PATH` | unset | Server-specific service-account credential path |
 | `GOOGLE_AD_MANAGER_MCP_SERVICE_ACCOUNT_JSON` | unset | Server-specific raw service-account JSON |
 | `GOOGLE_AD_MANAGER_MCP_HTTP_TIMEOUT_MS` | `15000` | Upstream request timeout |

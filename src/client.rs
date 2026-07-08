@@ -653,6 +653,10 @@ impl AdManagerClient {
         self.quota_project.is_some()
     }
 
+    pub fn quota_project_hint(&self) -> Option<&str> {
+        self.quota_project.as_deref()
+    }
+
     pub async fn verify_token(&self) -> Result<(), AdManagerError> {
         self.access_token().await.map(|_| ())
     }
@@ -1232,7 +1236,7 @@ fn select_auth_mode(settings: &Settings) -> Result<UpstreamAuthMode, AdManagerEr
         return Ok(UpstreamAuthMode::ServiceAccountJsonPath(path.to_string()));
     }
 
-    if std::env::var_os("GOOGLE_APPLICATION_CREDENTIALS").is_some() {
+    if std::env::var_os("GOOGLE_APPLICATION_CREDENTIALS").is_some() || settings.shared_adc {
         return Ok(UpstreamAuthMode::Adc);
     }
 

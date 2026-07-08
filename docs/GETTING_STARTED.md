@@ -40,6 +40,13 @@ google-ad-manager-mcp auth status --verify-token
 google-ad-manager-mcp auth doctor --verify-token --json
 ```
 
+Inside MCP, `gam_auth_login_command` returns the same Google auth helper shape
+used by sibling Google MCPs. Use the returned `shell_command` for the primary
+copy/paste command, or the argv `command` field for execution. The response
+also includes headless variants, client-id-file fallback commands,
+quota-project and API-enable commands, selected ADC paths, scope,
+`shared_adc`, `next_steps`, `notes`, and `after_login`.
+
 If you prefer raw `gcloud`, set `CLOUDSDK_CONFIG` to the server-specific config
 directory and use both scopes:
 
@@ -110,7 +117,10 @@ google-ad-manager-mcp --print-tool-schema > spec/tool_schema_snapshot.v1.json
 
 ## 4. First MCP calls
 
-1. `gam_auth_status` with `verify_access=true`
+1. `gam_auth_status` with `verify_token=true` and `verify_access=true`; confirm
+   `token_check.ok`, `access_check.ok`, `operator_scope_check`, `adc_quota_project`,
+   and `runtime_quota_project` match the intended credential and quota-project
+   setup
 2. `gam_networks_list`
 3. `gam_network_catalog_list`
 4. `gam_exchange_protection_probe` when you need exchange/yield/protection
@@ -180,6 +190,8 @@ Check these in order:
 
 The server sends `x-goog-user-project` only when
 `GOOGLE_AD_MANAGER_MCP_QUOTA_PROJECT` is set in the MCP server environment.
-`gcloud auth application-default set-quota-project` is still part of the easy
-ADC login path for Google tooling. The auth helper applies it to the
-server-specific ADC file by default.
+`runtime_quota_project` reports that runtime setting. `gcloud auth
+application-default set-quota-project` is still part of the easy ADC login path
+for Google tooling, and `adc_quota_project` reports that selected ADC metadata.
+The auth helper applies the ADC quota-project command to the server-specific
+ADC file by default.

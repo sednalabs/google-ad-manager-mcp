@@ -13,8 +13,7 @@ use tokio::process::Command;
 
 use crate::config::{
     AuthCommandArgs, AuthDoctorArgs, AuthLoginArgs, AuthStatusCliArgs, AuthSubcommand, Settings,
-    adc_credentials_path, conventional_adc_credentials_path, server_adc_credentials_path,
-    server_cloudsdk_config_dir,
+    conventional_adc_credentials_path, server_adc_credentials_path, server_cloudsdk_config_dir,
 };
 use crate::contract::redact_secret_text;
 use crate::{AdManagerClient, AuthSource, MANAGE_SCOPE};
@@ -189,7 +188,7 @@ async fn run_doctor(settings: &Settings, args: &AuthDoctorArgs) -> Result<()> {
 
 async fn build_report(settings: &Settings, verify: bool) -> AuthReport {
     let client = AdManagerClient::from_settings(settings);
-    let adc_file = selected_adc_file_status();
+    let adc_file = selected_adc_file_status(settings.shared_adc);
     let quota_project = effective_quota_project(settings);
     let verification = if verify {
         match client.list_networks(Some(1), None).await {
@@ -446,20 +445,19 @@ pub(crate) fn shell_join_with_cloudsdk_config(
     }
 }
 
-fn selected_adc_file_status() -> Option<AdcFileStatus> {
-    server_adc_credentials_path()
-        .map(|path| AdcFileStatus {
-            kind: "server-specific",
-            role: "preferred",
+fn selected_adc_file_status(shared_adc: bool) -> Option<AdcFileStatus> {
+    if shared_adc {
+        return conventional_adc_credentials_path().map(|path| AdcFileStatus {
+            kind: "shared",
+            role: "explicit",
             path,
-        })
-        .or_else(|| {
-            adc_credentials_path().map(|path| AdcFileStatus {
-                kind: "shared",
-                role: "fallback",
-                path,
-            })
-        })
+        });
+    }
+    server_adc_credentials_path().map(|path| AdcFileStatus {
+        kind: "server-specific",
+        role: "preferred",
+        path,
+    })
 }
 
 fn mentions_quota_project(error: &str) -> bool {
