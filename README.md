@@ -99,6 +99,9 @@ gam_auth_status { "verify_token": true, "verify_access": true }
 The status response separates `token_check`, `access_check`,
 `operator_scope_check`, `adc_quota_project`, and `runtime_quota_project`.
 For Ad Manager, `verify_access=true` uses the low-cost `networks.list` probe.
+`adc_quota_project` describes the selected ADC file metadata; `runtime_quota_project`
+describes the optional `GOOGLE_AD_MANAGER_MCP_QUOTA_PROJECT` header setting
+that the server will send upstream.
 
 After auth is proven:
 
@@ -158,7 +161,10 @@ Supported credential sources:
 For local user ADC, the runtime prefers the server-specific credential file and
 uses conventional shared ADC only when explicitly requested. Use
 `google-ad-manager-mcp auth login` or `gam_auth_login_command` for the
-low-friction isolated path.
+low-friction isolated path. `gam_auth_login_command` returns the shared Google
+MCP auth helper shape: argv and shell commands, headless variants,
+client-id-file fallback, quota-project and API-enable commands, selected ADC
+paths, scope, `shared_adc`, `next_steps`, `notes`, and `after_login`.
 
 If you already have a service account for the Google Ad Manager SOAP API, the
 official Ad Manager Beta docs say you can reuse it after enabling the Ad

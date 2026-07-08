@@ -186,6 +186,23 @@ uses `networks.list` with a small page size, which proves token minting, API
 enablement, quota-project behavior, and Ad Manager network visibility without
 exposing tokens.
 
+The MCP `gam_auth_login_command` tool uses the shared
+`mcp-toolkit-auth` Google auth contract. It returns argv and shell command
+fields for the selected login mode, headless variants, OAuth client-id-file
+fallback commands, ADC quota-project and API enablement commands, selected ADC
+paths, scope, `shared_adc`, `next_steps`, `notes`, and `after_login`. The
+service keeps Ad Manager-specific values local: read-only versus manage scope,
+the server-specific Cloud SDK directory, the Ad Manager API service name, and
+the `networks.list` access probe.
+
+The MCP `gam_auth_status` tool reports the shared status fields
+`token_check`, `access_check`, `operator_scope_check`, `adc_quota_project`, and
+`runtime_quota_project`. `adc_quota_project` is selected ADC-file metadata;
+`runtime_quota_project` is the server runtime configuration used for upstream
+quota-project headers. Conventional shared ADC is used only when the operator
+sets `shared_adc=true` in the helper request or `GOOGLE_AD_MANAGER_MCP_SHARED_ADC=true`
+or `--shared-adc` for the runtime.
+
 ## Scratchpad Boundary
 
 Scratchpad support is provided by `mcp-toolkit-scratchpad`, not by local

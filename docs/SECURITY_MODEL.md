@@ -20,13 +20,13 @@ service account inputs:
 - `GOOGLE_AD_MANAGER_MCP_SERVICE_ACCOUNT_JSON_PATH`
 - `GOOGLE_AD_MANAGER_MCP_SERVICE_ACCOUNT_JSON`
 - server-specific local ADC from `google-ad-manager-mcp auth login`
-- conventional shared local ADC from `gcloud auth application-default login`
+- conventional shared local ADC only when explicitly enabled with
+  `GOOGLE_AD_MANAGER_MCP_SHARED_ADC=true` or `--shared-adc`
 
 The local login helper uses a Google-Ad-Manager-specific gcloud config
 directory by default. This keeps its refresh token and scopes separate from
 other Google MCP servers that may run under the same OS user. Conventional
-shared local ADC remains a compatibility fallback when the server-specific ADC
-file has not been created yet.
+shared local ADC is an explicit operator choice, not an implicit fallback.
 
 Tool responses may report whether a credential source looks configured or
 whether a low-cost access check succeeded. They must not return:
@@ -37,6 +37,13 @@ whether a low-cost access check succeeded. They must not return:
 - client secrets
 - private keys
 - whole credential files
+
+`gam_auth_status` reports the shared Google MCP status keys
+`token_check`, `access_check`, `operator_scope_check`, `adc_quota_project`, and
+`runtime_quota_project`. The ADC quota project is metadata from the selected
+ADC file; the runtime quota project is the server's own upstream header
+configuration. Reporting either value must not include tokens, refresh tokens,
+client secrets, private keys, or raw credential JSON.
 
 ## Tool-surface restrictions
 
