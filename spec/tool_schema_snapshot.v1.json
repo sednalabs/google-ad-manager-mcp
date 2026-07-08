@@ -93,7 +93,7 @@
       "name": "gam_auth_login_command"
     },
     {
-      "description": "Inspect configured Google Ad Manager credential inputs and optionally verify live upstream access without returning secrets.",
+      "description": "Inspect configured Google Ad Manager credential inputs and optionally verify token acquisition and live upstream access without returning secrets.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -104,7 +104,7 @@
           },
           "verify_token": {
             "default": false,
-            "description": "When true, request an OAuth access token to prove credentials without calling Ad Manager APIs.",
+            "description": "When true, acquire a Google access token to prove credentials work. The token is never returned.",
             "type": "boolean"
           }
         },
