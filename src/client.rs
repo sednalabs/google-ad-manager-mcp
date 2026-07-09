@@ -48,10 +48,12 @@ impl AuthSource {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum CatalogCollection {
     AdUnits,
     Orders,
     LineItems,
+    Placements,
     PrivateAuctionDeals,
     PrivateAuctions,
     Reports,
@@ -63,6 +65,7 @@ impl CatalogCollection {
             Self::AdUnits => "ad_units",
             Self::Orders => "orders",
             Self::LineItems => "line_items",
+            Self::Placements => "placements",
             Self::PrivateAuctionDeals => "private_auction_deals",
             Self::PrivateAuctions => "private_auctions",
             Self::Reports => "reports",
@@ -74,6 +77,7 @@ impl CatalogCollection {
             Self::AdUnits => "adUnits",
             Self::Orders => "orders",
             Self::LineItems => "lineItems",
+            Self::Placements => "placements",
             Self::PrivateAuctionDeals => "privateAuctionDeals",
             Self::PrivateAuctions => "privateAuctions",
             Self::Reports => "reports",
@@ -1721,6 +1725,8 @@ mod tests {
     fn collection_names_are_curated() {
         assert_eq!(CatalogCollection::AdUnits.as_str(), "ad_units");
         assert_eq!(CatalogCollection::LineItems.as_str(), "line_items");
+        assert_eq!(CatalogCollection::Placements.as_str(), "placements");
+        assert_eq!(CatalogCollection::Placements.response_field(), "placements");
         assert_eq!(
             CatalogCollection::PrivateAuctions.as_str(),
             "private_auctions"

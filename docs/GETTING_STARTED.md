@@ -115,6 +115,8 @@ google-ad-manager-mcp --print-tool-schema > spec/tool_schema_snapshot.v1.json
 3. `gam_network_catalog_list`
 4. `gam_exchange_protection_probe` when you need exchange/yield/protection
    proof for exact ad units
+5. `gam_ad_unit_dependency_probe` when you need placement and line-item
+   dependency proof before cleanup or retargeting work
 
 For reports:
 

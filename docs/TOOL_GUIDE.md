@@ -12,8 +12,9 @@ All tools return Contract V1 envelopes: `ok/data/meta` on success and
 | `gam_auth_status` | Inspect configured auth inputs and optionally prove live Ad Manager access. |
 | `gam_auth_login_command` | Build a copyable ADC login command without running it. |
 | `gam_networks_list` | List Ad Manager networks visible to the authenticated principal. |
-| `gam_network_catalog_list` | List one curated network collection: `ad_units`, `orders`, `line_items`, `private_auctions`, `private_auction_deals`, or `reports`. |
+| `gam_network_catalog_list` | List one curated network collection: `ad_units`, `orders`, `line_items`, `placements`, `private_auctions`, `private_auction_deals`, or `reports`. |
 | `gam_exchange_protection_probe` | Read-only proof for exact ad-unit exchange/yield/protection exposure, with explicit partial-proof states. |
+| `gam_ad_unit_dependency_probe` | Read-only proof for exact ad-unit dependencies across placements and SOAP line-item inventory targeting. |
 | `gam_report_run` | Run a saved Ad Manager report, optionally wait, and optionally fetch the first result page. |
 | `gam_report_result_rows` | Fetch rows from a completed report result resource. |
 | `gam_trafficking_tool_matrix` | Describe REST-supported writes, SOAP trafficking operations, and remaining ergonomics gaps. |
@@ -43,6 +44,7 @@ All tools return Contract V1 envelopes: `ok/data/meta` on success and
 - `ad_units`
 - `orders`
 - `line_items`
+- `placements`
 - `private_auctions`
 - `private_auction_deals`
 - `reports`
@@ -90,6 +92,33 @@ surface. Its top-level decision returns one of:
 unsupported or unintegrated surfaces unless a future API/read implementation
 adds authoritative coverage. Do not interpret their absence from the probe as
 proof that those settings are clean in the GAM UI.
+
+## `gam_ad_unit_dependency_probe`
+
+`gam_ad_unit_dependency_probe` is a read-only helper for ad-unit cleanup,
+archive, and retargeting investigations. It accepts:
+
+- `network_code`
+- exact `ad_unit_codes` and/or numeric `ad_unit_ids`
+- optional SOAP `api_version`
+- optional `line_item_page_size`, `max_line_items`, and `placement_page_size`
+- optional `include_line_item_xml` for bounded matched line-item XML
+
+The tool resolves exact ad-unit rows through REST, scans placement membership
+through the curated `placements` collection, then scans bounded pages of SOAP
+`LineItemService.getLineItemsByStatement`. It reports dependency classes such
+as `exact_target`, `ancestor_descendant_target`, `placement_target`,
+`root_or_network_target`, and the corresponding excluded states.
+
+Placement and line-item dependencies are returned as counts plus bounded
+samples. When `include_line_item_xml=true`, matched XML is still capped and
+marked with byte and truncation metadata.
+
+The response uses `dependency_decision` plus `proof_flags`, not a cleanup
+approval. Any capped line-item read, truncated SOAP response, id-only target,
+unknown placement membership shape, or blocked SOAP scope remains incomplete
+evidence. Do not archive, deactivate, or retarget inventory solely because this
+tool returns `no_dependencies_observed` or `incomplete_no_dependencies_observed`.
 
 ## `gam_report_run`
 

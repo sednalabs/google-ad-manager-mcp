@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Instant;
 
 use mcp_toolkit::rmcp::handler::server::wrapper::Parameters;
@@ -34,6 +34,11 @@ use mcp_toolkit_core::tool_inventory::{ToolOperation, ToolSearchFilter, ToolSear
 const AD_MANAGER_PROVIDER_API_NAME: &str = "Google Ad Manager API";
 const AD_MANAGER_PROVIDER_API_SERVICE: &str = "admanager.googleapis.com";
 const YIELD_GROUP_EXCLUSION_INCLUDE_DESCENDANTS: bool = true;
+const DEPENDENCY_PLACEMENT_MATCH_SAMPLE_LIMIT: usize = 50;
+const DEPENDENCY_PLACEMENT_MEMBER_SAMPLE_LIMIT: usize = 50;
+const DEPENDENCY_TARGET_PLACEMENT_ID_LIMIT: usize = 200;
+const DEPENDENCY_LINE_ITEM_MATCH_SAMPLE_LIMIT: usize = 50;
+const DEPENDENCY_LINE_ITEM_XML_SAMPLE_BYTES: usize = 4096;
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct GetStartedArgs {}
@@ -108,6 +113,29 @@ pub struct ExchangeProtectionProbeArgs {
     /// Include bounded raw SOAP response XML in the yield-group summary. Defaults to false.
     #[serde(default)]
     pub include_raw: bool,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct AdUnitDependencyProbeArgs {
+    /// Raw Ad Manager network code, for example 1234567.
+    pub network_code: String,
+    /// Exact ad-unit codes to resolve through the REST adUnits collection.
+    #[serde(default)]
+    pub ad_unit_codes: Vec<String>,
+    /// Exact numeric ad-unit ids to include even when a code row is unavailable.
+    #[serde(default)]
+    pub ad_unit_ids: Vec<String>,
+    /// SOAP API version for LineItemService reads. Defaults to the current server default.
+    pub api_version: Option<String>,
+    /// Number of LineItemService rows to fetch per SOAP page. Defaults to 500, max 1000.
+    pub line_item_page_size: Option<u32>,
+    /// Maximum LineItemService rows to inspect before reporting a capped proof. Defaults to 1000, max 5000.
+    pub max_line_items: Option<u32>,
+    /// Number of placement rows to inspect from REST. Defaults to 500, max 1000.
+    pub placement_page_size: Option<u32>,
+    /// Include bounded raw line-item XML snippets for matched line items. Defaults to false.
+    #[serde(default)]
+    pub include_line_item_xml: bool,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -515,8 +543,9 @@ impl AdManagerServer {
                     "Restart any stdio MCP client that keeps a long-lived child process.",
                     "Call gam_auth_status with verify_access=true.",
                     "Call gam_networks_list to discover the exact network code.",
-                    "Call gam_network_catalog_list for ad_units, orders, line_items, private_auctions, private_auction_deals, or reports.",
+                    "Call gam_network_catalog_list for ad_units, orders, line_items, placements, private_auctions, private_auction_deals, or reports.",
                     "Call gam_exchange_protection_probe when you need explicit partial-proof states for Exchange, private auction, private deal, or yield-group exposure.",
+                    "Call gam_ad_unit_dependency_probe before ad-unit cleanup, archive, or retargeting work so placement and line-item dependencies are explicit.",
                     "Call gam_report_run for saved reports and gam_report_result_rows for large paginated results.",
                     "Call gam_trafficking_tool_matrix before planning writes so the REST and SOAP trafficking surfaces are explicit.",
                     "Use gam_rest_write_plan for dry-run write plans; gam_rest_write_apply only works when the server is explicitly started with GOOGLE_AD_MANAGER_MCP_WRITE_MODE=enabled and the manage scope.",
@@ -557,6 +586,7 @@ impl AdManagerServer {
                     "gam_networks_list",
                     "gam_network_catalog_list",
                     "gam_exchange_protection_probe",
+                    "gam_ad_unit_dependency_probe",
                     "gam_trafficking_tool_matrix",
                     "gam_rest_write_plan",
                     "gam_soap_trafficking_plan",
@@ -760,7 +790,7 @@ impl AdManagerServer {
 
     #[tool(
         name = "gam_network_catalog_list",
-        description = "List a curated Google Ad Manager network collection such as ad units, orders, line items, private auctions, private auction deals, or reports."
+        description = "List a curated Google Ad Manager network collection such as ad units, orders, line items, placements, private auctions, private auction deals, or reports."
     )]
     async fn gam_network_catalog_list(
         &self,
@@ -998,6 +1028,166 @@ impl AdManagerServer {
                 "page_size": page_size,
                 "soap_default_api_version": DEFAULT_SOAP_API_VERSION,
                 "required_yield_group_scope": MANAGE_SCOPE,
+                "policy": provider_safety_contract_json(),
+            }),
+            started,
+        ))
+    }
+
+    #[tool(
+        name = "gam_ad_unit_dependency_probe",
+        description = "Read-only dependency proof for exact Ad Manager ad units across placements and SOAP line-item inventory targeting."
+    )]
+    async fn gam_ad_unit_dependency_probe(
+        &self,
+        Parameters(args): Parameters<AdUnitDependencyProbeArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let started = Instant::now();
+        let ad_unit_codes = match validate_optional_probe_ad_unit_codes(&args.ad_unit_codes) {
+            Ok(codes) => codes,
+            Err(err) => return Ok(contract::error(err, started)),
+        };
+        let ad_unit_ids = match validate_probe_ad_unit_ids(&args.ad_unit_ids) {
+            Ok(ids) => ids,
+            Err(err) => return Ok(contract::error(err, started)),
+        };
+        if ad_unit_codes.len() + ad_unit_ids.len() > 50 {
+            return Ok(contract::error(
+                AdManagerError::invalid(
+                    "ad_unit_codes",
+                    "must include at most 50 combined ad-unit codes and ids",
+                ),
+                started,
+            ));
+        }
+        if ad_unit_codes.is_empty() && ad_unit_ids.is_empty() {
+            return Ok(contract::error(
+                AdManagerError::invalid(
+                    "ad_unit_codes",
+                    "must include at least one exact ad-unit code or ad-unit id",
+                ),
+                started,
+            ));
+        }
+
+        let line_item_page_size = args.line_item_page_size.unwrap_or(500).clamp(1, 1_000);
+        let max_line_items = args.max_line_items.unwrap_or(1_000).clamp(1, 5_000);
+        let placement_page_size = args.placement_page_size.unwrap_or(500).clamp(1, 1_000);
+
+        let mut target_rows = Vec::new();
+        let mut targets_by_id: BTreeMap<String, DependencyProbeTarget> = BTreeMap::new();
+        let mut target_resolution_issues = Vec::new();
+
+        for code in &ad_unit_codes {
+            let payload = match self
+                .client()
+                .list_network_catalog(
+                    &args.network_code,
+                    CatalogCollection::AdUnits,
+                    Some(10),
+                    None,
+                    Some(format!("adUnitCode = \"{code}\"")),
+                    None,
+                )
+                .await
+            {
+                Ok(value) => value,
+                Err(err) => return Ok(contract::error(err, started)),
+            };
+            let summary = summarize_dependency_ad_unit_code(code, &payload);
+            if summary
+                .get("proof_state")
+                .and_then(Value::as_str)
+                .is_some_and(|state| state != "resolved_exact")
+            {
+                target_resolution_issues
+                    .push(format!("ad unit code {code} did not resolve exactly"));
+            }
+            if let Some(target) = dependency_target_from_ad_unit_summary(&summary) {
+                targets_by_id
+                    .entry(target.ad_unit_id.clone())
+                    .and_modify(|existing| existing.merge_code_target(&target))
+                    .or_insert(target);
+            }
+            target_rows.push(summary);
+        }
+
+        for ad_unit_id in &ad_unit_ids {
+            if targets_by_id.contains_key(ad_unit_id) {
+                continue;
+            }
+            let target = DependencyProbeTarget::id_only(ad_unit_id.clone());
+            target_resolution_issues.push(format!(
+                "ad unit id {ad_unit_id} was supplied without a resolved code row; ancestor targeting proof is incomplete"
+            ));
+            target_rows.push(target.to_summary_json());
+            targets_by_id.insert(ad_unit_id.clone(), target);
+        }
+
+        let targets = targets_by_id.into_values().collect::<Vec<_>>();
+        let placement_summary = match self
+            .client()
+            .list_network_catalog(
+                &args.network_code,
+                CatalogCollection::Placements,
+                Some(placement_page_size),
+                None,
+                None,
+                None,
+            )
+            .await
+        {
+            Ok(payload) => summarize_dependency_placements(&payload, placement_page_size, &targets),
+            Err(err) => blocked_probe_surface("placements", err),
+        };
+
+        let line_item_summary = match probe_ad_unit_line_item_dependencies(
+            self,
+            &args.network_code,
+            args.api_version.as_deref(),
+            line_item_page_size,
+            max_line_items,
+            &targets,
+            &placement_summary,
+            args.include_line_item_xml,
+        )
+        .await
+        {
+            Ok(summary) => summary,
+            Err(err) => blocked_probe_surface("line_items", err),
+        };
+
+        let proof_flags = dependency_proof_flags(
+            &targets,
+            &placement_summary,
+            &line_item_summary,
+            !target_resolution_issues.is_empty(),
+        );
+        let dependency_decision = dependency_probe_decision(
+            &target_resolution_issues,
+            &placement_summary,
+            &line_item_summary,
+        );
+        let response = dependency_probe_response_json(
+            &args.network_code,
+            target_rows,
+            placement_summary,
+            line_item_summary,
+            target_resolution_issues,
+            proof_flags,
+            dependency_decision,
+        );
+
+        Ok(contract::success_with_meta(
+            response,
+            json!({
+                "mutation_performed": false,
+                "upstream_called": true,
+                "line_item_page_size": line_item_page_size,
+                "max_line_items": max_line_items,
+                "placement_page_size": placement_page_size,
+                "soap_default_api_version": DEFAULT_SOAP_API_VERSION,
+                "required_line_item_scope": MANAGE_SCOPE,
                 "policy": provider_safety_contract_json(),
             }),
             started,
@@ -2236,6 +2426,201 @@ fn validate_probe_ad_unit_codes(codes: &[String]) -> Result<Vec<String>, AdManag
     Ok(cleaned)
 }
 
+fn validate_optional_probe_ad_unit_codes(codes: &[String]) -> Result<Vec<String>, AdManagerError> {
+    if codes.is_empty() {
+        return Ok(Vec::new());
+    }
+    validate_probe_ad_unit_codes(codes)
+}
+
+fn validate_probe_ad_unit_ids(ids: &[String]) -> Result<Vec<String>, AdManagerError> {
+    if ids.len() > 50 {
+        return Err(AdManagerError::invalid(
+            "ad_unit_ids",
+            "must contain at most 50 ad-unit ids",
+        ));
+    }
+    let mut seen = BTreeSet::new();
+    let mut cleaned = Vec::with_capacity(ids.len());
+    for id in ids {
+        let trimmed = id.trim();
+        if trimmed.is_empty()
+            || !trimmed.chars().all(|ch| ch.is_ascii_digit())
+            || trimmed
+                .parse::<u64>()
+                .ok()
+                .filter(|value| *value > 0)
+                .is_none()
+        {
+            return Err(AdManagerError::invalid(
+                "ad_unit_ids",
+                "each ad-unit id must be a positive numeric identifier",
+            ));
+        }
+        if !seen.insert(trimmed.to_string()) {
+            return Err(AdManagerError::invalid(
+                "ad_unit_ids",
+                format!("duplicate ad-unit id `{trimmed}`"),
+            ));
+        }
+        cleaned.push(trimmed.to_string());
+    }
+    Ok(cleaned)
+}
+
+#[derive(Debug, Clone)]
+struct DependencyProbeTarget {
+    ad_unit_id: String,
+    ad_unit_codes: BTreeSet<String>,
+    resource_name: Option<String>,
+    display_name: Value,
+    status: Value,
+    ad_unit_sizes: Value,
+    ancestor_ad_unit_ids: BTreeSet<String>,
+    proof_state: &'static str,
+    proof_notes: Vec<String>,
+}
+
+impl DependencyProbeTarget {
+    fn id_only(ad_unit_id: String) -> Self {
+        Self {
+            ad_unit_id,
+            ad_unit_codes: BTreeSet::new(),
+            resource_name: None,
+            display_name: Value::Null,
+            status: Value::Null,
+            ad_unit_sizes: Value::Null,
+            ancestor_ad_unit_ids: BTreeSet::new(),
+            proof_state: "id_only",
+            proof_notes: vec![
+                "ancestor targeting cannot be proven for an id-only target unless a code row is also resolved"
+                    .to_string(),
+            ],
+        }
+    }
+
+    fn to_probe_target(&self) -> ProbeAdUnitTarget {
+        ProbeAdUnitTarget {
+            ad_unit_id: self.ad_unit_id.clone(),
+            ancestor_ad_unit_ids: self.ancestor_ad_unit_ids.clone(),
+        }
+    }
+
+    fn merge_code_target(&mut self, other: &Self) {
+        self.ad_unit_codes
+            .extend(other.ad_unit_codes.iter().cloned());
+        self.ancestor_ad_unit_ids
+            .extend(other.ancestor_ad_unit_ids.iter().cloned());
+        if self.resource_name.is_none() {
+            self.resource_name = other.resource_name.clone();
+        }
+        if self.display_name.is_null() {
+            self.display_name = other.display_name.clone();
+        }
+        if self.status.is_null() {
+            self.status = other.status.clone();
+        }
+        if self.ad_unit_sizes.is_null() {
+            self.ad_unit_sizes = other.ad_unit_sizes.clone();
+        }
+        if self.proof_state == "id_only" && other.proof_state == "resolved_exact" {
+            self.proof_state = "resolved_exact";
+        }
+        self.proof_notes.extend(other.proof_notes.iter().cloned());
+        self.proof_notes.sort();
+        self.proof_notes.dedup();
+    }
+
+    fn id_only_without_ancestors(&self) -> bool {
+        self.ad_unit_codes.is_empty() && self.ancestor_ad_unit_ids.is_empty()
+    }
+
+    fn to_summary_json(&self) -> Value {
+        json!({
+            "ad_unit_id": self.ad_unit_id,
+            "ad_unit_codes": self.ad_unit_codes.iter().cloned().collect::<Vec<_>>(),
+            "resource_name": self.resource_name,
+            "display_name": self.display_name,
+            "status": self.status,
+            "ad_unit_sizes": self.ad_unit_sizes,
+            "ancestor_ad_unit_ids": self.ancestor_ad_unit_ids.iter().cloned().collect::<Vec<_>>(),
+            "proof_state": self.proof_state,
+            "proof_notes": self.proof_notes,
+        })
+    }
+}
+
+fn summarize_dependency_ad_unit_code(code: &str, payload: &Value) -> Value {
+    let rows = catalog_rows(payload, CatalogCollection::AdUnits);
+    let matches = rows
+        .into_iter()
+        .filter(|row| {
+            row.get("adUnitCode")
+                .and_then(Value::as_str)
+                .is_some_and(|value| value == code)
+        })
+        .collect::<Vec<_>>();
+    if matches.is_empty() {
+        return json!({
+            "ad_unit_code": code,
+            "proof_state": "missing",
+            "reason": "exact ad-unit code was not returned by GAM",
+            "matches": 0,
+        });
+    }
+    if matches.len() > 1 {
+        return json!({
+            "ad_unit_code": code,
+            "proof_state": "ambiguous",
+            "reason": "GAM returned multiple rows for the exact ad-unit code",
+            "matches": matches.len(),
+        });
+    }
+    let row = matches[0];
+    let resource_name = row.get("name").and_then(Value::as_str).unwrap_or_default();
+    let ad_unit_id = resource_id_from_name(resource_name);
+    json!({
+        "ad_unit_code": code,
+        "ad_unit_id": if ad_unit_id.is_empty() { Value::Null } else { Value::String(ad_unit_id) },
+        "resource_name": resource_name,
+        "display_name": row.get("displayName").cloned().unwrap_or(Value::Null),
+        "status": row.get("status").cloned().unwrap_or(Value::Null),
+        "ad_unit_sizes": row.get("adUnitSizes").or_else(|| row.get("sizes")).cloned().unwrap_or(Value::Null),
+        "ancestor_ad_unit_ids": ad_unit_ancestor_ids(row),
+        "proof_state": "resolved_exact",
+    })
+}
+
+fn dependency_target_from_ad_unit_summary(summary: &Value) -> Option<DependencyProbeTarget> {
+    let ad_unit_id = summary.get("ad_unit_id").and_then(Value::as_str)?;
+    let mut codes = BTreeSet::new();
+    if let Some(code) = summary.get("ad_unit_code").and_then(Value::as_str) {
+        codes.insert(code.to_string());
+    }
+    let ancestor_ad_unit_ids = summary
+        .get("ancestor_ad_unit_ids")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .filter_map(numeric_ad_unit_id_from_candidate)
+        .collect::<BTreeSet<_>>();
+    Some(DependencyProbeTarget {
+        ad_unit_id: ad_unit_id.to_string(),
+        ad_unit_codes: codes,
+        resource_name: summary
+            .get("resource_name")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        display_name: summary.get("display_name").cloned().unwrap_or(Value::Null),
+        status: summary.get("status").cloned().unwrap_or(Value::Null),
+        ad_unit_sizes: summary.get("ad_unit_sizes").cloned().unwrap_or(Value::Null),
+        ancestor_ad_unit_ids,
+        proof_state: "resolved_exact",
+        proof_notes: Vec::new(),
+    })
+}
+
 fn summarize_probe_ad_unit(code: &str, payload: &Value) -> Value {
     let rows = catalog_rows(payload, CatalogCollection::AdUnits);
     let matches = rows
@@ -2321,7 +2706,7 @@ fn collect_numeric_ad_unit_ids(value: Option<&Value>, ids: &mut BTreeSet<String>
             }
         }
         Some(Value::Object(object)) => {
-            for key in ["adUnitId", "id", "name", "parentAdUnit"] {
+            for key in ["adUnitId", "adUnit", "id", "name", "parentAdUnit"] {
                 collect_numeric_ad_unit_ids(object.get(key), ids);
             }
         }
@@ -2383,6 +2768,129 @@ fn summarize_probe_collection(
             })
         }).collect::<Vec<_>>(),
     })
+}
+
+fn summarize_dependency_placements(
+    payload: &Value,
+    page_size: u32,
+    targets: &[DependencyProbeTarget],
+) -> Value {
+    let rows = catalog_rows(payload, CatalogCollection::Placements);
+    let next_page_token = payload
+        .get("nextPageToken")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty());
+    let capped = next_page_token.is_some() || rows.len() as u32 >= page_size;
+    let mut target_placement_ids: BTreeMap<String, BTreeSet<String>> = targets
+        .iter()
+        .map(|target| (target.ad_unit_id.clone(), BTreeSet::new()))
+        .collect();
+    let mut placement_matches = Vec::new();
+    let mut placement_match_count = 0_usize;
+    let mut placement_matches_truncated = false;
+    let mut target_placement_ids_truncated = false;
+    let mut unknown_membership_rows = Vec::new();
+
+    let row_count = rows.len();
+    for row in rows {
+        let resource_name = row.get("name").and_then(Value::as_str).unwrap_or_default();
+        let placement_id = resource_id_from_name(resource_name);
+        let (member_ad_unit_ids, membership_shape_seen) = placement_member_ad_unit_ids(row);
+        if !membership_shape_seen {
+            unknown_membership_rows.push(json!({
+                "placement_id": placement_id,
+                "resource_name": resource_name,
+                "display_name": row.get("displayName").or_else(|| row.get("name")).cloned().unwrap_or(Value::Null),
+            }));
+        }
+        let matched_target_ids = targets
+            .iter()
+            .filter(|target| member_ad_unit_ids.contains(&target.ad_unit_id))
+            .map(|target| target.ad_unit_id.clone())
+            .collect::<Vec<_>>();
+        if matched_target_ids.is_empty() {
+            continue;
+        }
+        for ad_unit_id in &matched_target_ids {
+            let ids = target_placement_ids.entry(ad_unit_id.clone()).or_default();
+            if ids.len() < DEPENDENCY_TARGET_PLACEMENT_ID_LIMIT {
+                ids.insert(placement_id.clone());
+            } else {
+                target_placement_ids_truncated = true;
+            }
+        }
+        placement_match_count += 1;
+        if placement_matches.len() < DEPENDENCY_PLACEMENT_MATCH_SAMPLE_LIMIT {
+            let member_ad_unit_count = member_ad_unit_ids.len();
+            let member_ad_unit_ids_sample = member_ad_unit_ids
+                .into_iter()
+                .take(DEPENDENCY_PLACEMENT_MEMBER_SAMPLE_LIMIT)
+                .collect::<Vec<_>>();
+            placement_matches.push(json!({
+                "placement_id": placement_id,
+                "resource_name": resource_name,
+                "display_name": row.get("displayName").or_else(|| row.get("name")).cloned().unwrap_or(Value::Null),
+                "status": row.get("status").cloned().unwrap_or(Value::Null),
+                "matched_ad_unit_ids": matched_target_ids,
+                "member_ad_unit_count": member_ad_unit_count,
+                "member_ad_unit_ids_sample": member_ad_unit_ids_sample,
+                "member_ad_unit_ids_truncated": member_ad_unit_count > DEPENDENCY_PLACEMENT_MEMBER_SAMPLE_LIMIT,
+            }));
+        } else {
+            placement_matches_truncated = true;
+        }
+    }
+
+    let proof_state =
+        if capped || !unknown_membership_rows.is_empty() || target_placement_ids_truncated {
+            "sample_or_shape_incomplete"
+        } else {
+            "complete_for_page"
+        };
+    let mut target_map = Map::new();
+    for (ad_unit_id, placement_ids) in target_placement_ids {
+        target_map.insert(
+            ad_unit_id,
+            Value::Array(placement_ids.into_iter().map(Value::String).collect()),
+        );
+    }
+    json!({
+        "surface": "placements",
+        "proof_state": proof_state,
+        "row_count_in_page": row_count,
+        "page_size": page_size,
+        "next_page_token_present": next_page_token.is_some(),
+        "capped_or_possibly_more": capped,
+        "membership_shape_unknown_count": unknown_membership_rows.len(),
+        "membership_shape_unknown_sample": unknown_membership_rows.into_iter().take(10).collect::<Vec<_>>(),
+        "target_placement_match_count": placement_match_count,
+        "target_placement_matches_truncated": placement_matches_truncated,
+        "target_placement_id_limit_per_ad_unit": DEPENDENCY_TARGET_PLACEMENT_ID_LIMIT,
+        "target_placement_ids_truncated": target_placement_ids_truncated,
+        "target_placement_ids_by_ad_unit_id": target_map,
+        "target_placement_matches_sample": placement_matches,
+        "mutation_performed": false,
+    })
+}
+
+fn placement_member_ad_unit_ids(row: &Value) -> (BTreeSet<String>, bool) {
+    let mut ids = BTreeSet::new();
+    let mut membership_shape_seen = false;
+    if let Some(object) = row.as_object() {
+        for key in [
+            "adUnitAssignments",
+            "assignedAdUnits",
+            "adUnits",
+            "targetedAdUnits",
+            "adUnitIds",
+        ] {
+            if let Some(value) = object.get(key) {
+                membership_shape_seen = true;
+                collect_numeric_ad_unit_ids(Some(value), &mut ids);
+            }
+        }
+    }
+    (ids, membership_shape_seen)
 }
 
 fn apply_probe_collection_decision(
@@ -2630,6 +3138,455 @@ fn summarize_yield_groups(
         );
     }
     response
+}
+
+async fn probe_ad_unit_line_item_dependencies(
+    server: &AdManagerServer,
+    network_code: &str,
+    api_version: Option<&str>,
+    line_item_page_size: u32,
+    max_line_items: u32,
+    targets: &[DependencyProbeTarget],
+    placement_summary: &Value,
+    include_line_item_xml: bool,
+) -> Result<Value, AdManagerError> {
+    if targets.is_empty() {
+        return Ok(json!({
+            "surface": "line_items",
+            "decision": "skipped",
+            "proof_state": "skipped",
+            "reason": "no resolved ad-unit ids were available",
+            "mutation_performed": false,
+        }));
+    }
+    if !scope_allows_write(server.client().scope()) {
+        return Ok(json!({
+            "surface": "line_items",
+            "decision": "blocked",
+            "proof_state": "blocked",
+            "reason": "LineItemService SOAP reads require the Google Ad Manager manage scope",
+            "required_scope": MANAGE_SCOPE,
+            "current_scope": server.client().scope(),
+            "mutation_performed": false,
+        }));
+    }
+
+    let mut offset = 0_u32;
+    let mut inspected_results = 0_u32;
+    let mut total_result_set_size: Option<u64> = None;
+    let mut response_truncated = false;
+    let mut request_ids = Vec::new();
+    let mut response_times = Vec::new();
+    let mut dependency_matches_sample = Vec::new();
+    let mut dependency_match_count = 0_usize;
+    let mut dependency_matches_truncated = false;
+    let mut status_counts: BTreeMap<String, u64> = BTreeMap::new();
+    let mut missing_total_size = false;
+
+    while inspected_results < max_line_items {
+        let remaining = max_line_items.saturating_sub(inspected_results);
+        let page_limit = line_item_page_size.min(remaining).max(1);
+        let query = format!("ORDER BY id ASC LIMIT {page_limit} OFFSET {offset}");
+        let payload_xml = pql_payload(&query);
+        let plan = server.client().build_soap_trafficking_plan(
+            network_code,
+            api_version,
+            SoapTraffickingOperation::GetLineItemsByStatement,
+            &payload_xml,
+        )?;
+        let applied = server.client().execute_soap_trafficking_plan(&plan).await?;
+        if applied.upstream_status >= 400 || applied.soap_fault.is_some() {
+            return Ok(json!({
+                "surface": "line_items",
+                "decision": "blocked",
+                "proof_state": "blocked",
+                "upstream_status": applied.upstream_status,
+                "request_id": applied.request_id,
+                "response_time": applied.response_time,
+                "soap_fault": applied.soap_fault,
+                "message": contract::redact_secret_text(&soap_error_message(&applied)),
+                "mutation_performed": false,
+            }));
+        }
+
+        if let Some(request_id) = applied.request_id {
+            request_ids.push(request_id);
+        }
+        if let Some(response_time) = applied.response_time {
+            response_times.push(response_time);
+        }
+        response_truncated |= applied.response_truncated;
+        let page_total = extract_xml_tag_text(&applied.upstream_response_xml, "totalResultSetSize")
+            .and_then(|value| value.parse::<u64>().ok());
+        if total_result_set_size.is_none() {
+            total_result_set_size = page_total;
+        }
+        if page_total.is_none() {
+            missing_total_size = true;
+        }
+
+        let results = extract_xml_blocks(&applied.upstream_response_xml, "results");
+        for result in &results {
+            let status = extract_xml_tag_text(result, "status").unwrap_or_else(|| "UNKNOWN".into());
+            *status_counts.entry(status).or_insert(0) += 1;
+            if let Some(entry) = line_item_dependency_entry(
+                result,
+                targets,
+                placement_summary,
+                include_line_item_xml,
+            ) {
+                dependency_match_count += 1;
+                if dependency_matches_sample.len() < DEPENDENCY_LINE_ITEM_MATCH_SAMPLE_LIMIT {
+                    dependency_matches_sample.push(entry);
+                } else {
+                    dependency_matches_truncated = true;
+                }
+            }
+        }
+
+        let result_count = results.len() as u32;
+        inspected_results = inspected_results.saturating_add(result_count);
+        if result_count == 0 {
+            break;
+        }
+        offset = offset.saturating_add(result_count);
+        if total_result_set_size
+            .map(|total| u64::from(offset) >= total)
+            .unwrap_or(false)
+        {
+            break;
+        }
+    }
+
+    let capped = response_truncated
+        || missing_total_size
+        || total_result_set_size
+            .map(|total| total > u64::from(inspected_results))
+            .unwrap_or(inspected_results >= max_line_items);
+    let proof_state = if capped { "sample_only" } else { "complete" };
+    let decision = if dependency_match_count > 0 {
+        "dependencies_found"
+    } else if capped {
+        "no_dependencies_in_sample"
+    } else {
+        "no_dependencies_observed"
+    };
+
+    Ok(json!({
+        "surface": "line_items",
+        "decision": decision,
+        "proof_state": proof_state,
+        "total_result_set_size": total_result_set_size,
+        "inspected_results": inspected_results,
+        "max_line_items": max_line_items,
+        "line_item_page_size": line_item_page_size,
+        "response_truncated": response_truncated,
+        "missing_total_result_set_size": missing_total_size,
+        "request_ids": request_ids,
+        "response_times": response_times,
+        "status_counts": status_counts,
+        "dependency_match_count": dependency_match_count,
+        "dependency_matches_sample": dependency_matches_sample,
+        "dependency_matches_truncated": dependency_matches_truncated,
+        "dependency_match_sample_limit": DEPENDENCY_LINE_ITEM_MATCH_SAMPLE_LIMIT,
+        "mutation_performed": false,
+    }))
+}
+
+fn line_item_dependency_entry(
+    result: &str,
+    targets: &[DependencyProbeTarget],
+    placement_summary: &Value,
+    include_line_item_xml: bool,
+) -> Option<Value> {
+    let targeting_block = extract_xml_first_block(result, "targeting").unwrap_or_default();
+    let inventory_block = extract_xml_first_block(&targeting_block, "inventoryTargeting")
+        .unwrap_or_else(|| "<inventoryTargeting />".to_string());
+    let targeted_ad_units = ad_unit_targeting_values(&inventory_block, "targetedAdUnits");
+    let excluded_ad_units = ad_unit_targeting_values(&inventory_block, "excludedAdUnits");
+    let targeted_placement_ids = extract_xml_tag_texts(&inventory_block, "targetedPlacementIds")
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    let root_or_network_targeting =
+        targeted_ad_units.is_empty() && targeted_placement_ids.is_empty();
+
+    let mut target_matches = Vec::new();
+    for target in targets {
+        let probe_target = target.to_probe_target();
+        let targeting_match = targeting_coverage_for_target(&targeted_ad_units, &probe_target);
+        let exclusion_match = targeting_coverage_for_target(&excluded_ad_units, &probe_target);
+        let target_placement_ids =
+            dependency_placement_ids_for_target(placement_summary, &target.ad_unit_id);
+        let matched_placement_ids = target_placement_ids
+            .iter()
+            .filter(|placement_id| targeted_placement_ids.contains(*placement_id))
+            .cloned()
+            .collect::<Vec<_>>();
+        if targeting_match.is_none()
+            && matched_placement_ids.is_empty()
+            && !root_or_network_targeting
+        {
+            continue;
+        }
+        let classification = line_item_dependency_classification(
+            targeting_match.as_ref(),
+            !matched_placement_ids.is_empty(),
+            root_or_network_targeting,
+            exclusion_match.as_ref(),
+        );
+        target_matches.push(json!({
+            "ad_unit_id": target.ad_unit_id,
+            "ad_unit_codes": target.ad_unit_codes.iter().cloned().collect::<Vec<_>>(),
+            "classification": classification,
+            "targeting_match": targeting_match.as_ref().map(targeting_coverage_json).unwrap_or(Value::Null),
+            "exclusion_match": exclusion_match.as_ref().map(targeting_coverage_json).unwrap_or(Value::Null),
+            "matched_placement_ids": matched_placement_ids,
+            "root_or_network_targeting": root_or_network_targeting,
+            "dependency_excluded": exclusion_match.is_some(),
+        }));
+    }
+    if target_matches.is_empty() {
+        return None;
+    }
+
+    let is_archived = extract_xml_tag_text(result, "isArchived")
+        .map(|value| value.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    let status = extract_xml_tag_text(result, "status");
+    let activity_state = line_item_activity_state(status.as_deref(), is_archived);
+    let primary_goal = extract_xml_first_block(result, "primaryGoal").unwrap_or_default();
+    let stats = extract_xml_first_block(result, "stats").unwrap_or_default();
+    let creative_placeholders = extract_xml_blocks(result, "creativePlaceholders");
+    let custom_targeting_key_ids = unique_xml_texts(result, "keyId");
+    let custom_targeting_value_ids = unique_xml_texts(result, "valueIds");
+    let mut entry = json!({
+        "line_item_id": extract_xml_tag_text(result, "id"),
+        "line_item_name": extract_xml_tag_text(result, "name"),
+        "order_id": extract_xml_tag_text(result, "orderId"),
+        "order_name": extract_xml_tag_text(result, "orderName"),
+        "status": status,
+        "reservation_status": extract_xml_tag_text(result, "reservationStatus"),
+        "activity_state": activity_state,
+        "is_archived": is_archived,
+        "line_item_type": extract_xml_tag_text(result, "lineItemType"),
+        "priority": extract_xml_tag_text(result, "priority"),
+        "start_date_time": extract_xml_date_time(result, "startDateTime"),
+        "end_date_time": extract_xml_date_time(result, "endDateTime"),
+        "creative_sizes": creative_sizes_from_placeholders(&creative_placeholders),
+        "primary_goal_type": extract_xml_tag_text(&primary_goal, "goalType"),
+        "primary_goal_unit_type": extract_xml_tag_text(&primary_goal, "unitType"),
+        "primary_goal_units": extract_xml_tag_text(&primary_goal, "units"),
+        "impressions_delivered": extract_xml_tag_text(&stats, "impressionsDelivered"),
+        "clicks_delivered": extract_xml_tag_text(&stats, "clicksDelivered"),
+        "targeted_ad_units": targeted_ad_units,
+        "excluded_ad_units": excluded_ad_units,
+        "targeted_placement_ids": targeted_placement_ids.into_iter().collect::<Vec<_>>(),
+        "custom_targeting_key_ids": custom_targeting_key_ids,
+        "custom_targeting_value_ids": custom_targeting_value_ids,
+        "target_matches": target_matches,
+    });
+    if include_line_item_xml && let Some(object) = entry.as_object_mut() {
+        let (xml_sample, xml_truncated) =
+            bounded_text_sample(result, DEPENDENCY_LINE_ITEM_XML_SAMPLE_BYTES);
+        object.insert("upstream_xml_sample".to_string(), Value::String(xml_sample));
+        object.insert(
+            "upstream_xml_truncated".to_string(),
+            Value::Bool(xml_truncated),
+        );
+        object.insert("upstream_xml_bytes".to_string(), json!(result.len()));
+    }
+    Some(entry)
+}
+
+fn bounded_text_sample(value: &str, max_bytes: usize) -> (String, bool) {
+    if value.len() <= max_bytes {
+        return (value.to_string(), false);
+    }
+    let mut end = max_bytes;
+    while !value.is_char_boundary(end) {
+        end = end.saturating_sub(1);
+    }
+    (value[..end].to_string(), true)
+}
+
+fn unique_xml_texts(value: &str, tag: &str) -> Vec<String> {
+    extract_xml_tag_texts(value, tag)
+        .into_iter()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn dependency_placement_ids_for_target(
+    placement_summary: &Value,
+    ad_unit_id: &str,
+) -> BTreeSet<String> {
+    placement_summary
+        .get("target_placement_ids_by_ad_unit_id")
+        .and_then(Value::as_object)
+        .and_then(|map| map.get(ad_unit_id))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::to_string)
+        .collect()
+}
+
+fn line_item_dependency_classification(
+    targeting_match: Option<&TargetingCoverage>,
+    placement_match: bool,
+    root_or_network_targeting: bool,
+    exclusion_match: Option<&TargetingCoverage>,
+) -> &'static str {
+    if exclusion_match.is_some() {
+        if targeting_match.is_some() {
+            return "targeted_but_excluded";
+        }
+        if placement_match {
+            return "placement_targeted_but_excluded";
+        }
+        if root_or_network_targeting {
+            return "root_or_network_targeted_but_excluded";
+        }
+        return "excluded_without_target_match";
+    }
+    if let Some(match_value) = targeting_match {
+        return match match_value.match_type {
+            "exact" => "exact_target",
+            "ancestor_descendant" => "ancestor_descendant_target",
+            other => other,
+        };
+    }
+    if placement_match {
+        return "placement_target";
+    }
+    if root_or_network_targeting {
+        return "root_or_network_target";
+    }
+    "unclassified"
+}
+
+fn line_item_activity_state(status: Option<&str>, is_archived: bool) -> &'static str {
+    if is_archived {
+        return "archived";
+    }
+    match status.map(|value| value.trim().to_ascii_uppercase()) {
+        Some(value) if value == "DELIVERING" => "delivering",
+        Some(value)
+            if matches!(
+                value.as_str(),
+                "READY" | "RESERVING" | "PENDING_APPROVAL" | "PENDING_INVENTORY_RELEASE"
+            ) =>
+        {
+            "future_or_ready"
+        }
+        Some(value) if value == "PAUSED" => "paused_or_resumable",
+        Some(value)
+            if matches!(
+                value.as_str(),
+                "COMPLETED" | "INACTIVE" | "ARCHIVED" | "DRAFT" | "DISAPPROVED" | "CANCELED"
+            ) =>
+        {
+            "inactive"
+        }
+        _ => "unknown",
+    }
+}
+
+fn dependency_probe_decision(
+    target_resolution_issues: &[String],
+    placement_summary: &Value,
+    line_item_summary: &Value,
+) -> &'static str {
+    if line_item_summary
+        .get("proof_state")
+        .and_then(Value::as_str)
+        .is_some_and(|state| state == "blocked")
+    {
+        return "blocked";
+    }
+    let placement_dependencies = placement_summary
+        .get("target_placement_match_count")
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+        > 0;
+    let line_item_dependencies = line_item_summary
+        .get("dependency_match_count")
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+        > 0;
+    if placement_dependencies || line_item_dependencies {
+        "dependencies_found"
+    } else if !target_resolution_issues.is_empty() {
+        "missing_or_ambiguous_targets"
+    } else if dependency_proof_incomplete(placement_summary, line_item_summary) {
+        "incomplete_no_dependencies_observed"
+    } else {
+        "no_dependencies_observed"
+    }
+}
+
+fn dependency_probe_response_json(
+    network_code: &str,
+    target_rows: Vec<Value>,
+    placement_summary: Value,
+    line_item_summary: Value,
+    target_resolution_issues: Vec<String>,
+    proof_flags: Value,
+    dependency_decision: &str,
+) -> Value {
+    json!({
+        "network_code": network_code,
+        "dependency_decision": dependency_decision,
+        "ad_units": target_rows,
+        "placements": placement_summary,
+        "line_items": line_item_summary,
+        "target_resolution_issues": target_resolution_issues,
+        "proof_flags": proof_flags,
+        "mutation_performed": false,
+        "cleanup_decision": {
+            "safe_to_archive_or_retire": false,
+            "reason": "This read-only helper reports dependencies and proof gaps; archive, deactivate, or retarget decisions require a separate reviewed workflow."
+        }
+    })
+}
+
+fn dependency_proof_incomplete(placement_summary: &Value, line_item_summary: &Value) -> bool {
+    placement_summary
+        .get("proof_state")
+        .and_then(Value::as_str)
+        .map(|state| state != "complete_for_page")
+        .unwrap_or(true)
+        || line_item_summary
+            .get("proof_state")
+            .and_then(Value::as_str)
+            .map(|state| state != "complete")
+            .unwrap_or(true)
+}
+
+fn dependency_proof_flags(
+    targets: &[DependencyProbeTarget],
+    placement_summary: &Value,
+    line_item_summary: &Value,
+    target_resolution_incomplete: bool,
+) -> Value {
+    let placement_state = placement_summary
+        .get("proof_state")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let line_item_state = line_item_summary
+        .get("proof_state")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    json!({
+        "target_resolution_incomplete": target_resolution_incomplete,
+        "id_only_targets_have_unknown_ancestors": targets.iter().any(DependencyProbeTarget::id_only_without_ancestors),
+        "placements_capped_or_shape_unknown": placement_state == "sample_or_shape_incomplete" || placement_state == "blocked",
+        "line_items_capped_or_truncated": line_item_state == "sample_only",
+        "soap_manage_scope_required": line_item_summary.get("required_scope").is_some(),
+        "line_items_blocked": line_item_state == "blocked",
+    })
 }
 
 fn probe_ad_unit_target_from_summary(summary: &Value) -> Option<ProbeAdUnitTarget> {
@@ -5689,6 +6646,226 @@ mod tests {
     }
 
     #[test]
+    fn dependency_probe_parses_placement_membership_from_rest_rows() {
+        let payload = json!({
+            "placements": [
+                {
+                    "name": "networks/1015422/placements/300",
+                    "displayName": "Section side placement",
+                    "status": "ACTIVE",
+                    "adUnitAssignments": [
+                        {"adUnit": "networks/1015422/adUnits/200"},
+                        {"adUnitId": "201"}
+                    ]
+                }
+            ]
+        });
+        let target = dependency_target("200", &[], &["Section_Page_LS"]);
+        let summary = summarize_dependency_placements(&payload, 100, &[target]);
+
+        assert_eq!(summary["proof_state"], "complete_for_page");
+        assert_eq!(
+            summary["target_placement_ids_by_ad_unit_id"]["200"][0],
+            "300"
+        );
+        assert_eq!(
+            summary["target_placement_matches_sample"][0]["placement_id"],
+            "300"
+        );
+        assert_eq!(summary["target_placement_match_count"], 1);
+    }
+
+    #[test]
+    fn dependency_probe_classifies_line_item_inventory_matches() {
+        let target = dependency_target("200", &["100"], &["Section_Page_LS"]);
+        let placement_summary = json!({
+            "target_placement_ids_by_ad_unit_id": {
+                "200": ["300"]
+            }
+        });
+        let xml = r#"
+        <results>
+          <orderId>4102710161</orderId>
+          <id>7360951637</id>
+          <name>NEXTGEN Section Side</name>
+          <orderName>NEXTGEN</orderName>
+          <lineItemType>SPONSORSHIP</lineItemType>
+          <priority>4</priority>
+          <status>DELIVERING</status>
+          <reservationStatus>RESERVED</reservationStatus>
+          <isArchived>false</isArchived>
+          <targeting>
+            <inventoryTargeting>
+              <targetedPlacementIds>300</targetedPlacementIds>
+            </inventoryTargeting>
+            <customTargeting>
+              <children><keyId>20229275</keyId><valueIds>453440212481</valueIds></children>
+            </customTargeting>
+          </targeting>
+        </results>
+        "#;
+
+        let entry = line_item_dependency_entry(xml, &[target], &placement_summary, false)
+            .expect("dependency entry");
+        assert_eq!(entry["activity_state"], "delivering");
+        assert_eq!(
+            entry["target_matches"][0]["classification"],
+            "placement_target"
+        );
+        assert_eq!(
+            entry["target_matches"][0]["matched_placement_ids"][0],
+            "300"
+        );
+        assert_eq!(entry["custom_targeting_key_ids"][0], "20229275");
+    }
+
+    #[test]
+    fn dependency_probe_marks_root_targeting_and_exclusions() {
+        let target = dependency_target("200", &["100"], &["Section_Page_LS"]);
+        let placement_summary = json!({"target_placement_ids_by_ad_unit_id": {"200": []}});
+        let root_xml = r#"
+        <results>
+          <id>1</id>
+          <name>Broad line item</name>
+          <status>READY</status>
+          <isArchived>false</isArchived>
+          <targeting><inventoryTargeting /></targeting>
+        </results>
+        "#;
+        let excluded_xml = r#"
+        <results>
+          <id>2</id>
+          <name>Ancestor target with exact exclusion</name>
+          <status>DELIVERING</status>
+          <isArchived>false</isArchived>
+          <targeting>
+            <inventoryTargeting>
+              <targetedAdUnits><adUnitId>100</adUnitId><includeDescendants>true</includeDescendants></targetedAdUnits>
+              <excludedAdUnits><adUnitId>200</adUnitId><includeDescendants>false</includeDescendants></excludedAdUnits>
+            </inventoryTargeting>
+          </targeting>
+        </results>
+        "#;
+
+        let root = line_item_dependency_entry(
+            root_xml,
+            std::slice::from_ref(&target),
+            &placement_summary,
+            false,
+        )
+        .expect("root entry");
+        assert_eq!(root["activity_state"], "future_or_ready");
+        assert_eq!(
+            root["target_matches"][0]["classification"],
+            "root_or_network_target"
+        );
+
+        let excluded = line_item_dependency_entry(
+            excluded_xml,
+            std::slice::from_ref(&target),
+            &placement_summary,
+            false,
+        )
+        .expect("excluded entry");
+        assert_eq!(
+            excluded["target_matches"][0]["classification"],
+            "targeted_but_excluded"
+        );
+        assert_eq!(
+            excluded["target_matches"][0]["targeting_match"]["match_type"],
+            "ancestor_descendant"
+        );
+        assert_eq!(excluded["target_matches"][0]["dependency_excluded"], true);
+    }
+
+    #[test]
+    fn dependency_probe_decision_marks_incomplete_absence() {
+        let placement_summary = json!({
+            "proof_state": "sample_or_shape_incomplete",
+            "target_placement_match_count": 0
+        });
+        let line_item_summary = json!({
+            "proof_state": "complete",
+            "dependency_match_count": 0
+        });
+
+        assert_eq!(
+            dependency_probe_decision(&[], &placement_summary, &line_item_summary),
+            "incomplete_no_dependencies_observed"
+        );
+        let flags = dependency_proof_flags(&[], &placement_summary, &line_item_summary, false);
+        assert_eq!(flags["placements_capped_or_shape_unknown"], true);
+    }
+
+    #[test]
+    fn dependency_probe_response_contract_is_no_mutation_and_not_cleanup_approval() {
+        let response = dependency_probe_response_json(
+            "1015422",
+            vec![json!({
+                "ad_unit_id": "200",
+                "ad_unit_code": "Section_Page_LS",
+                "proof_state": "resolved_exact"
+            })],
+            json!({
+                "proof_state": "complete_for_page",
+                "target_placement_match_count": 1,
+                "target_placement_matches_sample": [{"placement_id": "300"}]
+            }),
+            json!({
+                "proof_state": "complete",
+                "dependency_match_count": 1,
+                "dependency_matches_sample": [{"line_item_id": "7360951637"}]
+            }),
+            Vec::new(),
+            json!({"line_items_capped_or_truncated": false}),
+            "dependencies_found",
+        );
+
+        assert_eq!(response["network_code"], "1015422");
+        assert_eq!(response["dependency_decision"], "dependencies_found");
+        assert_eq!(response["mutation_performed"], false);
+        assert_eq!(
+            response["cleanup_decision"]["safe_to_archive_or_retire"],
+            false
+        );
+        assert!(response["line_items"].get("dependency_matches").is_none());
+        assert!(
+            response["placements"]
+                .get("target_placement_matches")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn dependency_probe_bounds_raw_line_item_xml_sample() {
+        let target = dependency_target("200", &[], &["Section_Page_LS"]);
+        let placement_summary = json!({"target_placement_ids_by_ad_unit_id": {"200": []}});
+        let filler = "x".repeat(DEPENDENCY_LINE_ITEM_XML_SAMPLE_BYTES + 512);
+        let xml = format!(
+            r#"
+        <results>
+          <id>3</id>
+          <name>{filler}</name>
+          <status>DELIVERING</status>
+          <isArchived>false</isArchived>
+          <targeting><inventoryTargeting /></targeting>
+        </results>
+        "#
+        );
+
+        let entry = line_item_dependency_entry(&xml, &[target], &placement_summary, true)
+            .expect("dependency entry");
+        assert_eq!(entry["upstream_xml_truncated"], true);
+        assert!(
+            entry["upstream_xml_sample"]
+                .as_str()
+                .expect("xml sample")
+                .len()
+                <= DEPENDENCY_LINE_ITEM_XML_SAMPLE_BYTES
+        );
+    }
+
+    #[test]
     fn bounded_line_item_query_caps_missing_limit_and_rejects_large_limit() {
         assert_eq!(
             bounded_line_item_pql_query("WHERE status = 'DELIVERING' ORDER BY id DESC")
@@ -5793,6 +6970,23 @@ mod tests {
                 .iter()
                 .map(|ancestor_id| (*ancestor_id).to_string())
                 .collect(),
+        }
+    }
+
+    fn dependency_target(id: &str, ancestor_ids: &[&str], codes: &[&str]) -> DependencyProbeTarget {
+        DependencyProbeTarget {
+            ad_unit_id: id.to_string(),
+            ad_unit_codes: codes.iter().map(|code| (*code).to_string()).collect(),
+            resource_name: Some(format!("networks/1015422/adUnits/{id}")),
+            display_name: Value::String("Section left skin".to_string()),
+            status: Value::String("ACTIVE".to_string()),
+            ad_unit_sizes: Value::Null,
+            ancestor_ad_unit_ids: ancestor_ids
+                .iter()
+                .map(|ancestor_id| (*ancestor_id).to_string())
+                .collect(),
+            proof_state: "resolved_exact",
+            proof_notes: Vec::new(),
         }
     }
 

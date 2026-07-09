@@ -13,6 +13,7 @@ fn stdio_initializes_and_lists_tools() {
         "gam_networks_list",
         "gam_network_catalog_list",
         "gam_exchange_protection_probe",
+        "gam_ad_unit_dependency_probe",
         "gam_report_run",
         "gam_report_result_rows",
         "gam_trafficking_tool_matrix",

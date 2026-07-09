@@ -46,6 +46,78 @@
       "name": "find_tools"
     },
     {
+      "description": "Read-only dependency proof for exact Ad Manager ad units across placements and SOAP line-item inventory targeting.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "ad_unit_codes": {
+            "default": [],
+            "description": "Exact ad-unit codes to resolve through the REST adUnits collection.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "ad_unit_ids": {
+            "default": [],
+            "description": "Exact numeric ad-unit ids to include even when a code row is unavailable.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "api_version": {
+            "description": "SOAP API version for LineItemService reads. Defaults to the current server default.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "include_line_item_xml": {
+            "default": false,
+            "description": "Include bounded raw line-item XML snippets for matched line items. Defaults to false.",
+            "type": "boolean"
+          },
+          "line_item_page_size": {
+            "description": "Number of LineItemService rows to fetch per SOAP page. Defaults to 500, max 1000.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "max_line_items": {
+            "description": "Maximum LineItemService rows to inspect before reporting a capped proof. Defaults to 1000, max 5000.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "network_code": {
+            "description": "Raw Ad Manager network code, for example 1234567.",
+            "type": "string"
+          },
+          "placement_page_size": {
+            "description": "Number of placement rows to inspect from REST. Defaults to 500, max 1000.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "network_code"
+        ],
+        "type": "object"
+      },
+      "name": "gam_ad_unit_dependency_probe"
+    },
+    {
       "description": "Build a copyable gcloud Application Default Credentials login command for Google Ad Manager without running it.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -162,7 +234,7 @@
       "name": "gam_get_started"
     },
     {
-      "description": "List a curated Google Ad Manager network collection such as ad units, orders, line items, private auctions, private auction deals, or reports.",
+      "description": "List a curated Google Ad Manager network collection such as ad units, orders, line items, placements, private auctions, private auction deals, or reports.",
       "inputSchema": {
         "$defs": {
           "CatalogCollection": {
@@ -170,6 +242,7 @@
               "ad_units",
               "orders",
               "line_items",
+              "placements",
               "private_auction_deals",
               "private_auctions",
               "reports"
@@ -678,6 +751,7 @@
               "ad_units",
               "orders",
               "line_items",
+              "placements",
               "private_auction_deals",
               "private_auctions",
               "reports"
