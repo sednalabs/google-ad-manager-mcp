@@ -1143,13 +1143,15 @@ impl AdManagerServer {
 
         let line_item_summary = match probe_ad_unit_line_item_dependencies(
             self,
-            &args.network_code,
-            args.api_version.as_deref(),
-            line_item_page_size,
-            max_line_items,
+            LineItemDependencyProbeOptions {
+                network_code: &args.network_code,
+                api_version: args.api_version.as_deref(),
+                line_item_page_size,
+                max_line_items,
+                include_line_item_xml: args.include_line_item_xml,
+            },
             &targets,
             &placement_summary,
-            args.include_line_item_xml,
         )
         .await
         {
@@ -3140,15 +3142,19 @@ fn summarize_yield_groups(
     response
 }
 
-async fn probe_ad_unit_line_item_dependencies(
-    server: &AdManagerServer,
-    network_code: &str,
-    api_version: Option<&str>,
+struct LineItemDependencyProbeOptions<'a> {
+    network_code: &'a str,
+    api_version: Option<&'a str>,
     line_item_page_size: u32,
     max_line_items: u32,
+    include_line_item_xml: bool,
+}
+
+async fn probe_ad_unit_line_item_dependencies(
+    server: &AdManagerServer,
+    options: LineItemDependencyProbeOptions<'_>,
     targets: &[DependencyProbeTarget],
     placement_summary: &Value,
-    include_line_item_xml: bool,
 ) -> Result<Value, AdManagerError> {
     if targets.is_empty() {
         return Ok(json!({
@@ -3183,14 +3189,14 @@ async fn probe_ad_unit_line_item_dependencies(
     let mut status_counts: BTreeMap<String, u64> = BTreeMap::new();
     let mut missing_total_size = false;
 
-    while inspected_results < max_line_items {
-        let remaining = max_line_items.saturating_sub(inspected_results);
-        let page_limit = line_item_page_size.min(remaining).max(1);
+    while inspected_results < options.max_line_items {
+        let remaining = options.max_line_items.saturating_sub(inspected_results);
+        let page_limit = options.line_item_page_size.min(remaining).max(1);
         let query = format!("ORDER BY id ASC LIMIT {page_limit} OFFSET {offset}");
         let payload_xml = pql_payload(&query);
         let plan = server.client().build_soap_trafficking_plan(
-            network_code,
-            api_version,
+            options.network_code,
+            options.api_version,
             SoapTraffickingOperation::GetLineItemsByStatement,
             &payload_xml,
         )?;
@@ -3233,7 +3239,7 @@ async fn probe_ad_unit_line_item_dependencies(
                 result,
                 targets,
                 placement_summary,
-                include_line_item_xml,
+                options.include_line_item_xml,
             ) {
                 dependency_match_count += 1;
                 if dependency_matches_sample.len() < DEPENDENCY_LINE_ITEM_MATCH_SAMPLE_LIMIT {
@@ -3262,7 +3268,7 @@ async fn probe_ad_unit_line_item_dependencies(
         || missing_total_size
         || total_result_set_size
             .map(|total| total > u64::from(inspected_results))
-            .unwrap_or(inspected_results >= max_line_items);
+            .unwrap_or(inspected_results >= options.max_line_items);
     let proof_state = if capped { "sample_only" } else { "complete" };
     let decision = if dependency_match_count > 0 {
         "dependencies_found"
@@ -3278,8 +3284,8 @@ async fn probe_ad_unit_line_item_dependencies(
         "proof_state": proof_state,
         "total_result_set_size": total_result_set_size,
         "inspected_results": inspected_results,
-        "max_line_items": max_line_items,
-        "line_item_page_size": line_item_page_size,
+        "max_line_items": options.max_line_items,
+        "line_item_page_size": options.line_item_page_size,
         "response_truncated": response_truncated,
         "missing_total_result_set_size": missing_total_size,
         "request_ids": request_ids,
