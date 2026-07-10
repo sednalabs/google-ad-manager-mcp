@@ -160,13 +160,6 @@ fn compound_secret_key_start(lower: &str, key: &str) -> Option<usize> {
         if !before_is_boundary || after.is_some_and(|ch| ch.is_ascii_alphanumeric()) {
             return None;
         }
-        if after == Some('_')
-            && !tail.contains(':')
-            && !tail.contains('=')
-            && benign_secret_status_suffix(tail)
-        {
-            return None;
-        }
         Some(start)
     })
 }
@@ -204,6 +197,37 @@ fn assigned_value_after_key<'a>(lower: &'a str, key: &str) -> Option<&'a str> {
     )
 }
 
+fn inline_value_after_key(lower: &str, key: &str) -> bool {
+    let Some(start) = compound_secret_key_start(lower, key) else {
+        return false;
+    };
+    lower[start + key.len()..]
+        .chars()
+        .any(|ch| ch.is_ascii_alphanumeric())
+}
+
+fn benign_secret_status_phrase(lower: &str, key: &str, following: &[&str]) -> bool {
+    let Some(start) = compound_secret_key_start(lower, key) else {
+        return false;
+    };
+    let tail = &lower[start + key.len()..];
+    if tail.contains([':', '=']) || !benign_secret_status_suffix(tail) {
+        return false;
+    }
+    if following.is_empty() {
+        return true;
+    }
+    let normalized = following
+        .iter()
+        .map(|word| word.trim_matches(|ch: char| !ch.is_ascii_alphanumeric()))
+        .collect::<Vec<_>>();
+    matches!(
+        (tail, normalized.as_slice()),
+        ("_rotation_failed", ["please", "retry"])
+            | ("_missing", ["use", "workload", "identity"])
+    )
+}
+
 fn authorization_needs_following_value(lower: &str) -> bool {
     match assigned_value_after_key(lower, "authorization") {
         None | Some("") | Some("bearer" | "basic") => true,
@@ -229,7 +253,11 @@ fn credential_key_starts_value(lower: &str, key: &str, following: &[&str]) -> bo
     if !credential_key_context(lower, key) {
         return false;
     }
+    if benign_secret_status_phrase(lower, key, following) {
+        return false;
+    }
     assigned_value_after_key(lower, key).is_some()
+        || inline_value_after_key(lower, key)
         || following.first().is_some_and(|value| {
             key != "authorization"
                 || redaction_separator_token(value)
@@ -428,6 +456,10 @@ mod tests {
             (
                 "client_secret_missing-opaque-secret",
                 "[redacted]",
+            ),
+            (
+                "client_secret_missing opaque-secret",
+                "[redacted] [redacted]",
             ),
         ] {
             assert_eq!(redact_secret_text(source), expected);
