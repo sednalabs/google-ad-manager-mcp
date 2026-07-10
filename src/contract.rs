@@ -132,6 +132,23 @@ pub fn redact_secret_text(input: &str) -> String {
 }
 
 fn secret_value_extends_past_token(lower: &str) -> bool {
+    let markers = [
+        "private_key",
+        "authorization",
+        "access_token",
+        "refresh_token",
+        "client_secret",
+        "bearer",
+        "basic",
+        "ya29.",
+    ];
+    let marker_count = markers
+        .into_iter()
+        .map(|marker| lower.match_indices(marker).count())
+        .sum::<usize>();
+    if marker_count > 1 {
+        return true;
+    }
     if lower.contains("-----begin") {
         true
     } else if lower.contains("private_key") {
@@ -144,6 +161,7 @@ fn secret_value_extends_past_token(lower: &str) -> bool {
             .find(|key| lower.contains(key))
             .is_some_and(|key| assigned_value_after_key(lower, key).is_none_or(str::is_empty))
             || contains_scheme_marker(lower)
+            || lower.contains("ya29.")
     }
 }
 
@@ -246,7 +264,10 @@ fn credential_key_starts_value(lower: &str, key: &str, following: &[&str]) -> bo
     if benign_secret_status_phrase(lower, key, following) {
         return false;
     }
-    if compound_secret_key_start(lower, key).is_none() {
+    let Some(start) = compound_secret_key_start(lower, key) else {
+        return true;
+    };
+    if start != 0 {
         return true;
     }
     assigned_value_after_key(lower, key).is_some()
@@ -462,6 +483,13 @@ mod tests {
             ("opaqueBearer", "[redacted]"),
             ("opaqueya29.synthetic", "[redacted]"),
             ("Bearer", "Bearer"),
+            ("opaque_access_token", "[redacted]"),
+            ("\u{79d8}\u{5bc6}_access_token", "[redacted]"),
+            (
+                "access_token=masked;client_secret opaque-secret",
+                "[redacted] [redacted]",
+            ),
+            ("ya29. opaque-secret", "[redacted] [redacted]"),
         ] {
             assert_eq!(redact_secret_text(source), expected);
         }
