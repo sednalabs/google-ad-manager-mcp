@@ -6,7 +6,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use mcp_toolkit::rmcp::model::CallToolResult;
 use serde_json::{Value, json};
 
-use crate::{AdManagerError, contract};
+use crate::{AdManagerError, contract, fingerprint::stable_fingerprint};
 
 pub(crate) const EVIDENCE_PRODUCER_CONTRACT_VERSION: &str = "gam-evidence-producer-v1";
 pub(crate) const MAX_EVIDENCE_TARGETS: usize = 10;
@@ -99,7 +99,7 @@ pub(crate) fn success_with_wire_guard(
         Err(primary_failure) => match compact_data {
             None => Err(primary_failure.to_string()),
             Some(compact) if !valid_compact_projection(&compact) => Err(format!(
-                "primary result: {primary_failure}; compact projection omitted its required truncated, fingerprint, receipt, or binding fields"
+                "primary result: {primary_failure}; compact projection failed its required truncated, fingerprint, and receipt-binding validation"
             )),
             Some(compact) => guarded_success(compact, meta, started).map_err(|failure| {
                 format!("primary result: {primary_failure}; compact projection: {failure}")
@@ -108,7 +108,7 @@ pub(crate) fn success_with_wire_guard(
     };
     match guarded {
         Ok(result) => result,
-        Err(failure) => contract::error(AdManagerError::result_contract(field, failure), started),
+        Err(failure) => contract::result_contract_error(field, failure, started),
     }
 }
 
@@ -138,18 +138,41 @@ fn guarded_success(
 }
 
 fn valid_compact_projection(value: &Value) -> bool {
-    value.pointer("/result_projection/truncated").and_then(Value::as_bool) == Some(true)
-        && value
-            .pointer("/result_projection/receipt_binds_returned_projection")
-            .and_then(Value::as_bool)
-            .is_some()
-        && value
-            .get("result_fingerprint")
-            .and_then(Value::as_str)
-            .is_some_and(valid_result_hash)
-        && value
-            .get("evidence_receipt_template")
-            .is_some_and(Value::is_object)
+    let truncated = value
+        .pointer("/result_projection/truncated")
+        .and_then(Value::as_bool)
+        == Some(true);
+    let binding_claim = value
+        .pointer("/result_projection/receipt_binds_returned_projection")
+        .and_then(Value::as_bool);
+    let fingerprint = value.get("result_fingerprint").and_then(Value::as_str);
+    let receipt = value
+        .get("evidence_receipt_template")
+        .and_then(Value::as_object);
+    let (Some(binding_claim), Some(fingerprint), Some(receipt)) =
+        (binding_claim, fingerprint, receipt)
+    else {
+        return false;
+    };
+    if !truncated || !valid_result_hash(fingerprint) {
+        return false;
+    }
+
+    let mut fingerprint_input = value.clone();
+    let Some(object) = fingerprint_input.as_object_mut() else {
+        return false;
+    };
+    object.remove("result_fingerprint");
+    object.remove("evidence_receipt_template");
+    if stable_fingerprint(&fingerprint_input.to_string()) != fingerprint {
+        return false;
+    }
+
+    match (binding_claim, receipt.get("result_hash")) {
+        (true, Some(Value::String(receipt_hash))) => receipt_hash == fingerprint,
+        (false, None) => true,
+        _ => false,
+    }
 }
 
 fn current_unix_seconds() -> Result<u64, AdManagerError> {
@@ -217,6 +240,8 @@ mod tests {
 
     use serde_json::json;
 
+    use crate::fingerprint::stable_fingerprint;
+
     use super::{
         EVIDENCE_PRODUCER_CONTRACT_VERSION, EvidenceSource, EvidenceState,
         MAX_CONTRACT_ENVELOPE_BYTES, MAX_RMCP_TRANSPORT_BYTES, evidence_receipt_template,
@@ -234,6 +259,21 @@ mod tests {
         let serialized = serde_json::to_vec(&result).expect("serialize guarded result");
         assert!(serialized.len() < MAX_RMCP_TRANSPORT_BYTES);
         String::from_utf8(serialized).expect("UTF-8 result")
+    }
+
+    fn compact_projection(mut data: serde_json::Value, binds_receipt: bool) -> serde_json::Value {
+        data["result_projection"] = json!({
+            "truncated": true,
+            "receipt_binds_returned_projection": binds_receipt,
+        });
+        let fingerprint = stable_fingerprint(&data.to_string());
+        data["result_fingerprint"] = json!(fingerprint.clone());
+        data["evidence_receipt_template"] = if binds_receipt {
+            json!({"result_hash": fingerprint})
+        } else {
+            json!({"state": "not_generated"})
+        };
+        data
     }
 
     #[test]
@@ -310,14 +350,7 @@ mod tests {
 
         let rendered = render_guard(
             json!({"optional_raw_output":"x".repeat(MAX_CONTRACT_ENVELOPE_BYTES)}),
-            Some(json!({
-                "result_fingerprint":"0123456789abcdef",
-                "evidence_receipt_template":{"state":"not_generated"},
-                "result_projection":{
-                    "truncated":true,
-                    "receipt_binds_returned_projection":false
-                }
-            })),
+            Some(compact_projection(json!({}), false)),
         );
         assert!(rendered.contains("\"ok\":true"));
         assert!(rendered.contains("\"truncated\":true"));
@@ -327,6 +360,35 @@ mod tests {
             Some(json!({"result_projection":{"truncated":true}})),
         );
         assert!(rejected.contains("result_contract_error"));
-        assert!(rejected.contains("compact projection omitted its required"));
+        assert!(rejected.contains("compact projection failed its required"));
+
+        let mut mismatched_receipt = compact_projection(json!({"decision":"clear"}), true);
+        mismatched_receipt["evidence_receipt_template"]["result_hash"] =
+            json!("fedcba9876543210");
+        let rejected = render_guard(
+            json!({"optional_raw_output":"x".repeat(MAX_CONTRACT_ENVELOPE_BYTES)}),
+            Some(mismatched_receipt),
+        );
+        assert!(rejected.contains("result_contract_error"));
+
+        for forged in [
+            json!({
+                "result_fingerprint":"0123456789abcdef",
+                "evidence_receipt_template":{},
+                "result_projection":{
+                    "truncated":true,
+                    "receipt_binds_returned_projection":true
+                }
+            }),
+            compact_projection(json!({"decision":"clear"}), true),
+        ] {
+            let mut forged = forged;
+            forged["decision"] = json!("changed_after_fingerprinting");
+            let rejected = render_guard(
+                json!({"optional_raw_output":"x".repeat(MAX_CONTRACT_ENVELOPE_BYTES)}),
+                Some(forged),
+            );
+            assert!(rejected.contains("result_contract_error"));
+        }
     }
 }

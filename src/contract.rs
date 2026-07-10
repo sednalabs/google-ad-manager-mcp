@@ -51,6 +51,29 @@ pub fn error(err: AdManagerError, started: Instant) -> CallToolResult {
     }))
 }
 
+pub(crate) fn result_contract_error(
+    field: &'static str,
+    message: impl AsRef<str>,
+    started: Instant,
+) -> CallToolResult {
+    CallToolResult::structured(json!({
+        "ok": false,
+        "error": {
+            "code": "result_contract_error",
+            "reason": "result_contract_failed",
+            "message": redact_secret_text(&format!(
+                "result contract failed for {field}: {}",
+                message.as_ref()
+            )),
+            "category": "safety",
+            "hint": "Narrow the target or page limits and omit optional raw output; report an adapter defect if a bounded projection still fails.",
+        },
+        "meta": {
+            "elapsed_ms": elapsed_ms(started),
+        }
+    }))
+}
+
 pub fn error_with_detail(err: AdManagerError, detail: Value, started: Instant) -> CallToolResult {
     CallToolResult::structured(json!({
         "ok": false,
