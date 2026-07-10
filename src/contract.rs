@@ -114,14 +114,14 @@ pub fn redact_secret_text(input: &str) -> String {
     let tokens = input.split_whitespace().collect::<Vec<_>>();
     for (index, token) in tokens.iter().enumerate() {
         let token = *token;
-        let next = tokens.get(index + 1).copied();
+        let following = &tokens[index + 1..];
         if !out.is_empty() {
             out.push(' ');
         }
         let lower = token.to_ascii_lowercase();
         if redact_rest {
             out.push_str("[redacted]");
-        } else if looks_secret_bearing(token, next) {
+        } else if looks_secret_bearing(token, following) {
             out.push_str("[redacted]");
             redact_rest = secret_value_extends_past_token(&lower);
         } else {
@@ -172,23 +172,26 @@ fn compound_secret_key_start(lower: &str, key: &str) -> Option<usize> {
 }
 
 fn benign_secret_status_suffix(tail: &str) -> bool {
-    [
-        "_check",
-        "_configured",
-        "_disabled",
-        "_error",
-        "_expired",
-        "_failed",
-        "_failure",
-        "_missing",
-        "_present",
-        "_rotation",
-        "_status",
-        "_unavailable",
-        "_validation",
-    ]
-    .into_iter()
-    .any(|prefix| tail.starts_with(prefix))
+    let suffix = tail.trim_matches(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'));
+    matches!(
+        suffix,
+        "_check"
+            | "_check_failed"
+            | "_configured"
+            | "_disabled"
+            | "_error"
+            | "_expired"
+            | "_failed"
+            | "_failure"
+            | "_missing"
+            | "_present"
+            | "_rotation"
+            | "_rotation_failed"
+            | "_status"
+            | "_unavailable"
+            | "_validation"
+            | "_validation_failed"
+    )
 }
 
 fn assigned_value_after_key<'a>(lower: &'a str, key: &str) -> Option<&'a str> {
@@ -222,31 +225,31 @@ fn redaction_separator_token(token: &str) -> bool {
             .all(|ch| !(ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.')))
 }
 
-fn credential_key_starts_value(lower: &str, key: &str, next: Option<&str>) -> bool {
+fn credential_key_starts_value(lower: &str, key: &str, following: &[&str]) -> bool {
     if !credential_key_context(lower, key) {
         return false;
     }
     assigned_value_after_key(lower, key).is_some()
-        || next.is_some_and(|value| {
+        || following.first().is_some_and(|value| {
             key != "authorization"
                 || redaction_separator_token(value)
-                || !benign_diagnostic_qualifier(&value.to_ascii_lowercase())
+                || !benign_authorization_diagnostic_phrase(following)
         })
 }
 
-fn scheme_starts_credential(lower: &str, next: Option<&str>) -> bool {
+fn scheme_starts_credential(lower: &str, following: &[&str]) -> bool {
     if !scheme_needs_following_value(lower) {
         return false;
     }
-    let Some(next) = next else {
-        return false;
-    };
-    !next.is_empty()
+    following.first().is_some_and(|next| !next.is_empty())
 }
 
-fn benign_diagnostic_qualifier(value: &str) -> bool {
+fn benign_authorization_diagnostic_phrase(following: &[&str]) -> bool {
+    let [qualifier] = following else {
+        return false;
+    };
     matches!(
-        value.trim_matches(|ch: char| !ch.is_ascii_alphanumeric()),
+        qualifier.trim_matches(|ch: char| !ch.is_ascii_alphanumeric()),
         "authentication"
             | "authorization"
             | "check"
@@ -294,7 +297,7 @@ fn elapsed_ms(started: Instant) -> u64 {
     }
 }
 
-fn looks_secret_bearing(token: &str, next: Option<&str>) -> bool {
+fn looks_secret_bearing(token: &str, following: &[&str]) -> bool {
     let lower = token.to_ascii_lowercase();
     [
         "access_token",
@@ -304,8 +307,8 @@ fn looks_secret_bearing(token: &str, next: Option<&str>) -> bool {
         "authorization",
     ]
     .into_iter()
-    .any(|key| credential_key_starts_value(&lower, key, next))
-        || scheme_starts_credential(&lower, next)
+    .any(|key| credential_key_starts_value(&lower, key, following))
+        || scheme_starts_credential(&lower, following)
         || lower.contains("-----begin")
         || lower
             .trim_matches(|ch: char| !ch.is_ascii_alphanumeric())
@@ -401,7 +404,11 @@ mod tests {
             ),
             ("access_token=opaque-secret ok", "[redacted] ok"),
             ("ya29.synthetic ok", "[redacted] ok"),
-            ("authorization failed safely", "authorization failed safely"),
+            ("authorization failed", "authorization failed"),
+            (
+                "Authorization failed opaque-secret",
+                "[redacted] [redacted] [redacted]",
+            ),
             (
                 "basic validation failed",
                 "[redacted] [redacted] [redacted]",
@@ -417,6 +424,10 @@ mod tests {
             (
                 "client_secret_missing use workload identity",
                 "client_secret_missing use workload identity",
+            ),
+            (
+                "client_secret_missing-opaque-secret",
+                "[redacted]",
             ),
         ] {
             assert_eq!(redact_secret_text(source), expected);

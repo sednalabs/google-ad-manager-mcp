@@ -8358,8 +8358,13 @@ mod tests {
             )
             .expect("suppression is not an internal error");
             assert_eq!(
-                response["evidence_receipt_template"]["state"],
-                "not_generated"
+                response["evidence_receipt_template"],
+                json!({
+                    "source": "dependency_probe",
+                    "source_version": "gam-evidence-producer-v2",
+                    "state": "not_generated",
+                    "reason": "evidence receipts require a canonical network, result fingerprint, and one to ten fully resolved exact ad-unit ids"
+                })
             );
         }
     }
