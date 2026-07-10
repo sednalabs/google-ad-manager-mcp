@@ -604,12 +604,30 @@ mod tests {
                 "access_token==reason=missing opaque-secret",
                 "[redacted] [redacted]",
             ),
-            ("Bearer#reason=missing opaque-secret", "[redacted] [redacted]"),
-            ("Bearer/reason=missing opaque-secret", "[redacted] [redacted]"),
-            ("Bearer=:reason=missing opaque-secret", "[redacted] [redacted]"),
-            ("ya29.#reason=missing opaque-secret", "[redacted] [redacted]"),
-            ("ya29./reason=missing opaque-secret", "[redacted] [redacted]"),
-            ("ya29.==reason=missing opaque-secret", "[redacted] [redacted]"),
+            (
+                "Bearer#reason=missing opaque-secret",
+                "[redacted] [redacted]",
+            ),
+            (
+                "Bearer/reason=missing opaque-secret",
+                "[redacted] [redacted]",
+            ),
+            (
+                "Bearer=:reason=missing opaque-secret",
+                "[redacted] [redacted]",
+            ),
+            (
+                "ya29.#reason=missing opaque-secret",
+                "[redacted] [redacted]",
+            ),
+            (
+                "ya29./reason=missing opaque-secret",
+                "[redacted] [redacted]",
+            ),
+            (
+                "ya29.==reason=missing opaque-secret",
+                "[redacted] [redacted]",
+            ),
         ] {
             assert_eq!(redact_secret_text(source), expected);
         }
