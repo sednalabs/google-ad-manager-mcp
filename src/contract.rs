@@ -203,7 +203,8 @@ fn assigned_value_after_key<'a>(lower: &'a str, key: &str) -> Option<&'a str> {
 }
 
 fn assigned_value_after_occurrence<'a>(lower: &'a str, start: usize, key: &str) -> Option<&'a str> {
-    let tail = &lower[start + key.len()..];
+    let marker_end = start + key.len();
+    let tail = &lower[marker_end..next_secret_marker_start(lower, marker_end)];
     let separator = tail.find([':', '='])?;
     if tail[..separator]
         .chars()
@@ -223,10 +224,31 @@ fn credential_occurrence_needs_following_value(lower: &str, start: usize, key: &
 }
 
 fn marker_has_inline_material(lower: &str, start: usize, marker_len: usize) -> bool {
-    lower[..start]
+    let marker_end = start + marker_len;
+    lower[marker_end..next_secret_marker_start(lower, marker_end)]
         .chars()
-        .chain(lower[start + marker_len..].chars())
         .any(char::is_alphanumeric)
+}
+
+fn next_secret_marker_start(lower: &str, after: usize) -> usize {
+    [
+        "private_key",
+        "authorization",
+        "access_token",
+        "refresh_token",
+        "client_secret",
+        "bearer",
+        "basic",
+        "ya29.",
+    ]
+    .into_iter()
+    .filter_map(|marker| {
+        lower[after..]
+            .find(marker)
+            .map(|offset| after + offset)
+    })
+    .min()
+    .unwrap_or(lower.len())
 }
 
 fn credential_value_char(ch: char) -> bool {
@@ -524,6 +546,25 @@ mod tests {
                 "access_token;reason=missing opaque-secret",
                 "[redacted] [redacted]",
             ),
+            ("opaqueBearer opaque-secret", "[redacted] [redacted]"),
+            ("opaqueya29. opaque-secret", "[redacted] [redacted]"),
+            (
+                "authorization=prefixBearer opaque-secret",
+                "[redacted] [redacted]",
+            ),
+            (
+                "access_token=masked;ya29. opaque-secret",
+                "[redacted] [redacted]",
+            ),
+            (
+                "access_token-client_secret=masked opaque-secret",
+                "[redacted] [redacted]",
+            ),
+            (
+                "access_token_client_secret=masked opaque-secret",
+                "[redacted] [redacted]",
+            ),
+            ("BearerBasic opaque-secret", "[redacted] [redacted]"),
         ] {
             assert_eq!(redact_secret_text(source), expected);
         }
