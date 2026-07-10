@@ -242,7 +242,12 @@ fn attached_value_segment(value: &str) -> &str {
         .or_else(|| value.strip_prefix('='))
         .unwrap_or(value);
     let end = value
-        .find(|ch| matches!(ch, ';' | ',' | '&' | '?' | '|' | '"' | '\'' | ')' | ']' | '}' | '>'))
+        .find(|ch| {
+            matches!(
+                ch,
+                ';' | ',' | '&' | '?' | '|' | '"' | '\'' | ')' | ']' | '}' | '>'
+            )
+        })
         .unwrap_or(value.len());
     &value[..end]
 }
@@ -583,8 +588,14 @@ mod tests {
                 "access_token_reason=missing opaque-secret",
                 "[redacted] [redacted]",
             ),
-            ("Bearer;reason=missing opaque-secret", "[redacted] [redacted]"),
-            ("ya29.;reason=missing opaque-secret", "[redacted] [redacted]"),
+            (
+                "Bearer;reason=missing opaque-secret",
+                "[redacted] [redacted]",
+            ),
+            (
+                "ya29.;reason=missing opaque-secret",
+                "[redacted] [redacted]",
+            ),
         ] {
             assert_eq!(redact_secret_text(source), expected);
         }
