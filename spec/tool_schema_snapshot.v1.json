@@ -121,6 +121,22 @@
       "description": "Read-only evidence-graded retirement assessment for exact Ad Manager ad-unit ids, with current identity and descendant proof.",
       "inputSchema": {
         "$defs": {
+          "RetirementAdUnitIdSchema": {
+            "maxLength": 20,
+            "minLength": 1,
+            "pattern": "^[0-9]+$",
+            "type": "string"
+          },
+          "RetirementEvidenceHashSchema": {
+            "maxLength": 128,
+            "minLength": 16,
+            "pattern": "^[A-Za-z0-9:_.-]+$",
+            "type": "string"
+          },
+          "RetirementEvidenceNoteSchema": {
+            "maxLength": 500,
+            "type": "string"
+          },
           "RetirementEvidenceReceipt": {
             "properties": {
               "manual_ui_proof_included": {
@@ -130,14 +146,21 @@
               },
               "network_code": {
                 "description": "Network code covered by this evidence receipt.",
+                "maxLength": 20,
+                "minLength": 1,
+                "pattern": "^[1-9][0-9]{0,19}$",
                 "type": "string"
               },
               "note": {
-                "description": "Optional bounded, non-sensitive operator note. The note is not echoed.",
-                "type": [
-                  "string",
-                  "null"
-                ]
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/RetirementEvidenceNoteSchema"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Optional bounded, non-sensitive operator note. The note is not echoed."
               },
               "observed_at_unix_seconds": {
                 "description": "Unix epoch seconds when the source proof completed.",
@@ -149,11 +172,15 @@
                 ]
               },
               "result_hash": {
-                "description": "Opaque result hash from the source proof. Raw payloads are not accepted.",
-                "type": [
-                  "string",
-                  "null"
-                ]
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/RetirementEvidenceHashSchema"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Opaque result hash from the source proof. Raw payloads are not accepted."
               },
               "source": {
                 "$ref": "#/$defs/RetirementEvidenceSource",
@@ -161,6 +188,9 @@
               },
               "source_version": {
                 "description": "Source tool, schema, or contract version that produced the result hash.",
+                "maxLength": 64,
+                "minLength": 1,
+                "pattern": "^[A-Za-z0-9._+-]+$",
                 "type": "string"
               },
               "state": {
@@ -171,8 +201,10 @@
                 "default": [],
                 "description": "Exact canonical ad-unit ids covered by the source proof.",
                 "items": {
-                  "type": "string"
+                  "$ref": "#/$defs/RetirementAdUnitIdSchema"
                 },
+                "maxItems": 10,
+                "minItems": 1,
                 "type": "array"
               },
               "ttl_seconds": {
@@ -240,7 +272,7 @@
           "ad_unit_ids": {
             "description": "Exact positive numeric ad-unit ids to assess.",
             "items": {
-              "type": "string"
+              "$ref": "#/$defs/RetirementAdUnitIdSchema"
             },
             "maxItems": 10,
             "minItems": 1,
@@ -279,6 +311,7 @@
             "description": "Raw positive numeric Ad Manager network code, for example 1234567.",
             "maxLength": 20,
             "minLength": 1,
+            "pattern": "^[1-9][0-9]{0,19}$",
             "type": "string"
           }
         },

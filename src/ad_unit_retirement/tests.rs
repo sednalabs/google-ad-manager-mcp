@@ -18,9 +18,7 @@ fn receipt(
         source,
         source_version: match source {
             RetirementEvidenceSource::DependencyProbe
-            | RetirementEvidenceSource::ExchangeProtectionReview => {
-                env!("CARGO_PKG_VERSION")
-            }
+            | RetirementEvidenceSource::ExchangeProtectionReview => env!("CARGO_PKG_VERSION"),
             RetirementEvidenceSource::DeliveryReport => "gam-report-v1",
             RetirementEvidenceSource::SiteContract => "site-contract-v1",
             RetirementEvidenceSource::Telemetry => "telemetry-v1",
