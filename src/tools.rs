@@ -7394,7 +7394,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dependency_probe_handler_finalizes_a_provider_blocked_normal_path() {
+    async fn dependency_probe_handler_projects_an_oversized_provider_blocked_success() {
         let settings = crate::Settings {
             service_account_json_path: Some(
                 "/definitely-missing/gam-mcp-test-service-account.json".to_string(),
@@ -7406,7 +7406,7 @@ mod tests {
             .gam_ad_unit_dependency_probe(Parameters(AdUnitDependencyProbeArgs {
                 network_code: "001015422".to_string(),
                 ad_unit_codes: Vec::new(),
-                ad_unit_ids: vec!["200".to_string()],
+                ad_unit_ids: (200..250).map(|id| id.to_string()).collect(),
                 api_version: None,
                 line_item_page_size: None,
                 max_line_items: None,
@@ -7419,6 +7419,12 @@ mod tests {
         assert_eq!(response["ok"], true);
         assert_eq!(response["data"]["network_code"], "1015422");
         assert_eq!(response["data"]["dependency_decision"], "blocked");
+        assert_eq!(
+            response["data"]["result_projection"]["version"],
+            "gam-probe-result-projection-v1"
+        );
+        assert_eq!(response["data"]["ad_units_summary"]["source_count"], 50);
+        assert!(response["data"].get("ad_units").is_none());
         assert!(
             response["data"]["result_fingerprint"]
                 .as_str()

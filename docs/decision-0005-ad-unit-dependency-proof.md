@@ -38,6 +38,8 @@ from a sample:
 - `placements_capped_or_shape_unknown`
 - `id_only_targets_have_unknown_ancestors`
 - `soap_manage_scope_required`
+- `target_resolution_incomplete`
+- `line_items_blocked`
 
 The response includes a stable `result_fingerprint` over the bounded proof
 payload. It can bind a later evidence-grading receipt, but it does not upgrade a
@@ -76,6 +78,9 @@ fingerprint and an eligible receipt bind the returned projection; an ineligible
 full target scope remains unbound as `not_generated`. Semantic drift, false completeness, receipt
 drift, or a still-oversized compact result fails closed.
 
+All six dependency proof flags are re-derived from the retained target,
+resolution, placement, and line-item surfaces before receipt rebinding.
+
 The projection contract is visible at `data.result_projection`.
 `source_result_fingerprint` is an audit link to the full producer result, while
 the returned `result_fingerprint` is the value bound by the returned receipt.
@@ -84,7 +89,9 @@ Consumers must use the latter for subsequent receipt validation.
 Valid pre-scan `skipped` and permission-blocked surfaces remain compactable
 without synthetic scan counters. Optional per-match XML is summarized with its
 original bytes, retained bytes, sample count, and truncation count. Projection
-also re-derives the root dependency decision and rejects nested target evidence
+ledger rows count and fingerprint the actual retained XML samples that are
+omitted; original upstream bytes remain in the summary. Projection also
+re-derives the root dependency decision and rejects nested target evidence
 outside the top-level probe target scope before rebinding a receipt.
 
 The helper is read-only and always reports `mutation_performed=false`.

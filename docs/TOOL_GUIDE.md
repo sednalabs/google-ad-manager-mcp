@@ -184,11 +184,18 @@ typed omission ledger; they are never silently shortened under native
 completeness flags. Generated receipts are rebound to the returned projection,
 while `not_generated` remains ineligible.
 
+Before rebinding, the adapter re-derives all six dependency proof flags from
+the retained targets, resolution issues, placement state, and line-item
+progress. Contradictory source flags fail closed rather than receiving a new
+compact receipt.
+
 Skipped and permission-blocked dependency surfaces use the same compact
 contract without inventing scan metadata they never produced. When optional
 line-item XML is omitted, `upstream_xml_sample_summary` preserves the sample
 count, original and retained UTF-8 byte totals, and the number of truncated XML
-samples. Nested placement, yield-group, and line-item target evidence must stay
+samples. The omission ledger separately counts and fingerprints the actual
+retained XML sample bytes removed from the returned projection; original
+upstream byte totals remain summary metadata. Nested placement, yield-group, and line-item target evidence must stay
 within the exact top-level probe target scope before a returned receipt can bind
 the compact result.
 

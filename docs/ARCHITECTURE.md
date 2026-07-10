@@ -89,8 +89,9 @@ operations.
 The two high-level proof tools return their native Contract V1 shape when it
 fits the model-visible and RMCP limits. Oversized results cross a separate
 projection boundary: authoritative semantics are extracted before and after
-projection, omissions are recorded explicitly, and an eligible receipt is
-rebound to the returned compact fingerprint. Oversized errors retain their stable
+projection, root decisions, certainty, and dependency proof flags are
+re-derived from retained source surfaces, omissions are recorded explicitly,
+and an eligible receipt is rebound to the returned compact fingerprint. Oversized errors retain their stable
 classification and a redacted UTF-8-safe message prefix. A projection that
 drifts semantically or remains oversized is replaced by a bounded contract
 error.

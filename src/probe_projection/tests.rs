@@ -6,6 +6,9 @@ use crate::evidence::{
     validated_receipt_binding,
 };
 
+#[path = "tests/exchange.rs"]
+mod exchange_cases;
+
 fn structured(result: CallToolResult) -> Value {
     result.structured_content.expect("structured result")
 }
@@ -64,13 +67,19 @@ fn ad_unit(id: usize, exchange: bool) -> Value {
         "proof_state":"resolved_exact"
     });
     if exchange {
+        row["ad_unit_code"] = json!(format!("unit-{id}"));
+        row["ancestor_ad_unit_ids"] = json!([]);
+        row["ancestor_identity_complete"] = json!(true);
+        row["display_name"] = json!(format!("Inventory unit {id}"));
+        row["status"] = json!("ACTIVE");
+        row["ad_unit_sizes"] = json!([]);
         row["decision"] = json!("clear_on_exposed_flags");
         row["proof_complete"] = json!(true);
         row["applied_adsense_enabled"] = json!(false);
         row["effective_adsense_enabled"] = json!(false);
         row["explicitly_targeted"] = json!(true);
     } else {
-        row["ad_unit_codes"] = json!([format!("unit-{id}")]);
+        row["ad_unit_code"] = json!(format!("unit-{id}"));
         row["display_name"] = json!(format!("Inventory unit {id}"));
         row["status"] = json!("ACTIVE");
         row["ad_unit_sizes"] = json!([
@@ -78,7 +87,7 @@ fn ad_unit(id: usize, exchange: bool) -> Value {
             {"width": 160, "height": 1200}
         ]);
         row["ancestor_ad_unit_ids"] = json!([]);
-        row["proof_notes"] = json!([]);
+        row["ancestor_identity_complete"] = json!(true);
     }
     row
 }
@@ -94,7 +103,11 @@ fn exchange(generated: bool, raw: usize) -> Value {
             "private_auction_deals":{"collection":"private_auction_deals","proof_state":"complete_empty","row_count_in_page":0,"page_size":100,"next_page_token_present":false,"capped_or_possibly_more":false,"sample":[]},
             "yield_groups":{"surface":"yield_groups","decision":"no_target_matches","proof_state":"complete","request_id":"r","request_id_truncated":false,"response_time":"1","response_time_truncated":false,"total_result_set_size":0,"inspected_results":0,"response_truncated":false,"target_ad_unit_ids":target_ad_unit_ids,"target_ad_unit_matches":[],"targeted_exposed":[],"targeted_and_excluded":[],"targeted_inactive":[],"targeted_activity_unknown":[],"mutation_performed":false,"upstream_response_xml":"x".repeat(raw)},
             "rest_discovery":{"proof_state":"metadata_read","resource_count":1,"interesting_resources":["yieldGroups"]},
-            "unsupported_or_unintegrated_surfaces":[{"surface":"protections","proof_state":"not_proven","api_exposure":"not_seen","note":"not integrated"}],
+            "unsupported_or_unintegrated_surfaces":[
+                {"surface":"protections","proof_state":"not_proven","api_exposure":"not_seen_in_rest_discovery","note":"GAM protection objects are not implemented as a current MCP read surface."},
+                {"surface":"inventory_rules","proof_state":"not_proven","api_exposure":"not_seen_in_rest_discovery","note":"GAM inventory-rule objects are not implemented as a current MCP read surface."},
+                {"surface":"unified_pricing_rules","proof_state":"not_proven","api_exposure":"not_seen_in_rest_discovery","note":"GAM unified pricing rules are not implemented as a current MCP read surface."}
+            ],
             "attention_reasons":[],"partial_reasons":["manual proof remains"],
             "certainty":{"can_prove_requested_ad_unit_flags":true,"can_prove_private_auction_absence_or_presence":true,"can_prove_private_deal_absence_or_presence":true,"can_prove_yield_group_targeting":true,"cannot_prove_via_current_api":["protections","inventory_rules","unified_pricing_rules"]}
         }),
@@ -122,8 +135,8 @@ fn dependency(generated: bool, raw: usize) -> Value {
         json!({
             "network_code":"1234567","dependency_decision":"dependencies_found",
             "ad_units":(1..=count).map(|id| ad_unit(id,false)).collect::<Vec<_>>(),
-            "placements":{"surface":"placements","proof_state":"complete_for_page","row_count_in_page":1,"page_size":500,"next_page_token_present":false,"capped_or_possibly_more":false,"membership_shape_unknown_count":0,"membership_shape_unknown_sample":[],"target_placement_match_count":1,"target_placement_matches_truncated":false,"target_placement_id_limit_per_ad_unit":200,"target_placement_ids_truncated":false,"target_placement_ids_by_ad_unit_id":target_map,"target_placement_matches_sample":[{"status":"ACTIVE","matched_ad_unit_ids":["1"]}],"mutation_performed":false},
-            "line_items":{"surface":"line_items","decision":"dependencies_found","proof_state":"blocked","total_result_set_size":2,"inspected_results":1,"max_line_items":1000,"line_item_page_size":500,"response_truncated":false,"missing_total_result_set_size":false,"request_ids":["r"],"request_id_count":1,"request_ids_truncated":false,"response_times":["1"],"response_time_count":1,"response_times_truncated":false,"transport_metadata_sample_limit":50,"status_counts":{"DELIVERING":1},"dependency_match_count":1,"dependency_matches_sample":[{"status":"DELIVERING","activity_state":"delivering","target_matches":[{"ad_unit_id":"1","classification":"exact_target","dependency_excluded":false}],"upstream_xml_sample":"x".repeat(xml_sample_bytes),"upstream_xml_truncated":raw > xml_sample_bytes,"upstream_xml_bytes":raw}],"dependency_matches_truncated":false,"dependency_match_sample_limit":50,"mutation_performed":false,"block_class":"upstream","message":"late read blocked","message_truncated":false},
+            "placements":{"surface":"placements","proof_state":"complete_for_page","row_count_in_page":1,"page_size":500,"next_page_token_present":false,"capped_or_possibly_more":false,"membership_shape_unknown_count":0,"membership_shape_unknown_sample":[],"target_placement_match_count":1,"target_placement_matches_truncated":false,"target_placement_id_limit_per_ad_unit":200,"target_placement_ids_truncated":false,"target_placement_ids_by_ad_unit_id":target_map,"target_placement_matches_sample":[{"placement_id":"10","status":"ACTIVE","matched_ad_unit_ids":["1"]}],"mutation_performed":false},
+            "line_items":{"surface":"line_items","decision":"dependencies_found","proof_state":"blocked","total_result_set_size":2,"inspected_results":1,"max_line_items":1000,"line_item_page_size":500,"response_truncated":false,"missing_total_result_set_size":false,"request_ids":["r"],"request_id_count":1,"request_ids_truncated":false,"response_times":["1"],"response_time_count":1,"response_times_truncated":false,"transport_metadata_sample_limit":50,"status_counts":{"DELIVERING":1},"dependency_match_count":1,"dependency_matches_sample":[{"status":"DELIVERING","activity_state":"delivering","target_matches":[{"ad_unit_id":"1","ad_unit_codes":["unit-1"],"classification":"exact_target","targeting_match":{"ad_unit_id":"1","include_descendants":false,"match_type":"exact"},"exclusion_match":null,"matched_placement_ids":[],"root_or_network_targeting":false,"dependency_excluded":false}],"upstream_xml_sample":"x".repeat(xml_sample_bytes),"upstream_xml_truncated":raw > xml_sample_bytes,"upstream_xml_bytes":raw}],"dependency_matches_truncated":false,"dependency_match_sample_limit":50,"mutation_performed":false,"block_class":"upstream","upstream_status":503,"request_id":"fault-r","request_id_truncated":false,"response_time":"2","response_time_truncated":false,"soap_fault":"ServerError.SERVER_ERROR","soap_fault_truncated":false,"message":"late read blocked","message_truncated":false},
             "target_resolution_issues":[],
             "proof_flags":{"target_resolution_incomplete":false,"id_only_targets_have_unknown_ancestors":false,"placements_capped_or_shape_unknown":false,"line_items_capped_or_truncated":true,"soap_manage_scope_required":false,"line_items_blocked":true},
             "mutation_performed":false,"cleanup_decision":{"safe_to_archive_or_retire":false,"reason":"separate review required"}
@@ -143,8 +156,23 @@ fn reseal(mut full: Value, kind: ProbeKind, generated: bool) -> Value {
 
 fn skipped_dependency() -> Value {
     let mut full = dependency(false, 0);
+    let unresolved_codes = (0..50)
+        .map(|index| format!("unresolved-{index}-{}", "x".repeat(80)))
+        .collect::<Vec<_>>();
     full["dependency_decision"] = json!("missing_or_ambiguous_targets");
-    full["ad_units"] = json!([]);
+    full["ad_units"] = Value::Array(
+        unresolved_codes
+            .iter()
+            .map(|code| {
+                json!({
+                    "ad_unit_code":code,
+                    "proof_state":"missing",
+                    "reason":"exact ad-unit code was not returned by GAM",
+                    "matches":0
+                })
+            })
+            .collect(),
+    );
     full["placements"] = json!({
         "surface":"placements","proof_state":"complete_for_page","row_count_in_page":0,
         "page_size":500,"next_page_token_present":false,"capped_or_possibly_more":false,
@@ -159,20 +187,52 @@ fn skipped_dependency() -> Value {
         "reason":"no resolved ad-unit ids were available","mutation_performed":false
     });
     full["target_resolution_issues"] = Value::Array(
-        (0..50)
-            .map(|index| {
-                json!(format!(
-                    "ad unit code unresolved-{index}-{} did not resolve exactly",
-                    "x".repeat(160)
-                ))
-            })
+        unresolved_codes
+            .iter()
+            .map(|code| json!(format!("ad unit code {code} did not resolve exactly")))
             .collect(),
     );
     full["proof_flags"] = json!({
         "target_resolution_incomplete":true,"id_only_targets_have_unknown_ancestors":false,
-        "placements_capped_or_shape_unknown":false,"line_items_capped_or_truncated":true,
+        "placements_capped_or_shape_unknown":false,"line_items_capped_or_truncated":false,
         "soap_manage_scope_required":false,"line_items_blocked":false
     });
+    reseal(full, ProbeKind::AdUnitDependency, false)
+}
+
+fn unresolved_code_variant_dependency() -> Value {
+    let mut full = skipped_dependency();
+    full["ad_units"] = json!([
+        {
+            "ad_unit_code":"missing-code",
+            "proof_state":"missing",
+            "reason":"exact ad-unit code was not returned by GAM",
+            "matches":0
+        },
+        {
+            "ad_unit_code":"ambiguous-code",
+            "proof_state":"ambiguous",
+            "reason":"GAM returned multiple rows for the exact ad-unit code",
+            "matches":2
+        },
+        {
+            "ad_unit_code":"invalid-resource-code",
+            "ad_unit_id":null,
+            "resource_name":"networks/7654321/adUnits/7",
+            "display_name":null,
+            "status":null,
+            "ad_unit_sizes":null,
+            "ancestor_ad_unit_ids":[],
+            "ancestor_identity_complete":true,
+            "proof_state":"invalid_resource_name",
+            "reason":"exact ad-unit code resolved outside the requested canonical network/resource scope"
+        }
+    ]);
+    full["target_resolution_issues"] = json!([
+        "ad unit code missing-code did not resolve exactly",
+        "ad unit code ambiguous-code did not resolve exactly",
+        "ad unit code invalid-resource-code did not resolve exactly"
+    ]);
     reseal(full, ProbeKind::AdUnitDependency, false)
 }
 
@@ -180,6 +240,10 @@ fn permission_dependency() -> Value {
     let mut full = dependency(false, 0);
     full["dependency_decision"] = json!("blocked");
     for row in full["ad_units"].as_array_mut().unwrap() {
+        row.as_object_mut().unwrap().remove("ad_unit_code");
+        row.as_object_mut()
+            .unwrap()
+            .remove("ancestor_identity_complete");
         row["ad_unit_codes"] = json!([]);
         row["resource_name"] = Value::Null;
         row["display_name"] = Value::Null;
@@ -191,6 +255,18 @@ fn permission_dependency() -> Value {
             "ancestor targeting cannot be proven for an id-only target unless a code row is also resolved"
         ]);
     }
+    let target_resolution_issues = full["ad_units"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| {
+            let id = row["ad_unit_id"].as_str().unwrap();
+            json!(format!(
+                "ad unit id {id} was supplied without a resolved code row; ancestor targeting proof is incomplete"
+            ))
+        })
+        .collect::<Vec<_>>();
+    full["target_resolution_issues"] = Value::Array(target_resolution_issues);
     for ids in full["placements"]["target_placement_ids_by_ad_unit_id"]
         .as_object_mut()
         .unwrap()
@@ -207,11 +283,126 @@ fn permission_dependency() -> Value {
         "current_scope_truncated":false,"mutation_performed":false
     });
     full["proof_flags"] = json!({
-        "target_resolution_incomplete":false,"id_only_targets_have_unknown_ancestors":true,
-        "placements_capped_or_shape_unknown":false,"line_items_capped_or_truncated":true,
+        "target_resolution_incomplete":true,"id_only_targets_have_unknown_ancestors":true,
+        "placements_capped_or_shape_unknown":false,"line_items_capped_or_truncated":false,
         "soap_manage_scope_required":true,"line_items_blocked":true
     });
     reseal(full, ProbeKind::AdUnitDependency, false)
+}
+
+fn completed_dependency(sample_only: bool) -> Value {
+    let mut full = dependency(true, 9_000);
+    for ids in full["placements"]["target_placement_ids_by_ad_unit_id"]
+        .as_object_mut()
+        .unwrap()
+        .values_mut()
+    {
+        *ids = json!([]);
+    }
+    full["placements"]["target_placement_match_count"] = json!(0);
+    full["placements"]["target_placement_matches_sample"] = json!([]);
+    full["line_items"] = json!({
+        "surface":"line_items",
+        "decision":if sample_only { "no_dependencies_in_sample" } else { "no_dependencies_observed" },
+        "proof_state":if sample_only { "sample_only" } else { "complete" },
+        "total_result_set_size":if sample_only { 2 } else { 1 },
+        "inspected_results":1,
+        "max_line_items":1000,
+        "line_item_page_size":500,
+        "response_truncated":false,
+        "missing_total_result_set_size":false,
+        "request_ids":["r"],
+        "request_id_count":1,
+        "request_ids_truncated":false,
+        "response_times":["1"],
+        "response_time_count":1,
+        "response_times_truncated":false,
+        "transport_metadata_sample_limit":50,
+        "status_counts":{"PAUSED":1},
+        "dependency_match_count":0,
+        "dependency_matches_sample":[],
+        "dependency_matches_truncated":false,
+        "dependency_match_sample_limit":50,
+        "mutation_performed":false
+    });
+    full["dependency_decision"] = json!(if sample_only {
+        "incomplete_no_dependencies_observed"
+    } else {
+        "no_dependencies_observed"
+    });
+    full["proof_flags"] = json!({
+        "target_resolution_incomplete":false,
+        "id_only_targets_have_unknown_ancestors":false,
+        "placements_capped_or_shape_unknown":false,
+        "line_items_capped_or_truncated":sample_only,
+        "soap_manage_scope_required":false,
+        "line_items_blocked":false
+    });
+    reseal(full, ProbeKind::AdUnitDependency, true)
+}
+
+fn ancestor_incomplete_dependency() -> Value {
+    let mut full = completed_dependency(false);
+    full["ad_units"][0]["ancestor_identity_complete"] = json!(false);
+    full["target_resolution_issues"] = json!([
+        "ad unit code unit-1 returned malformed or foreign ancestor identities"
+    ]);
+    full["proof_flags"]["target_resolution_incomplete"] = json!(true);
+    full["dependency_decision"] = json!("missing_or_ambiguous_targets");
+    reseal(full, ProbeKind::AdUnitDependency, false)
+}
+
+fn late_error_dependency() -> Value {
+    let mut full = dependency(true, 9_000);
+    let line_items = full["line_items"].as_object_mut().unwrap();
+    for field in [
+        "upstream_status",
+        "request_id",
+        "request_id_truncated",
+        "response_time",
+        "response_time_truncated",
+        "soap_fault",
+        "soap_fault_truncated",
+        "message",
+        "message_truncated",
+    ] {
+        line_items.remove(field);
+    }
+    line_items.insert("error".into(), json!("later page unavailable"));
+    line_items.insert("error_truncated".into(), json!(false));
+    line_items.insert("hint".into(), json!("retry the read"));
+    line_items.insert("hint_truncated".into(), json!(false));
+    reseal(full, ProbeKind::AdUnitDependency, true)
+}
+
+fn generic_blocked_dependency() -> Value {
+    let mut full = permission_dependency();
+    full["line_items"] = json!({
+        "surface":"line_items",
+        "proof_state":"blocked",
+        "block_class":"upstream",
+        "error":"line-item read could not start",
+        "error_truncated":false,
+        "hint":"retry the read",
+        "hint_truncated":false
+    });
+    full["proof_flags"]["soap_manage_scope_required"] = json!(false);
+    reseal(full, ProbeKind::AdUnitDependency, false)
+}
+
+fn blocked_placement_dependency() -> Value {
+    let mut full = dependency(true, 9_000);
+    full["placements"] = json!({
+        "surface":"placements",
+        "proof_state":"blocked",
+        "block_class":"upstream",
+        "error":"placement read failed",
+        "error_truncated":false,
+        "hint":"retry the read",
+        "hint_truncated":false
+    });
+    full["proof_flags"]["placements_capped_or_shape_unknown"] = json!(true);
+    reseal(full, ProbeKind::AdUnitDependency, true)
 }
 
 #[test]
@@ -253,6 +444,23 @@ fn maximal_exchange_and_dependency_are_bounded_and_keep_receipt_state() {
                     "truncated_count": 1,
                 })
             );
+            let omission = envelope["data"]["result_projection"]["omissions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| {
+                    row["path"]
+                        == "/line_items/dependency_matches_sample/*/upstream_xml_sample"
+                })
+                .expect("XML omission");
+            let omitted_samples = json!(["x".repeat(4_096)]);
+            assert_eq!(omission["source_count"], 4_096);
+            assert_eq!(omission["retained_count"], 0);
+            assert_eq!(omission["omitted_count"], 4_096);
+            assert_eq!(
+                omission["source_value_fingerprint"],
+                stable_fingerprint(&omitted_samples.to_string())
+            );
         }
     }
 }
@@ -266,6 +474,7 @@ fn early_dependency_variants_compact_without_losing_their_proof_state() {
             "skipped",
         ),
         (permission_dependency(), "blocked", "blocked"),
+        (generic_blocked_dependency(), "blocked", "blocked"),
     ] {
         assert!(serde_json::to_vec(&full).unwrap().len() > MAX_CONTRACT_ENVELOPE_BYTES);
         let result = bounded_probe_success(
@@ -281,6 +490,178 @@ fn early_dependency_variants_compact_without_losing_their_proof_state() {
         assert_eq!(envelope["data"]["dependency_decision"], decision);
         assert_eq!(envelope["data"]["line_items"]["proof_state"], line_state);
         assert_eq!(validated_receipt_binding(&envelope["data"]), Some(false));
+    }
+}
+
+#[test]
+fn producer_shaped_late_line_item_blocks_compact() {
+    for full in [dependency(true, 9_000), late_error_dependency()] {
+        assert!(
+            compact_success(
+                ProbeKind::AdUnitDependency,
+                &full,
+                &json!({"mutation_performed":false})
+            )
+            .is_ok()
+        );
+    }
+}
+
+#[test]
+fn dependency_ad_unit_variants_and_ancestor_eligibility_match_the_producer() {
+    let ancestor_incomplete = ancestor_incomplete_dependency();
+    assert_eq!(validated_receipt_binding(&ancestor_incomplete), Some(false));
+    for full in [
+        dependency(true, 9_000),
+        unresolved_code_variant_dependency(),
+        permission_dependency(),
+        ancestor_incomplete,
+    ] {
+        assert!(
+            compact_success(
+                ProbeKind::AdUnitDependency,
+                &full,
+                &json!({"mutation_performed":false})
+            )
+            .is_ok()
+        );
+    }
+
+    let mut resolved_with_notes = dependency(true, 9_000);
+    resolved_with_notes["ad_units"][0]["proof_notes"] = json!([]);
+
+    let mut incomplete_without_issue = dependency(true, 9_000);
+    incomplete_without_issue["ad_units"][0]["ancestor_identity_complete"] = json!(false);
+
+    let mut complete_with_issue = dependency(true, 9_000);
+    complete_with_issue["target_resolution_issues"] = json!([
+        "ad unit code unit-1 returned malformed or foreign ancestor identities"
+    ]);
+    complete_with_issue["proof_flags"]["target_resolution_incomplete"] = json!(true);
+
+    let mut missing_with_match = unresolved_code_variant_dependency();
+    missing_with_match["ad_units"][0]["matches"] = json!(1);
+
+    let mut id_only_without_note = permission_dependency();
+    id_only_without_note["ad_units"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("proof_notes");
+
+    let mut empty_targets = dependency(true, 9_000);
+    empty_targets["ad_units"] = json!([]);
+    empty_targets["placements"]["target_placement_ids_by_ad_unit_id"] = json!({});
+    empty_targets["placements"]["target_placement_match_count"] = json!(0);
+    empty_targets["placements"]["target_placement_matches_sample"] = json!([]);
+    empty_targets["line_items"] = skipped_dependency()["line_items"].clone();
+    empty_targets["dependency_decision"] = json!("no_dependencies_observed");
+
+    for (full, generated) in [
+        (resolved_with_notes, true),
+        (incomplete_without_issue, true),
+        (complete_with_issue, false),
+        (missing_with_match, false),
+        (id_only_without_note, false),
+        (empty_targets, false),
+    ] {
+        let full = reseal(full, ProbeKind::AdUnitDependency, generated);
+        assert!(
+            compact_success(
+                ProbeKind::AdUnitDependency,
+                &full,
+                &json!({"mutation_performed":false})
+            )
+            .is_err()
+        );
+    }
+}
+
+#[test]
+fn placement_state_and_variant_shape_match_the_producer() {
+    let mut capped = dependency(true, 9_000);
+    capped["placements"]["page_size"] = json!(1);
+    capped["placements"]["capped_or_possibly_more"] = json!(true);
+    capped["placements"]["proof_state"] = json!("sample_or_shape_incomplete");
+    capped["proof_flags"]["placements_capped_or_shape_unknown"] = json!(true);
+    capped = reseal(capped, ProbeKind::AdUnitDependency, true);
+
+    for full in [dependency(true, 9_000), capped, blocked_placement_dependency()] {
+        assert!(
+            compact_success(
+                ProbeKind::AdUnitDependency,
+                &full,
+                &json!({"mutation_performed":false})
+            )
+            .is_ok()
+        );
+    }
+
+    let mut capped_but_complete = dependency(true, 9_000);
+    capped_but_complete["placements"]["page_size"] = json!(1);
+    capped_but_complete["placements"]["capped_or_possibly_more"] = json!(true);
+
+    let mut next_page_without_cap = dependency(true, 9_000);
+    next_page_without_cap["placements"]["next_page_token_present"] = json!(true);
+    next_page_without_cap["placements"]["proof_state"] =
+        json!("sample_or_shape_incomplete");
+    next_page_without_cap["proof_flags"]["placements_capped_or_shape_unknown"] = json!(true);
+
+    let mut unknown_but_complete = dependency(true, 9_000);
+    unknown_but_complete["placements"]["membership_shape_unknown_count"] = json!(1);
+    unknown_but_complete["placements"]["membership_shape_unknown_sample"] = json!([{
+        "placement_id":null,
+        "resource_name":"",
+        "display_name":null,
+        "reason":"placement membership shape was not exposed"
+    }]);
+
+    let mut truncated_but_complete = dependency(true, 9_000);
+    truncated_but_complete["placements"]["target_placement_ids_truncated"] = json!(true);
+
+    let mut normal_block_hybrid = dependency(true, 9_000);
+    normal_block_hybrid["placements"]["error"] = json!("unexpected diagnostic");
+    normal_block_hybrid["placements"]["error_truncated"] = json!(false);
+    normal_block_hybrid["placements"]["hint"] = json!("unexpected hint");
+    normal_block_hybrid["placements"]["hint_truncated"] = json!(false);
+
+    let mut blocked_normal_hybrid = blocked_placement_dependency();
+    blocked_normal_hybrid["placements"]["row_count_in_page"] = json!(0);
+
+    let mut oversized_page = dependency(true, 9_000);
+    oversized_page["placements"]["page_size"] = json!(1_001);
+
+    let mut excessive_match_count = dependency(true, 9_000);
+    excessive_match_count["placements"]["target_placement_match_count"] = json!(2);
+
+    let mut changed_target_limit = dependency(true, 9_000);
+    changed_target_limit["placements"]["target_placement_id_limit_per_ad_unit"] = json!(201);
+
+    let mut unsupported_truncation = dependency(true, 9_000);
+    unsupported_truncation["placements"]["target_placement_ids_truncated"] = json!(true);
+    unsupported_truncation["placements"]["proof_state"] = json!("sample_or_shape_incomplete");
+    unsupported_truncation["proof_flags"]["placements_capped_or_shape_unknown"] = json!(true);
+
+    for full in [
+        capped_but_complete,
+        next_page_without_cap,
+        unknown_but_complete,
+        truncated_but_complete,
+        normal_block_hybrid,
+        blocked_normal_hybrid,
+        oversized_page,
+        excessive_match_count,
+        changed_target_limit,
+        unsupported_truncation,
+    ] {
+        let full = reseal(full, ProbeKind::AdUnitDependency, true);
+        assert!(
+            compact_success(
+                ProbeKind::AdUnitDependency,
+                &full,
+                &json!({"mutation_performed":false})
+            )
+            .is_err()
+        );
     }
 }
 
@@ -350,6 +731,272 @@ fn malformed_source_receipts_fail_closed_before_projection() {
 }
 
 #[test]
+fn contradictory_dependency_source_semantics_fail_closed() {
+    let mut proof_flags = dependency(true, 9_000);
+    proof_flags["proof_flags"]["line_items_blocked"] = json!(false);
+    proof_flags = reseal(proof_flags, ProbeKind::AdUnitDependency, true);
+
+    let mut cleanup = dependency(true, 9_000);
+    cleanup["cleanup_decision"]["safe_to_archive_or_retire"] = json!(true);
+    cleanup = reseal(cleanup, ProbeKind::AdUnitDependency, true);
+
+    let mut incomplete_xml = dependency(true, 9_000);
+    incomplete_xml["line_items"]["dependency_matches_sample"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("upstream_xml_bytes");
+    incomplete_xml = reseal(incomplete_xml, ProbeKind::AdUnitDependency, true);
+
+    let mut impossible_xml = dependency(true, 9_000);
+    impossible_xml["line_items"]["dependency_matches_sample"][0]["upstream_xml_bytes"] =
+        json!(100);
+    impossible_xml = reseal(impossible_xml, ProbeKind::AdUnitDependency, true);
+
+    for full in [proof_flags, cleanup, incomplete_xml, impossible_xml] {
+        assert!(
+            compact_success(
+                ProbeKind::AdUnitDependency,
+                &full,
+                &json!({"mutation_performed":false})
+            )
+            .is_err()
+        );
+    }
+}
+
+#[test]
+fn line_item_variant_hybrids_fail_closed() {
+    let mut completed_with_error = completed_dependency(false);
+    completed_with_error["line_items"]["error"] = json!("unexpected diagnostic");
+    completed_with_error["line_items"]["error_truncated"] = json!(false);
+    completed_with_error["line_items"]["hint"] = json!("unexpected hint");
+    completed_with_error["line_items"]["hint_truncated"] = json!(false);
+
+    let mut skipped_with_progress = skipped_dependency();
+    skipped_with_progress["line_items"]["inspected_results"] = json!(0);
+
+    let mut generic_permission_hybrid = generic_blocked_dependency();
+    generic_permission_hybrid["line_items"]["decision"] = json!("blocked");
+    generic_permission_hybrid["line_items"]["reason"] = json!("manage scope required");
+    generic_permission_hybrid["line_items"]["required_scope"] = json!("scope");
+    generic_permission_hybrid["line_items"]["current_scope"] = json!("readonly");
+    generic_permission_hybrid["line_items"]["current_scope_truncated"] = json!(false);
+    generic_permission_hybrid["line_items"]["mutation_performed"] = json!(false);
+    generic_permission_hybrid["line_items"]["block_class"] = json!("permission");
+    generic_permission_hybrid["proof_flags"]["soap_manage_scope_required"] = json!(true);
+
+    let mut permission_with_soap_status = permission_dependency();
+    permission_with_soap_status["line_items"]["upstream_status"] = json!(403);
+
+    let mut error_with_soap_status = late_error_dependency();
+    error_with_soap_status["line_items"]["upstream_status"] = json!(503);
+
+    let mut soap_with_error = dependency(true, 9_000);
+    soap_with_error["line_items"]["error"] = json!("duplicate diagnostic channel");
+    soap_with_error["line_items"]["error_truncated"] = json!(false);
+    soap_with_error["line_items"]["hint"] = json!("duplicate hint channel");
+    soap_with_error["line_items"]["hint_truncated"] = json!(false);
+
+    let mut permission_fault_with_upstream_class = dependency(true, 9_000);
+    permission_fault_with_upstream_class["line_items"]["soap_fault"] =
+        json!("PermissionError.PERMISSION_DENIED");
+
+    let mut classification_drift = dependency(true, 9_000);
+    classification_drift["line_items"]["dependency_matches_sample"][0]["target_matches"][0]
+        ["classification"] = json!("placement_target");
+
+    let mut exclusion_drift = dependency(true, 9_000);
+    exclusion_drift["line_items"]["dependency_matches_sample"][0]["target_matches"][0]
+        ["dependency_excluded"] = json!(true);
+
+    let mut duplicate_target = dependency(true, 9_000);
+    let repeated = duplicate_target["line_items"]["dependency_matches_sample"][0]
+        ["target_matches"][0]
+        .clone();
+    duplicate_target["line_items"]["dependency_matches_sample"][0]["target_matches"] =
+        json!([repeated.clone(), repeated]);
+
+    let mut exact_coverage_drift = dependency(true, 9_000);
+    exact_coverage_drift["line_items"]["dependency_matches_sample"][0]["target_matches"][0]
+        ["targeting_match"]["ad_unit_id"] = json!("999");
+
+    let mut ancestor_coverage_drift = dependency(true, 9_000);
+    ancestor_coverage_drift["line_items"]["dependency_matches_sample"][0]["target_matches"][0]
+        ["targeting_match"] = json!({
+            "ad_unit_id":"10","include_descendants":true,"match_type":"ancestor_descendant"
+        });
+    ancestor_coverage_drift["line_items"]["dependency_matches_sample"][0]["target_matches"][0]
+        ["classification"] = json!("ancestor_descendant_target");
+
+    let mut placement_coverage_drift = dependency(true, 9_000);
+    placement_coverage_drift["line_items"]["dependency_matches_sample"][0]["target_matches"][0]
+        ["targeting_match"] = Value::Null;
+    placement_coverage_drift["line_items"]["dependency_matches_sample"][0]["target_matches"][0]
+        ["matched_placement_ids"] = json!(["11"]);
+    placement_coverage_drift["line_items"]["dependency_matches_sample"][0]["target_matches"][0]
+        ["classification"] = json!("placement_target");
+
+    for (full, generated) in [
+        (completed_with_error, true),
+        (skipped_with_progress, false),
+        (generic_permission_hybrid, false),
+        (permission_with_soap_status, false),
+        (error_with_soap_status, true),
+        (soap_with_error, true),
+        (permission_fault_with_upstream_class, true),
+        (classification_drift, true),
+        (exclusion_drift, true),
+        (duplicate_target, true),
+        (exact_coverage_drift, true),
+        (ancestor_coverage_drift, true),
+        (placement_coverage_drift, true),
+    ] {
+        let full = reseal(full, ProbeKind::AdUnitDependency, generated);
+        assert!(
+            compact_success(
+                ProbeKind::AdUnitDependency,
+                &full,
+                &json!({"mutation_performed":false})
+            )
+            .is_err()
+        );
+    }
+}
+
+#[test]
+fn completed_line_item_outcomes_are_rederived_from_scan_progress() {
+    let mut complete_with_match = dependency(true, 9_000);
+    complete_with_match["line_items"]["proof_state"] = json!("complete");
+    complete_with_match["line_items"]["total_result_set_size"] = json!(1);
+    for field in [
+        "block_class",
+        "upstream_status",
+        "request_id",
+        "request_id_truncated",
+        "response_time",
+        "response_time_truncated",
+        "soap_fault",
+        "soap_fault_truncated",
+        "message",
+        "message_truncated",
+    ] {
+        complete_with_match["line_items"]
+            .as_object_mut()
+            .unwrap()
+            .remove(field);
+    }
+    complete_with_match["proof_flags"]["line_items_capped_or_truncated"] = json!(false);
+    complete_with_match["proof_flags"]["line_items_blocked"] = json!(false);
+    complete_with_match = reseal(complete_with_match, ProbeKind::AdUnitDependency, true);
+
+    for full in [
+        completed_dependency(false),
+        completed_dependency(true),
+        complete_with_match.clone(),
+    ] {
+        assert!(
+            compact_success(
+                ProbeKind::AdUnitDependency,
+                &full,
+                &json!({"mutation_performed":false})
+            )
+            .is_ok()
+        );
+    }
+
+    let mut complete_wrong_state = completed_dependency(false);
+    complete_wrong_state["line_items"]["proof_state"] = json!("sample_only");
+    complete_wrong_state["proof_flags"]["line_items_capped_or_truncated"] = json!(true);
+    complete_wrong_state["dependency_decision"] = json!("incomplete_no_dependencies_observed");
+
+    let mut sample_wrong_state = completed_dependency(true);
+    sample_wrong_state["line_items"]["proof_state"] = json!("complete");
+    sample_wrong_state["proof_flags"]["line_items_capped_or_truncated"] = json!(false);
+    sample_wrong_state["dependency_decision"] = json!("no_dependencies_observed");
+
+    let mut complete_wrong_decision = completed_dependency(false);
+    complete_wrong_decision["line_items"]["decision"] = json!("no_dependencies_in_sample");
+
+    let mut sample_wrong_decision = completed_dependency(true);
+    sample_wrong_decision["line_items"]["decision"] = json!("no_dependencies_observed");
+
+    let mut matched_wrong_decision = complete_with_match;
+    matched_wrong_decision["line_items"]["decision"] = json!("no_dependencies_observed");
+
+    let mut impossible_progress = completed_dependency(false);
+    impossible_progress["line_items"]["total_result_set_size"] = json!(0);
+
+    let mut invalid_page_size = completed_dependency(false);
+    invalid_page_size["line_items"]["line_item_page_size"] = json!(0);
+
+    let mut invalid_scan_max = completed_dependency(false);
+    invalid_scan_max["line_items"]["max_line_items"] = json!(5_001);
+
+    let mut changed_transport_limit = completed_dependency(false);
+    changed_transport_limit["line_items"]["transport_metadata_sample_limit"] = json!(49);
+
+    let mut changed_match_limit = completed_dependency(false);
+    changed_match_limit["line_items"]["dependency_match_sample_limit"] = json!(49);
+
+    for full in [
+        complete_wrong_state,
+        sample_wrong_state,
+        complete_wrong_decision,
+        sample_wrong_decision,
+        matched_wrong_decision,
+        impossible_progress,
+        invalid_page_size,
+        invalid_scan_max,
+        changed_transport_limit,
+        changed_match_limit,
+    ] {
+        let full = reseal(full, ProbeKind::AdUnitDependency, true);
+        assert!(
+            compact_success(
+                ProbeKind::AdUnitDependency,
+                &full,
+                &json!({"mutation_performed":false})
+            )
+            .is_err()
+        );
+    }
+}
+
+#[test]
+fn placement_target_map_must_agree_with_match_count_and_sample() {
+    let mut clear_with_hidden_reference = completed_dependency(false);
+    clear_with_hidden_reference["placements"]["target_placement_ids_by_ad_unit_id"]["1"] =
+        json!(["10"]);
+
+    let mut match_without_reference = completed_dependency(false);
+    match_without_reference["placements"]["target_placement_match_count"] = json!(1);
+    match_without_reference["placements"]["target_placement_matches_sample"] = json!([{
+        "placement_id":"10","status":"ACTIVE","matched_ad_unit_ids":["1"]
+    }]);
+    match_without_reference["dependency_decision"] = json!("dependencies_found");
+
+    let mut mismatched_sample_reference = match_without_reference.clone();
+    mismatched_sample_reference["placements"]["target_placement_ids_by_ad_unit_id"]["1"] =
+        json!(["11"]);
+
+    for full in [
+        clear_with_hidden_reference,
+        match_without_reference,
+        mismatched_sample_reference,
+    ] {
+        let full = reseal(full, ProbeKind::AdUnitDependency, true);
+        assert!(
+            compact_success(
+                ProbeKind::AdUnitDependency,
+                &full,
+                &json!({"mutation_performed":false})
+            )
+            .is_err()
+        );
+    }
+}
+
+#[test]
 fn nested_evidence_cannot_escape_the_receipt_target_scope() {
     let mut exchange_full = exchange(true, 9_000);
     exchange_full["yield_groups"]["target_ad_unit_ids"] = json!(["1", "999"]);
@@ -387,6 +1034,23 @@ fn nested_evidence_cannot_escape_the_receipt_target_scope() {
         )
         .is_err()
     );
+
+    let mut dependency_line_item = dependency(true, 9_000);
+    dependency_line_item["line_items"]["dependency_matches_sample"][0]["target_matches"][0]
+        ["ad_unit_id"] = json!("999");
+    dependency_line_item = reseal(
+        dependency_line_item,
+        ProbeKind::AdUnitDependency,
+        true,
+    );
+    assert!(
+        compact_success(
+            ProbeKind::AdUnitDependency,
+            &dependency_line_item,
+            &json!({"mutation_performed":false})
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -398,6 +1062,36 @@ fn exchange_root_decision_must_match_the_retained_reason_surfaces() {
         compact_success(
             ProbeKind::ExchangeProtection,
             &full,
+            &json!({"mutation_performed":false})
+        )
+        .is_err()
+    );
+
+    let mut certainty = exchange(true, 9_000);
+    certainty["certainty"]["can_prove_yield_group_targeting"] = json!(false);
+    certainty = reseal(certainty, ProbeKind::ExchangeProtection, true);
+    assert!(
+        compact_success(
+            ProbeKind::ExchangeProtection,
+            &certainty,
+            &json!({"mutation_performed":false})
+        )
+        .is_err()
+    );
+
+    let mut exposed_without_attention =
+        exchange_cases::exchange_with_yield_classification("targeted_exposed");
+    exposed_without_attention["attention_reasons"] = json!([]);
+    exposed_without_attention["overall_decision"] = json!("partial_api_proof");
+    exposed_without_attention = reseal(
+        exposed_without_attention,
+        ProbeKind::ExchangeProtection,
+        true,
+    );
+    assert!(
+        compact_success(
+            ProbeKind::ExchangeProtection,
+            &exposed_without_attention,
             &json!({"mutation_performed":false})
         )
         .is_err()
@@ -441,6 +1135,24 @@ fn inconsistent_transport_metadata_counts_fail_closed() {
     let mut full = dependency(true, 9_000);
     full["line_items"]["request_id_count"] = json!(10);
     full["line_items"]["request_ids_truncated"] = json!(true);
+    full = reseal(full, ProbeKind::AdUnitDependency, true);
+    assert!(
+        compact_success(
+            ProbeKind::AdUnitDependency,
+            &full,
+            &json!({"mutation_performed":false})
+        )
+        .is_err()
+    );
+
+    let mut full = dependency(true, 9_000);
+    full["line_items"]["request_ids"] = Value::Array(
+        (0..50)
+            .map(|index| json!(format!("request-{index}")))
+            .collect(),
+    );
+    full["line_items"]["request_id_count"] = json!(51);
+    full["line_items"]["request_ids_truncated"] = json!(false);
     full = reseal(full, ProbeKind::AdUnitDependency, true);
     assert!(
         compact_success(
@@ -544,15 +1256,22 @@ fn oversized_error_is_redacted_utf8_safe_and_byte_exact() {
 
 #[test]
 fn compact_oversize_fails_closed() {
-    let mut full = exchange(true, 9_000);
-    full["unsupported_or_unintegrated_surfaces"][0]["note"] = json!("x".repeat(9_000));
-    full.as_object_mut().unwrap().remove("result_fingerprint");
-    full.as_object_mut()
-        .unwrap()
-        .remove("evidence_receipt_template");
-    full = seal(full, ProbeKind::ExchangeProtection, true);
+    let mut full = completed_dependency(false);
+    full["line_items"]["status_counts"] = Value::Object(
+        (0..200)
+            .map(|index| {
+                (
+                    format!("STATUS_{index:03}_{}", "x".repeat(45)),
+                    json!(1),
+                )
+            })
+            .collect(),
+    );
+    full["line_items"]["inspected_results"] = json!(200);
+    full["line_items"]["total_result_set_size"] = json!(200);
+    full = reseal(full, ProbeKind::AdUnitDependency, true);
     let envelope = structured(bounded_probe_success(
-        ProbeKind::ExchangeProtection,
+        ProbeKind::AdUnitDependency,
         full,
         json!({"mutation_performed":false}),
         Instant::now(),

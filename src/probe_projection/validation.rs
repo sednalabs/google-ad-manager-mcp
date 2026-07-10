@@ -57,6 +57,37 @@ pub(super) fn bool_counts(
     Ok(counts)
 }
 
+pub(super) fn retained_soap_permission_evidence(
+    soap_fault: Option<&str>,
+    message: &str,
+) -> bool {
+    soap_fault
+        .into_iter()
+        .chain(std::iter::once(message))
+        .any(soap_permission_marker)
+}
+
+fn soap_permission_marker(value: &str) -> bool {
+    const AUTHENTICATION_PERMISSION_REASONS: &[&str] = &[
+        "AuthenticationError.AMBIGUOUS_SOAP_REQUEST_HEADER",
+        "AuthenticationError.INVALID_EMAIL",
+        "AuthenticationError.AUTHENTICATION_FAILED",
+        "AuthenticationError.INVALID_OAUTH_SIGNATURE",
+        "AuthenticationError.MISSING_SOAP_REQUEST_HEADER",
+        "AuthenticationError.MISSING_AUTHENTICATION_HTTP_HEADER",
+        "AuthenticationError.MISSING_AUTHENTICATION",
+        "AuthenticationError.NETWORK_API_ACCESS_DISABLED",
+        "AuthenticationError.NO_NETWORKS_TO_ACCESS",
+        "AuthenticationError.NETWORK_NOT_FOUND",
+        "AuthenticationError.NETWORK_CODE_REQUIRED",
+        "AuthenticationError.UNDER_INVESTIGATION",
+    ];
+    value.contains("PermissionError.")
+        || AUTHENTICATION_PERMISSION_REASONS
+            .iter()
+            .any(|reason| value.contains(reason))
+}
+
 pub(super) fn target_identity_summary(rows: &[Value]) -> Result<Value, String> {
     let mut ids = BTreeSet::new();
     let mut missing = 0_usize;
