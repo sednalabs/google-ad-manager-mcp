@@ -44,8 +44,10 @@ payload. It can bind a later evidence-grading receipt, but it does not upgrade a
 capped or blocked proof state. For one to ten resolved exact targets in the
 requested network, the probe also returns a canonical caller-supplied receipt
 template under the explicit `gam-evidence-producer-v1` source contract. An
-operator must still review the underlying result before using it. When needed,
-a bounded projection omits known optional raw/sample detail, recomputes the
-fingerprint, and binds the receipt to the exact returned result.
+operator must still review the underlying result before using it.
+
+Target rows contribute dependency evidence only when their resource names bind
+exactly to the canonical requested network and positive numeric ad-unit ID.
+Permission and authentication SOAP faults remain explicit permission blocks.
 
 The helper is read-only and always reports `mutation_performed=false`.

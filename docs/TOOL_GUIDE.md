@@ -96,6 +96,9 @@ stable `result_fingerprint`. For one to ten exact targets resolved to resource
 names in the requested network, it also includes a canonical receipt template
 with `source_version=gam-evidence-producer-v1`. Complete API proof remains
 `manual_ui_proof_required` until the unsupported GAM UI surfaces are reviewed.
+Unknown yield-group activity remains partial. Probe network codes are
+canonicalized once, and foreign-network or malformed resource rows cannot
+contribute targets or exposure decisions.
 
 ## `gam_ad_unit_dependency_probe`
 
@@ -127,12 +130,8 @@ The response includes a stable `result_fingerprint` and emits the same
 versioned receipt template only for one to ten fully resolved, exact,
 network-bound target rows. Unresolved, ambiguous, duplicate, id-only, or
 cross-network target scopes receive an explicit `not_generated` marker instead.
-
-Both proof tools enforce 8 KiB Contract V1 envelope and 20 KiB full RMCP transport
-bounds. An oversized full proof drops known optional raw/sample detail,
-recomputes its fingerprint, and returns a canonical receipt bound to that exact
-projection. Decision qualifiers, counts, and completeness flags remain intact.
-If the projection still exceeds either bound, the tool fails closed.
+SOAP permission and authentication faults are classified separately from
+generic upstream read failures.
 
 ## `gam_report_run`
 
