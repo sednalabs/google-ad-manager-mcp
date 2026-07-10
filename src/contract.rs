@@ -242,11 +242,7 @@ fn next_secret_marker_start(lower: &str, after: usize) -> usize {
         "ya29.",
     ]
     .into_iter()
-    .filter_map(|marker| {
-        lower[after..]
-            .find(marker)
-            .map(|offset| after + offset)
-    })
+    .filter_map(|marker| lower[after..].find(marker).map(|offset| after + offset))
     .min()
     .unwrap_or(lower.len())
 }
