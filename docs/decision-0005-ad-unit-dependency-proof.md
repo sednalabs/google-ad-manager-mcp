@@ -45,5 +45,7 @@ capped or blocked proof state. For one to ten resolved exact targets in the
 requested network, the probe also returns a canonical caller-supplied receipt
 template under the explicit `gam-evidence-producer-v1` source contract. An
 operator must still review the underlying result before using it.
+The producer fails closed above 8 KiB for its serialized model-visible Contract
+V1 item or 20 KiB for the full serialized RMCP transport.
 
 The helper is read-only and always reports `mutation_performed=false`.

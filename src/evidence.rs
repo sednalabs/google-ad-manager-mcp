@@ -8,32 +8,25 @@ use crate::{AdManagerError, contract};
 
 pub(crate) const EVIDENCE_PRODUCER_CONTRACT_VERSION: &str = "gam-evidence-producer-v1";
 pub(crate) const MAX_EVIDENCE_TARGETS: usize = 10;
-pub(crate) const MAX_WIRE_RESULT_BYTES: usize = 8 * 1024;
+pub(crate) const MAX_MODEL_VISIBLE_RESULT_BYTES: usize = 8 * 1024;
+pub(crate) const MAX_RMCP_TRANSPORT_BYTES: usize = 20 * 1024;
 const DEFAULT_EVIDENCE_TTL_SECONDS: u64 = 3_600;
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum EvidenceSource {
     DependencyProbe,
-    DeliveryReport,
     ExchangeProtectionReview,
-    SiteContract,
-    Telemetry,
 }
 
 impl EvidenceSource {
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::DependencyProbe => "dependency_probe",
-            Self::DeliveryReport => "delivery_report",
             Self::ExchangeProtectionReview => "exchange_protection_review",
-            Self::SiteContract => "site_contract",
-            Self::Telemetry => "telemetry",
         }
     }
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum EvidenceState {
     CompleteClear,
@@ -41,7 +34,6 @@ pub(crate) enum EvidenceState {
     PartialCapped,
     BlockedPermission,
     BlockedRead,
-    UnsupportedSurface,
     ManualUiProofRequired,
     NotRun,
 }
@@ -54,7 +46,6 @@ impl EvidenceState {
             Self::PartialCapped => "partial_capped",
             Self::BlockedPermission => "blocked_permission",
             Self::BlockedRead => "blocked_read",
-            Self::UnsupportedSurface => "unsupported_surface",
             Self::ManualUiProofRequired => "manual_ui_proof_required",
             Self::NotRun => "not_run",
         }
@@ -101,20 +92,43 @@ pub(crate) fn success_with_wire_guard(
     field: &'static str,
 ) -> CallToolResult {
     let error_started = started;
-    let result = contract::success_with_meta(data, meta, started);
+    let envelope = contract::success_envelope_with_meta(data, meta, started);
+    match serde_json::to_vec(&envelope) {
+        Ok(serialized) if serialized.len() <= MAX_MODEL_VISIBLE_RESULT_BYTES => {}
+        Ok(_) => {
+            return contract::error(
+                AdManagerError::invalid(
+                    field,
+                    "tool result exceeded its 8 KiB model-visible Contract V1 cap; narrow the target set, reduce page limits, or omit optional raw output",
+                ),
+                error_started,
+            );
+        }
+        Err(_) => {
+            return contract::error(
+                AdManagerError::invalid(
+                    field,
+                    "tool result could not be serialized for its model-visible size guard",
+                ),
+                error_started,
+            );
+        }
+    }
+
+    let result = CallToolResult::structured(envelope);
     match serde_json::to_vec(&result) {
-        Ok(serialized) if serialized.len() <= MAX_WIRE_RESULT_BYTES => result,
+        Ok(serialized) if serialized.len() <= MAX_RMCP_TRANSPORT_BYTES => result,
         Ok(_) => contract::error(
             AdManagerError::invalid(
                 field,
-                "tool result exceeded its model-visible 8 KiB wire cap; narrow the target set, reduce page limits, or omit optional raw output",
+                "tool result exceeded its 20 KiB RMCP transport cap after protocol encoding; narrow the target set, reduce page limits, or omit optional raw output",
             ),
             error_started,
         ),
         Err(_) => contract::error(
             AdManagerError::invalid(
                 field,
-                "tool result could not be serialized for its model-visible wire-size guard",
+                "tool result could not be serialized for its RMCP transport-size guard",
             ),
             error_started,
         ),
@@ -191,7 +205,10 @@ fn valid_result_hash(value: &str) -> bool {
     value.len() == 16
         && value
             .bytes()
-            .all(|byte| byte.is_ascii_digit() || (byte.is_ascii_hexdigit() && byte.is_ascii_lowercase()))
+            .all(|byte| {
+                byte.is_ascii_digit()
+                    || (byte.is_ascii_hexdigit() && byte.is_ascii_lowercase())
+            })
 }
 
 #[cfg(test)]
@@ -201,8 +218,9 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        EVIDENCE_PRODUCER_CONTRACT_VERSION, EvidenceSource, EvidenceState, MAX_WIRE_RESULT_BYTES,
-        evidence_receipt_template, success_with_wire_guard,
+        EVIDENCE_PRODUCER_CONTRACT_VERSION, EvidenceSource, EvidenceState,
+        MAX_MODEL_VISIBLE_RESULT_BYTES, MAX_RMCP_TRANSPORT_BYTES, evidence_receipt_template,
+        success_with_wire_guard,
     };
 
     #[test]
@@ -231,26 +249,10 @@ mod tests {
     #[test]
     fn receipt_template_rejects_inexact_bindings() {
         for (network_code, result_hash, ids) in [
-            (
-                "01234567",
-                "0123456789abcdef",
-                vec!["100".to_string()],
-            ),
-            (
-                "1234567",
-                " 0123456789abcdef",
-                vec!["100".to_string()],
-            ),
-            (
-                "1234567",
-                "0123456789abcdeF",
-                vec!["100".to_string()],
-            ),
-            (
-                "1234567",
-                "0123456789abcdef",
-                vec!["0100".to_string()],
-            ),
+            ("01234567", "0123456789abcdef", vec!["100".to_string()]),
+            ("1234567", " 0123456789abcdef", vec!["100".to_string()]),
+            ("1234567", "0123456789abcdeF", vec!["100".to_string()]),
+            ("1234567", "0123456789abcdef", vec!["0100".to_string()]),
             (
                 "1234567",
                 "0123456789abcdef",
@@ -272,17 +274,46 @@ mod tests {
     }
 
     #[test]
-    fn wire_guard_fails_closed_above_eight_kibibytes() {
+    fn wire_guard_rejects_oversized_model_visible_contract() {
         let result = success_with_wire_guard(
-            json!({"optional_raw_output":"x".repeat(MAX_WIRE_RESULT_BYTES)}),
+            json!({"optional_raw_output":"x".repeat(MAX_MODEL_VISIBLE_RESULT_BYTES)}),
             json!({"mutation_performed":false}),
             Instant::now(),
             "probe_result",
         );
         let serialized = serde_json::to_vec(&result).expect("serialize guarded result");
-        assert!(serialized.len() < MAX_WIRE_RESULT_BYTES);
+        assert!(serialized.len() < MAX_RMCP_TRANSPORT_BYTES);
         let rendered = String::from_utf8(serialized).expect("UTF-8 result");
         assert!(rendered.contains("\"ok\":false"));
         assert!(rendered.contains("invalid_input"));
+        assert!(rendered.contains("8 KiB model-visible Contract V1 cap"));
+    }
+
+    #[test]
+    fn wire_guard_allows_bounded_one_target_probe_result() {
+        let result = success_with_wire_guard(
+            json!({"network_code":"1234567","ad_units":[{"ad_unit_id":"200"}]}),
+            json!({"mutation_performed":false}),
+            Instant::now(),
+            "probe_result",
+        );
+        let serialized = serde_json::to_string(&result).expect("serialize guarded result");
+        assert!(serialized.len() < MAX_RMCP_TRANSPORT_BYTES);
+        assert!(serialized.contains("\"ok\":true"));
+    }
+
+    #[test]
+    fn wire_guard_rejects_oversized_rmcp_transport() {
+        let result = success_with_wire_guard(
+            json!({"optional_raw_output":"\"".repeat(3_800)}),
+            json!({"mutation_performed":false}),
+            Instant::now(),
+            "probe_result",
+        );
+        let serialized = serde_json::to_vec(&result).expect("serialize guarded result");
+        assert!(serialized.len() < MAX_RMCP_TRANSPORT_BYTES);
+        let rendered = String::from_utf8(serialized).expect("UTF-8 result");
+        assert!(rendered.contains("\"ok\":false"));
+        assert!(rendered.contains("20 KiB RMCP transport cap"));
     }
 }
