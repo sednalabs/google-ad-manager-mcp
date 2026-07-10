@@ -19,16 +19,20 @@ pub fn success(data: Value, started: Instant) -> CallToolResult {
 }
 
 pub fn success_with_meta(data: Value, meta: Value, started: Instant) -> CallToolResult {
+    CallToolResult::structured(success_envelope_with_meta(data, meta, started))
+}
+
+pub(crate) fn success_envelope_with_meta(data: Value, meta: Value, started: Instant) -> Value {
     let mut meta_map = match meta {
         Value::Object(map) => map,
         _ => Map::new(),
     };
     meta_map.insert("elapsed_ms".to_string(), json!(elapsed_ms(started)));
-    CallToolResult::structured(json!({
+    json!({
         "ok": true,
         "data": data,
         "meta": meta_map,
-    }))
+    })
 }
 
 pub fn error(err: AdManagerError, started: Instant) -> CallToolResult {
