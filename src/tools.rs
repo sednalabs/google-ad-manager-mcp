@@ -3625,37 +3625,25 @@ fn attach_result_fingerprint(response: &mut Value) {
 
 fn compact_probe_response(response: &Value) -> Value {
     let mut compact = response.clone();
-    let original_receipt = compact
-        .as_object_mut()
-        .and_then(|object| {
-            object.remove("result_fingerprint");
-            object.remove("evidence_receipt_template")
-        })
+    let object = compact.as_object_mut().expect("probe response is an object");
+    object.remove("result_fingerprint");
+    let original_receipt = object
+        .remove("evidence_receipt_template")
         .unwrap_or(Value::Null);
     let receipt_generated = original_receipt.get("result_hash").is_some();
     let mut detail_omitted = false;
     compact_probe_value(&mut compact, &mut detail_omitted);
-    compact
-        .as_object_mut()
-        .expect("probe response is an object")
-        .insert(
-            "result_projection".to_string(),
-            json!({
-                "truncated": detail_omitted,
-                "omitted_detail_classes": ["optional_raw_output", "bounded_samples"],
-                "receipt_binds_returned_projection": receipt_generated,
-            }),
-        );
+    compact["result_projection"] = json!({
+        "truncated": detail_omitted,
+        "omitted_detail_classes": ["optional_raw_output", "bounded_samples"],
+        "receipt_binds_returned_projection": receipt_generated,
+    });
     attach_result_fingerprint(&mut compact);
-    let fingerprint = compact["result_fingerprint"].clone();
     let mut receipt = original_receipt;
     if receipt_generated {
-        receipt["result_hash"] = fingerprint;
+        receipt["result_hash"] = compact["result_fingerprint"].clone();
     }
-    compact
-        .as_object_mut()
-        .expect("probe response is an object")
-        .insert("evidence_receipt_template".to_string(), receipt);
+    compact["evidence_receipt_template"] = receipt;
     compact
 }
 
@@ -3669,14 +3657,14 @@ fn compact_probe_value(value: &mut Value, detail_omitted: &mut bool) {
             ] {
                 *detail_omitted |= object.remove(field).is_some();
             }
-            object
-                .values_mut()
-                .for_each(|value| compact_probe_value(value, detail_omitted));
+            for value in object.values_mut() {
+                compact_probe_value(value, detail_omitted);
+            }
         }
         Value::Array(values) => {
-            values
-                .iter_mut()
-                .for_each(|value| compact_probe_value(value, detail_omitted));
+            for value in values {
+                compact_probe_value(value, detail_omitted);
+            }
         }
         _ => {}
     }

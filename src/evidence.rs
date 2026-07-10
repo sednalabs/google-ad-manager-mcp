@@ -92,15 +92,14 @@ pub(crate) fn success_with_wire_guard(
     started: Instant,
     field: &'static str,
 ) -> CallToolResult {
-    match guarded_success(data, meta.clone(), started) {
+    let guarded = guarded_success(data, meta.clone(), started).or_else(|primary_failure| {
+        compact_data
+            .map(|compact| guarded_success(compact, meta, started))
+            .unwrap_or(Err(primary_failure))
+    });
+    match guarded {
         Ok(result) => result,
-        Err(primary_failure) => match compact_data {
-            Some(compact) => match guarded_success(compact, meta, started) {
-                Ok(result) => result,
-                Err(failure) => contract::error(AdManagerError::invalid(field, failure), started),
-            },
-            None => contract::error(AdManagerError::invalid(field, primary_failure), started),
-        },
+        Err(failure) => contract::error(AdManagerError::invalid(field, failure), started),
     }
 }
 
@@ -172,31 +171,20 @@ fn validate_canonical_numeric_id(
             "must use a canonical positive numeric identifier of at most 20 digits",
         ));
     }
-    let canonical = value
-        .parse::<u64>()
-        .ok()
-        .filter(|value| *value > 0)
-        .map(|value| value.to_string())
-        .ok_or_else(|| {
-            AdManagerError::invalid(
-                field,
-                "must use a canonical positive numeric identifier of at most 20 digits",
-            )
-        })?;
-    if canonical != value {
-        return Err(AdManagerError::invalid(
+    match value.parse::<u64>() {
+        Ok(parsed) if parsed > 0 && parsed.to_string() == value => Ok(value.to_string()),
+        _ => Err(AdManagerError::invalid(
             field,
-            "must use canonical numeric form without whitespace or leading zeroes",
-        ));
+            "must use canonical positive numeric form without whitespace or leading zeroes",
+        )),
     }
-    Ok(canonical)
 }
 
 fn valid_result_hash(value: &str) -> bool {
     value.len() == 16
-        && value.bytes().all(|byte| {
-            byte.is_ascii_digit() || (byte.is_ascii_hexdigit() && byte.is_ascii_lowercase())
-        })
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
 }
 
 #[cfg(test)]
@@ -210,6 +198,19 @@ mod tests {
         MAX_MODEL_VISIBLE_RESULT_BYTES, MAX_RMCP_TRANSPORT_BYTES, evidence_receipt_template,
         success_with_wire_guard,
     };
+
+    fn render_guard(data: serde_json::Value, compact: Option<serde_json::Value>) -> String {
+        let result = success_with_wire_guard(
+            data,
+            compact,
+            json!({"mutation_performed":false}),
+            Instant::now(),
+            "probe_result",
+        );
+        let serialized = serde_json::to_vec(&result).expect("serialize guarded result");
+        assert!(serialized.len() < MAX_RMCP_TRANSPORT_BYTES);
+        String::from_utf8(serialized).expect("UTF-8 result")
+    }
 
     #[test]
     fn receipt_template_is_versioned_and_canonically_target_bound() {
@@ -236,85 +237,58 @@ mod tests {
 
     #[test]
     fn receipt_template_rejects_inexact_bindings() {
-        for (network_code, result_hash, ids) in [
-            ("01234567", "0123456789abcdef", vec!["100".to_string()]),
-            ("1234567", " 0123456789abcdef", vec!["100".to_string()]),
-            ("1234567", "0123456789abcdeF", vec!["100".to_string()]),
-            ("1234567", "0123456789abcdef", vec!["0100".to_string()]),
-            (
-                "1234567",
-                "0123456789abcdef",
-                vec!["100".to_string(), "100".to_string()],
-            ),
-            ("1234567", "0123456789abcdef", Vec::new()),
-        ] {
+        let reject = |network_code, result_hash, ids: &[&str]| {
             assert!(
                 evidence_receipt_template(
                     network_code,
                     EvidenceSource::DependencyProbe,
                     EvidenceState::CompleteClear,
                     result_hash,
-                    ids,
+                    ids.iter().map(|id| id.to_string()).collect(),
                 )
                 .is_err()
             );
+        };
+        reject("01234567", "0123456789abcdef", &["100"]);
+        reject("1234567", " 0123456789abcdef", &["100"]);
+        reject("1234567", "0123456789abcdeF", &["100"]);
+        reject("1234567", "0123456789abcdef", &["0100"]);
+        reject("1234567", "0123456789abcdef", &["100", "100"]);
+        reject("1234567", "0123456789abcdef", &[]);
+    }
+
+    #[test]
+    fn wire_guard_rejects_oversized_results() {
+        for (data, expected) in [
+            (
+                json!({"optional_raw_output":"x".repeat(MAX_MODEL_VISIBLE_RESULT_BYTES)}),
+                "8 KiB model-visible Contract V1 cap",
+            ),
+            (
+                json!({"optional_raw_output":"\"".repeat(3_800)}),
+                "20 KiB RMCP transport cap",
+            ),
+        ] {
+            let rendered = render_guard(data, None);
+            assert!(rendered.contains("\"ok\":false"));
+            assert!(rendered.contains("invalid_input"));
+            assert!(rendered.contains(expected));
         }
     }
 
     #[test]
-    fn wire_guard_rejects_oversized_model_visible_contract() {
-        let result = success_with_wire_guard(
-            json!({"optional_raw_output":"x".repeat(MAX_MODEL_VISIBLE_RESULT_BYTES)}),
-            None,
-            json!({"mutation_performed":false}),
-            Instant::now(),
-            "probe_result",
-        );
-        let serialized = serde_json::to_vec(&result).expect("serialize guarded result");
-        assert!(serialized.len() < MAX_RMCP_TRANSPORT_BYTES);
-        let rendered = String::from_utf8(serialized).expect("UTF-8 result");
-        assert!(rendered.contains("\"ok\":false"));
-        assert!(rendered.contains("invalid_input"));
-        assert!(rendered.contains("8 KiB model-visible Contract V1 cap"));
-    }
-
-    #[test]
     fn wire_guard_uses_bounded_compact_fallback() {
-        let bounded = success_with_wire_guard(
+        let bounded = render_guard(
             json!({"network_code":"1234567","ad_units":[{"ad_unit_id":"200"}]}),
             None,
-            json!({"mutation_performed":false}),
-            Instant::now(),
-            "probe_result",
         );
-        assert!(serde_json::to_string(&bounded).unwrap().contains("\"ok\":true"));
+        assert!(bounded.contains("\"ok\":true"));
 
-        let result = success_with_wire_guard(
+        let rendered = render_guard(
             json!({"optional_raw_output":"x".repeat(MAX_MODEL_VISIBLE_RESULT_BYTES)}),
             Some(json!({"result_projection":{"truncated":true}})),
-            json!({"mutation_performed":false}),
-            Instant::now(),
-            "probe_result",
         );
-        let serialized = serde_json::to_string(&result).expect("serialize guarded result");
-        assert!(serialized.len() < MAX_RMCP_TRANSPORT_BYTES);
-        assert!(serialized.contains("\"ok\":true"));
-        assert!(serialized.contains("\"truncated\":true"));
-    }
-
-    #[test]
-    fn wire_guard_rejects_oversized_rmcp_transport() {
-        let result = success_with_wire_guard(
-            json!({"optional_raw_output":"\"".repeat(3_800)}),
-            None,
-            json!({"mutation_performed":false}),
-            Instant::now(),
-            "probe_result",
-        );
-        let serialized = serde_json::to_vec(&result).expect("serialize guarded result");
-        assert!(serialized.len() < MAX_RMCP_TRANSPORT_BYTES);
-        let rendered = String::from_utf8(serialized).expect("UTF-8 result");
-        assert!(rendered.contains("\"ok\":false"));
-        assert!(rendered.contains("20 KiB RMCP transport cap"));
+        assert!(rendered.contains("\"ok\":true"));
+        assert!(rendered.contains("\"truncated\":true"));
     }
 }
