@@ -18,7 +18,7 @@ use crate::auth_ux::{gcloud_adc_login_command, shell_join_with_cloudsdk_config};
 use crate::client::{
     CatalogCollection, DEFAULT_SOAP_API_VERSION, RestWriteOperation, RestWritePlan,
     RestWriteResource, SoapTraffickingOperation, SoapTraffickingPlan, YieldGroupUpdateSoapRequest,
-    soap_error_message,
+    soap_error_message, validate_soap_api_version,
 };
 use crate::config::{
     GCLOUD_ADC_REQUIRED_SCOPE, server_adc_credentials_path, server_cloudsdk_config_dir,
@@ -836,6 +836,10 @@ impl AdManagerServer {
             Ok(network_code) => network_code,
             Err(err) => return Ok(contract::error(err, started)),
         };
+        let api_version = match validate_soap_api_version(args.api_version.as_deref()) {
+            Ok(api_version) => api_version,
+            Err(err) => return Ok(contract::error(err, started)),
+        };
         let page_size = args.page_size.unwrap_or(100).clamp(1, 1_000);
         let ad_unit_codes = match validate_probe_ad_unit_codes(&args.ad_unit_codes) {
             Ok(codes) => codes,
@@ -954,7 +958,7 @@ impl AdManagerServer {
         let yield_groups = match probe_yield_groups(
             self,
             &network_code,
-            args.api_version.as_deref(),
+            Some(&api_version),
             page_size,
             &target_ad_units,
             args.include_raw,
@@ -1004,7 +1008,7 @@ impl AdManagerServer {
             "api_exposed_surfaces_clear"
         };
 
-        let mut response = json!({
+        let response = json!({
             "network_code": &network_code,
             "overall_decision": overall_decision,
             "ad_units": ad_unit_summaries,
@@ -1027,16 +1031,10 @@ impl AdManagerServer {
                 ]
             }
         });
-        attach_result_fingerprint(&mut response);
-        let receipt_state = exchange_evidence_state(&response);
-        if let Err(err) = attach_evidence_receipt_template(
-            &mut response,
-            &network_code,
-            EvidenceSource::ExchangeProtectionReview,
-            receipt_state,
-        ) {
-            return Ok(contract::error(err, started));
-        }
+        let response = match finalize_exchange_probe_response(response, &network_code) {
+            Ok(response) => response,
+            Err(err) => return Ok(contract::error(err, started)),
+        };
         Ok(contract::success_with_meta(
             response,
             json!({
@@ -1062,6 +1060,10 @@ impl AdManagerServer {
         let started = Instant::now();
         let network_code = match parse_positive_id_string("network_code", &args.network_code) {
             Ok(network_code) => network_code,
+            Err(err) => return Ok(contract::error(err, started)),
+        };
+        let api_version = match validate_soap_api_version(args.api_version.as_deref()) {
+            Ok(api_version) => api_version,
             Err(err) => return Ok(contract::error(err, started)),
         };
         let ad_unit_codes = match validate_optional_probe_ad_unit_codes(&args.ad_unit_codes) {
@@ -1116,17 +1118,17 @@ impl AdManagerServer {
                 Err(err) => return Ok(contract::error(err, started)),
             };
             let summary = summarize_dependency_ad_unit_code(&network_code, code, &payload);
-            if summary
-                .get("proof_state")
-                .and_then(Value::as_str)
-                .is_some_and(|state| state != "resolved_exact")
-            {
+            if summary.get("proof_state").and_then(Value::as_str) != Some("resolved_exact") {
                 target_resolution_issues
                     .push(format!("ad unit code {code} did not resolve exactly"));
-            }
-            if let Some(target) =
-                dependency_target_from_ad_unit_summary(&summary, &network_code)
+            } else if summary.get("ancestor_identity_complete").and_then(Value::as_bool)
+                == Some(false)
             {
+                target_resolution_issues.push(format!(
+                    "ad unit code {code} returned malformed or foreign ancestor identities"
+                ));
+            }
+            if let Some(target) = dependency_target_from_ad_unit_summary(&summary, &network_code) {
                 targets_by_id
                     .entry(target.ad_unit_id.clone())
                     .and_modify(|existing| existing.merge_code_target(&target))
@@ -1160,7 +1162,12 @@ impl AdManagerServer {
             )
             .await
         {
-            Ok(payload) => summarize_dependency_placements(&payload, placement_page_size, &targets),
+            Ok(payload) => summarize_dependency_placements(
+                &payload,
+                &network_code,
+                placement_page_size,
+                &targets,
+            ),
             Err(err) => blocked_probe_surface("placements", err),
         };
 
@@ -1168,7 +1175,7 @@ impl AdManagerServer {
             self,
             LineItemDependencyProbeOptions {
                 network_code: &network_code,
-                api_version: args.api_version.as_deref(),
+                api_version: Some(&api_version),
                 line_item_page_size,
                 max_line_items,
                 include_line_item_xml: args.include_line_item_xml,
@@ -1193,7 +1200,7 @@ impl AdManagerServer {
             &placement_summary,
             &line_item_summary,
         );
-        let mut response = dependency_probe_response_json(
+        let response = dependency_probe_response_json(
             &network_code,
             target_rows,
             placement_summary,
@@ -1202,15 +1209,14 @@ impl AdManagerServer {
             proof_flags,
             dependency_decision,
         );
-        let receipt_state = dependency_evidence_state(dependency_decision, &response);
-        if let Err(err) = attach_evidence_receipt_template(
-            &mut response,
+        let response = match finalize_dependency_probe_response(
+            response,
             &network_code,
-            EvidenceSource::DependencyProbe,
-            receipt_state,
+            dependency_decision,
         ) {
-            return Ok(contract::error(err, started));
-        }
+            Ok(response) => response,
+            Err(err) => return Ok(contract::error(err, started)),
+        };
         Ok(contract::success_with_meta(
             response,
             json!({
@@ -2613,6 +2619,8 @@ fn summarize_dependency_ad_unit_code(network_code: &str, code: &str, payload: &V
     }
     let row = matches[0];
     let resource_name = row.get("name").and_then(Value::as_str).unwrap_or_default();
+    let (ancestor_ad_unit_ids, ancestor_identity_complete) =
+        ad_unit_ancestor_ids(row, network_code);
     let Some(ad_unit_id) = exact_ad_unit_id_from_resource_name(network_code, resource_name) else {
         return json!({
             "ad_unit_code": code,
@@ -2621,7 +2629,8 @@ fn summarize_dependency_ad_unit_code(network_code: &str, code: &str, payload: &V
             "display_name": row.get("displayName").cloned().unwrap_or(Value::Null),
             "status": row.get("status").cloned().unwrap_or(Value::Null),
             "ad_unit_sizes": row.get("adUnitSizes").or_else(|| row.get("sizes")).cloned().unwrap_or(Value::Null),
-            "ancestor_ad_unit_ids": ad_unit_ancestor_ids(row),
+            "ancestor_ad_unit_ids": ancestor_ad_unit_ids,
+            "ancestor_identity_complete": ancestor_identity_complete,
             "proof_state": "invalid_resource_name",
             "reason": "exact ad-unit code resolved outside the requested canonical network/resource scope",
         });
@@ -2633,7 +2642,8 @@ fn summarize_dependency_ad_unit_code(network_code: &str, code: &str, payload: &V
         "display_name": row.get("displayName").cloned().unwrap_or(Value::Null),
         "status": row.get("status").cloned().unwrap_or(Value::Null),
         "ad_unit_sizes": row.get("adUnitSizes").or_else(|| row.get("sizes")).cloned().unwrap_or(Value::Null),
-        "ancestor_ad_unit_ids": ad_unit_ancestor_ids(row),
+        "ancestor_ad_unit_ids": ancestor_ad_unit_ids,
+        "ancestor_identity_complete": ancestor_identity_complete,
         "proof_state": "resolved_exact",
     })
 }
@@ -2662,8 +2672,12 @@ fn dependency_target_from_ad_unit_summary(
         .into_iter()
         .flatten()
         .filter_map(Value::as_str)
-        .filter_map(numeric_ad_unit_id_from_candidate)
+        .filter_map(|value| exact_ad_unit_id_from_candidate(network_code, value))
         .collect::<BTreeSet<_>>();
+    let mut proof_notes = Vec::new();
+    if summary.get("ancestor_identity_complete").and_then(Value::as_bool) == Some(false) {
+        proof_notes.push("ancestor identities were malformed or outside the requested network".to_string());
+    }
     Some(DependencyProbeTarget {
         ad_unit_id: ad_unit_id.to_string(),
         ad_unit_codes: codes,
@@ -2673,7 +2687,7 @@ fn dependency_target_from_ad_unit_summary(
         ad_unit_sizes: summary.get("ad_unit_sizes").cloned().unwrap_or(Value::Null),
         ancestor_ad_unit_ids,
         proof_state: "resolved_exact",
-        proof_notes: Vec::new(),
+        proof_notes,
     })
 }
 
@@ -2711,11 +2725,14 @@ fn summarize_probe_ad_unit(network_code: &str, code: &str, payload: &Value) -> V
     let resource_name = row.get("name").and_then(Value::as_str).unwrap_or_default();
     let ad_unit_id = exact_ad_unit_id_from_resource_name(network_code, resource_name);
     let target_resolved_exact = ad_unit_id.is_some();
-    let ancestor_ad_unit_ids = ad_unit_ancestor_ids(row);
+    let (ancestor_ad_unit_ids, ancestor_identity_complete) =
+        ad_unit_ancestor_ids(row, network_code);
     let applied_adsense = row.get("appliedAdsenseEnabled").and_then(Value::as_bool);
     let effective_adsense = row.get("effectiveAdsenseEnabled").and_then(Value::as_bool);
-    let proof_complete =
-        target_resolved_exact && applied_adsense.is_some() && effective_adsense.is_some();
+    let proof_complete = target_resolved_exact
+        && ancestor_identity_complete
+        && applied_adsense.is_some()
+        && effective_adsense.is_some();
     let decision = if !target_resolved_exact {
         "partial_api_proof"
     } else if applied_adsense == Some(true) || effective_adsense == Some(true) {
@@ -2730,6 +2747,7 @@ fn summarize_probe_ad_unit(network_code: &str, code: &str, payload: &Value) -> V
         "ad_unit_id": ad_unit_id,
         "proof_state": if target_resolved_exact { "resolved_exact" } else { "invalid_resource_name" },
         "ancestor_ad_unit_ids": ancestor_ad_unit_ids,
+        "ancestor_identity_complete": ancestor_identity_complete,
         "resource_name": resource_name,
         "display_name": row.get("displayName").cloned().unwrap_or(Value::Null),
         "status": row.get("status").cloned().unwrap_or(Value::Null),
@@ -2742,8 +2760,9 @@ fn summarize_probe_ad_unit(network_code: &str, code: &str, payload: &Value) -> V
     })
 }
 
-fn ad_unit_ancestor_ids(row: &Value) -> Vec<String> {
+fn ad_unit_ancestor_ids(row: &Value, network_code: &str) -> (Vec<String>, bool) {
     let mut ids = BTreeSet::new();
+    let mut identity_complete = true;
     for key in [
         "parentAdUnit",
         "parentAdUnits",
@@ -2751,41 +2770,72 @@ fn ad_unit_ancestor_ids(row: &Value) -> Vec<String> {
         "ancestorAdUnits",
         "adUnitParent",
     ] {
-        collect_numeric_ad_unit_ids(row.get(key), &mut ids);
+        if let Some(value) = row.get(key) {
+            identity_complete &= collect_network_bound_ad_unit_ids(value, network_code, &mut ids);
+        }
     }
-    ids.into_iter().collect()
+    (ids.into_iter().collect(), identity_complete)
 }
 
-fn collect_numeric_ad_unit_ids(value: Option<&Value>, ids: &mut BTreeSet<String>) {
+fn collect_network_bound_ad_unit_ids(
+    value: &Value,
+    network_code: &str,
+    ids: &mut BTreeSet<String>,
+) -> bool {
     match value {
-        Some(Value::String(raw)) => {
-            if let Some(id) = numeric_ad_unit_id_from_candidate(raw) {
+        Value::String(raw) => {
+            if let Some(id) = exact_ad_unit_id_from_candidate(network_code, raw) {
                 ids.insert(id);
+                true
+            } else {
+                false
             }
         }
-        Some(Value::Array(values)) => {
+        Value::Number(number) => number.as_u64().is_some_and(|id| {
+            if id == 0 {
+                return false;
+            }
+            ids.insert(id.to_string());
+            true
+        }),
+        Value::Array(values) => {
+            let mut complete = true;
             for value in values {
-                collect_numeric_ad_unit_ids(Some(value), ids);
+                complete &= collect_network_bound_ad_unit_ids(value, network_code, ids);
             }
+            complete
         }
-        Some(Value::Object(object)) => {
-            for key in ["adUnitId", "adUnit", "id", "name", "parentAdUnit"] {
-                collect_numeric_ad_unit_ids(object.get(key), ids);
+        Value::Object(object) => {
+            let mut complete = true;
+            let mut recognized = false;
+            for key in ["adUnitId", "adUnit", "parentAdUnit"] {
+                if let Some(value) = object.get(key) {
+                    recognized = true;
+                    complete &= collect_network_bound_ad_unit_ids(value, network_code, ids);
+                }
             }
+            if !recognized {
+                for key in ["name", "id"] {
+                    if let Some(value) = object.get(key) {
+                        recognized = true;
+                        complete &=
+                            collect_network_bound_ad_unit_ids(value, network_code, ids);
+                        break;
+                    }
+                }
+            }
+            recognized && complete
         }
-        _ => {}
+        _ => false,
     }
 }
 
-fn numeric_ad_unit_id_from_candidate(value: &str) -> Option<String> {
-    let candidate = resource_id_from_name(value.trim());
-    if candidate.is_empty()
-        || !candidate.chars().all(|ch| ch.is_ascii_digit())
-        || candidate.parse::<u64>().ok()? == 0
-    {
-        return None;
+fn exact_ad_unit_id_from_candidate(network_code: &str, value: &str) -> Option<String> {
+    if value.contains('/') {
+        return exact_ad_unit_id_from_resource_name(network_code, value);
     }
-    Some(candidate)
+    let id = value.parse::<u64>().ok()?;
+    (id > 0 && id.to_string() == value).then(|| id.to_string())
 }
 
 fn catalog_rows(payload: &Value, collection: CatalogCollection) -> Vec<&Value> {
@@ -2835,6 +2885,7 @@ fn summarize_probe_collection(
 
 fn summarize_dependency_placements(
     payload: &Value,
+    network_code: &str,
     page_size: u32,
     targets: &[DependencyProbeTarget],
 ) -> Value {
@@ -2857,13 +2908,29 @@ fn summarize_dependency_placements(
     let row_count = rows.len();
     for row in rows {
         let resource_name = row.get("name").and_then(Value::as_str).unwrap_or_default();
-        let placement_id = resource_id_from_name(resource_name);
-        let (member_ad_unit_ids, membership_shape_seen) = placement_member_ad_unit_ids(row);
-        if !membership_shape_seen {
+        let Some(placement_id) =
+            exact_resource_id_from_name(network_code, "placements", resource_name)
+        else {
+            unknown_membership_rows.push(json!({
+                "placement_id": Value::Null,
+                "resource_name": resource_name,
+                "display_name": row.get("displayName").or_else(|| row.get("name")).cloned().unwrap_or(Value::Null),
+                "reason": "placement resource identity was malformed or outside the requested network",
+            }));
+            continue;
+        };
+        let (member_ad_unit_ids, membership_shape_seen, membership_identity_complete) =
+            placement_member_ad_unit_ids(row, network_code);
+        if !membership_shape_seen || !membership_identity_complete {
             unknown_membership_rows.push(json!({
                 "placement_id": placement_id,
                 "resource_name": resource_name,
                 "display_name": row.get("displayName").or_else(|| row.get("name")).cloned().unwrap_or(Value::Null),
+                "reason": if membership_shape_seen {
+                    "placement membership contained malformed or foreign ad-unit identities"
+                } else {
+                    "placement membership shape was not exposed"
+                },
             }));
         }
         let matched_target_ids = targets
@@ -2898,6 +2965,7 @@ fn summarize_dependency_placements(
                 "member_ad_unit_count": member_ad_unit_count,
                 "member_ad_unit_ids_sample": member_ad_unit_ids_sample,
                 "member_ad_unit_ids_truncated": member_ad_unit_count > DEPENDENCY_PLACEMENT_MEMBER_SAMPLE_LIMIT,
+                "membership_identity_complete": membership_identity_complete,
             }));
         } else {
             placement_matches_truncated = true;
@@ -2936,9 +3004,13 @@ fn summarize_dependency_placements(
     })
 }
 
-fn placement_member_ad_unit_ids(row: &Value) -> (BTreeSet<String>, bool) {
+fn placement_member_ad_unit_ids(
+    row: &Value,
+    network_code: &str,
+) -> (BTreeSet<String>, bool, bool) {
     let mut ids = BTreeSet::new();
     let mut membership_shape_seen = false;
+    let mut identity_complete = true;
     if let Some(object) = row.as_object() {
         for key in [
             "adUnitAssignments",
@@ -2949,11 +3021,12 @@ fn placement_member_ad_unit_ids(row: &Value) -> (BTreeSet<String>, bool) {
         ] {
             if let Some(value) = object.get(key) {
                 membership_shape_seen = true;
-                collect_numeric_ad_unit_ids(Some(value), &mut ids);
+                identity_complete &=
+                    collect_network_bound_ad_unit_ids(value, network_code, &mut ids);
             }
         }
     }
-    (ids, membership_shape_seen)
+    (ids, membership_shape_seen, identity_complete)
 }
 
 fn apply_probe_collection_decision(
@@ -3629,7 +3702,7 @@ fn dependency_probe_response_json(
     proof_flags: Value,
     dependency_decision: &str,
 ) -> Value {
-    let mut response = json!({
+    json!({
         "network_code": network_code,
         "dependency_decision": dependency_decision,
         "ad_units": target_rows,
@@ -3642,9 +3715,38 @@ fn dependency_probe_response_json(
             "safe_to_archive_or_retire": false,
             "reason": "This read-only helper reports dependencies and proof gaps; archive, deactivate, or retarget decisions require a separate reviewed workflow."
         }
-    });
+    })
+}
+
+fn finalize_exchange_probe_response(
+    mut response: Value,
+    network_code: &str,
+) -> Result<Value, AdManagerError> {
     attach_result_fingerprint(&mut response);
-    response
+    let state = exchange_evidence_state(&response);
+    attach_evidence_receipt_template(
+        &mut response,
+        network_code,
+        EvidenceSource::ExchangeProtectionReview,
+        state,
+    )?;
+    Ok(response)
+}
+
+fn finalize_dependency_probe_response(
+    mut response: Value,
+    network_code: &str,
+    dependency_decision: &str,
+) -> Result<Value, AdManagerError> {
+    attach_result_fingerprint(&mut response);
+    let state = dependency_evidence_state(dependency_decision, &response);
+    attach_evidence_receipt_template(
+        &mut response,
+        network_code,
+        EvidenceSource::DependencyProbe,
+        state,
+    )?;
+    Ok(response)
 }
 
 fn attach_result_fingerprint(response: &mut Value) {
@@ -3725,11 +3827,16 @@ fn exact_target_row(row: &Value, network_code: &str) -> bool {
             == Some(ad_unit_id)
 }
 
-fn exact_ad_unit_id_from_resource_name(
+fn exact_ad_unit_id_from_resource_name(network_code: &str, resource_name: &str) -> Option<String> {
+    exact_resource_id_from_name(network_code, "adUnits", resource_name)
+}
+
+fn exact_resource_id_from_name(
     network_code: &str,
+    resource_collection: &str,
     resource_name: &str,
 ) -> Option<String> {
-    let prefix = format!("networks/{network_code}/adUnits/");
+    let prefix = format!("networks/{network_code}/{resource_collection}/");
     let raw_id = resource_name.strip_prefix(&prefix)?;
     if raw_id.is_empty() || raw_id.contains('/') {
         return None;
@@ -3784,16 +3891,13 @@ fn exchange_evidence_state(response: &Value) -> EvidenceState {
         return blocked_evidence_state(response);
     }
 
-    let yield_group_activity_unknown = response
-        .get("yield_groups")
-        .is_some_and(|yield_groups| {
-            yield_groups.get("decision").and_then(Value::as_str)
-                == Some("targeted_activity_unknown")
-                || yield_groups
-                    .get("targeted_activity_unknown")
-                    .and_then(Value::as_array)
-                    .is_some_and(|matches| !matches.is_empty())
-        });
+    let yield_group_activity_unknown = response.get("yield_groups").is_some_and(|yield_groups| {
+        yield_groups.get("decision").and_then(Value::as_str) == Some("targeted_activity_unknown")
+            || yield_groups
+                .get("targeted_activity_unknown")
+                .and_then(Value::as_array)
+                .is_some_and(|matches| !matches.is_empty())
+    });
     if yield_group_activity_unknown {
         return EvidenceState::PartialCapped;
     }
@@ -3846,13 +3950,33 @@ fn soap_probe_block_class(
     let permission_fault = [soap_fault.unwrap_or_default(), upstream_response_xml]
         .into_iter()
         .any(|value| {
-            value.contains("PermissionError.") || value.contains("AuthenticationError.")
+            value.contains("PermissionError.") || authentication_fault_is_permission(value)
         });
     if matches!(status, 401 | 403) || permission_fault {
         "permission"
     } else {
         "upstream"
     }
+}
+
+fn authentication_fault_is_permission(value: &str) -> bool {
+    const PERMISSION_REASONS: &[&str] = &[
+        "AuthenticationError.AMBIGUOUS_SOAP_REQUEST_HEADER",
+        "AuthenticationError.INVALID_EMAIL",
+        "AuthenticationError.AUTHENTICATION_FAILED",
+        "AuthenticationError.INVALID_OAUTH_SIGNATURE",
+        "AuthenticationError.MISSING_SOAP_REQUEST_HEADER",
+        "AuthenticationError.MISSING_AUTHENTICATION_HTTP_HEADER",
+        "AuthenticationError.MISSING_AUTHENTICATION",
+        "AuthenticationError.NETWORK_API_ACCESS_DISABLED",
+        "AuthenticationError.NO_NETWORKS_TO_ACCESS",
+        "AuthenticationError.NETWORK_NOT_FOUND",
+        "AuthenticationError.NETWORK_CODE_REQUIRED",
+        "AuthenticationError.UNDER_INVESTIGATION",
+    ];
+    PERMISSION_REASONS
+        .iter()
+        .any(|reason| value.contains(reason))
 }
 
 fn dependency_proof_incomplete(placement_summary: &Value, line_item_summary: &Value) -> bool {
@@ -3915,7 +4039,7 @@ fn probe_ad_unit_target_from_summary(
             values
                 .iter()
                 .filter_map(Value::as_str)
-                .filter_map(numeric_ad_unit_id_from_candidate),
+                .filter_map(|value| exact_ad_unit_id_from_candidate(network_code, value)),
         );
     }
     Some(target)
@@ -6967,7 +7091,7 @@ mod tests {
             ]
         });
         let target = dependency_target("200", &[], &["Section_Page_LS"]);
-        let summary = summarize_dependency_placements(&payload, 100, &[target]);
+        let summary = summarize_dependency_placements(&payload, "1015422", 100, &[target]);
 
         assert_eq!(summary["proof_state"], "complete_for_page");
         assert_eq!(
@@ -6979,6 +7103,62 @@ mod tests {
             "300"
         );
         assert_eq!(summary["target_placement_match_count"], 1);
+    }
+
+    #[test]
+    fn nested_rest_identities_are_network_bound_and_incomplete_when_malformed() {
+        let ad_units = json!({"adUnits":[{
+            "name":"networks/1015422/adUnits/200",
+            "adUnitCode":"Section_Page_LS",
+            "parentPath":[{"name":"networks/7654321/adUnits/100"}],
+            "appliedAdsenseEnabled":false,
+            "effectiveAdsenseEnabled":false
+        }]});
+        let exchange = summarize_probe_ad_unit("1015422", "Section_Page_LS", &ad_units);
+        assert_eq!(exchange["proof_state"], "resolved_exact");
+        assert_eq!(exchange["ancestor_identity_complete"], false);
+        assert_eq!(exchange["proof_complete"], false);
+        assert_eq!(exchange["decision"], "partial_api_proof");
+        assert_eq!(exchange["ancestor_ad_unit_ids"], json!([]));
+
+        let dependency =
+            summarize_dependency_ad_unit_code("1015422", "Section_Page_LS", &ad_units);
+        assert_eq!(dependency["proof_state"], "resolved_exact");
+        assert_eq!(dependency["ancestor_identity_complete"], false);
+        let target = dependency_target_from_ad_unit_summary(&dependency, "1015422")
+            .expect("the exact primary target remains usable for partial proof");
+        assert!(target.ancestor_ad_unit_ids.is_empty());
+        assert!(!target.proof_notes.is_empty());
+
+        let placements = json!({"placements":[
+            {
+                "name":"networks/1015422/placements/300",
+                "adUnitAssignments":[{"adUnit":"networks/7654321/adUnits/200"}]
+            },
+            {
+                "name":"networks/1015422/placements/301",
+                "adUnitAssignments":[{"adUnit":"networks/1015422/adUnits/0200"}]
+            },
+            {
+                "name":"networks/7654321/placements/302",
+                "adUnitAssignments":[{"adUnit":"networks/1015422/adUnits/200"}]
+            },
+            {
+                "name":"networks/1015422/placements/303",
+                "adUnitAssignments":[
+                    {"adUnit":"networks/7654321/adUnits/999"},
+                    {"adUnit":"networks/1015422/adUnits/200"}
+                ]
+            }
+        ]});
+        let summary = summarize_dependency_placements(&placements, "1015422", 100, &[target]);
+        assert_eq!(summary["proof_state"], "sample_or_shape_incomplete");
+        assert_eq!(summary["membership_shape_unknown_count"], 4);
+        assert_eq!(summary["target_placement_match_count"], 1);
+        assert_eq!(
+            summary["target_placement_ids_by_ad_unit_id"]["200"],
+            json!(["303"])
+        );
     }
 
     #[test]
@@ -7151,10 +7331,7 @@ mod tests {
             .expect("network code canonicalizes once");
         assert_eq!(canonical_network, "1234567");
         assert_eq!(
-            exact_ad_unit_id_from_resource_name(
-                &canonical_network,
-                "networks/1234567/adUnits/200"
-            ),
+            exact_ad_unit_id_from_resource_name(&canonical_network, "networks/1234567/adUnits/200"),
             Some("200".to_string())
         );
         for invalid in [
@@ -7169,19 +7346,12 @@ mod tests {
                 "appliedAdsenseEnabled":true,
                 "effectiveAdsenseEnabled":true
             }]});
-            let dependency = summarize_dependency_ad_unit_code(
-                "1234567",
-                "Section_Page_LS",
-                &payload,
-            );
+            let dependency =
+                summarize_dependency_ad_unit_code("1234567", "Section_Page_LS", &payload);
             assert_eq!(dependency["proof_state"], "invalid_resource_name");
             assert!(dependency_target_from_ad_unit_summary(&dependency, "1234567").is_none());
 
-            let exchange = summarize_probe_ad_unit(
-                "1234567",
-                "Section_Page_LS",
-                &payload,
-            );
+            let exchange = summarize_probe_ad_unit("1234567", "Section_Page_LS", &payload);
             assert_eq!(exchange["decision"], "partial_api_proof");
             assert!(probe_ad_unit_target_from_summary(&exchange, "1234567").is_none());
         }
@@ -7189,27 +7359,33 @@ mod tests {
 
     #[test]
     fn dependency_probe_response_contract_is_no_mutation_and_not_cleanup_approval() {
-        let response = dependency_probe_response_json(
+        let response = finalize_dependency_probe_response(
+            dependency_probe_response_json(
+                "1015422",
+                vec![json!({
+                    "ad_unit_id": "200",
+                    "ad_unit_code": "Section_Page_LS",
+                    "resource_name": "networks/1015422/adUnits/200",
+                    "proof_state": "resolved_exact"
+                })],
+                json!({
+                    "proof_state": "complete_for_page",
+                    "target_placement_match_count": 1,
+                    "target_placement_matches_sample": [{"placement_id": "300"}]
+                }),
+                json!({
+                    "proof_state": "complete",
+                    "dependency_match_count": 1,
+                    "dependency_matches_sample": [{"line_item_id": "7360951637"}]
+                }),
+                Vec::new(),
+                json!({"line_items_capped_or_truncated": false}),
+                "dependencies_found",
+            ),
             "1015422",
-            vec![json!({
-                "ad_unit_id": "200",
-                "ad_unit_code": "Section_Page_LS",
-                "proof_state": "resolved_exact"
-            })],
-            json!({
-                "proof_state": "complete_for_page",
-                "target_placement_match_count": 1,
-                "target_placement_matches_sample": [{"placement_id": "300"}]
-            }),
-            json!({
-                "proof_state": "complete",
-                "dependency_match_count": 1,
-                "dependency_matches_sample": [{"line_item_id": "7360951637"}]
-            }),
-            Vec::new(),
-            json!({"line_items_capped_or_truncated": false}),
             "dependencies_found",
-        );
+        )
+        .expect("dependency producer finalization");
 
         assert_eq!(response["network_code"], "1015422");
         assert_eq!(response["dependency_decision"], "dependencies_found");
@@ -7219,6 +7395,12 @@ mod tests {
                 .is_some_and(|value| value.len() == 16)
         );
         assert_eq!(response["mutation_performed"], false);
+        assert_eq!(response["evidence_receipt_template"]["source"], "dependency_probe");
+        assert_eq!(response["evidence_receipt_template"]["state"], "complete_blocked");
+        assert_eq!(
+            response["evidence_receipt_template"]["result_hash"],
+            response["result_fingerprint"]
+        );
         assert_eq!(
             response["cleanup_decision"]["safe_to_archive_or_retire"],
             false
@@ -7232,14 +7414,13 @@ mod tests {
     }
 
     #[test]
-    fn evidence_receipt_attachment_binds_exact_target_and_source() {
-        let mut response = json!({
+    fn exchange_producer_finalization_binds_exact_target_source_state_and_hash() {
+        let response = json!({
             "overall_decision": "partial_api_proof",
             "attention_reasons": ["exposed_flag_requires_attention"],
             "partial_reasons": ["manual_ui_review_required"],
             "unsupported_or_unintegrated_surfaces": ["protections"],
             "certainty": {"can_prove_requested_ad_unit_flags": false},
-            "result_fingerprint": "0123456789abcdef",
             "ad_units": [{
                 "ad_unit_id": "200",
                 "resource_name": "networks/1234567/adUnits/200",
@@ -7247,20 +7428,15 @@ mod tests {
                 "proof_complete": false
             }]
         });
-        attach_evidence_receipt_template(
-            &mut response,
-            "1234567",
-            EvidenceSource::ExchangeProtectionReview,
-            EvidenceState::PartialCapped,
-        )
-        .expect("receipt attachment");
+        let response = finalize_exchange_probe_response(response, "1234567")
+            .expect("exchange producer finalization");
 
         let receipt = response["evidence_receipt_template"].clone();
         assert_eq!(receipt["network_code"], "1234567");
         assert_eq!(receipt["source"], "exchange_protection_review");
         assert_eq!(receipt["state"], "partial_capped");
         assert_eq!(receipt["target_ad_unit_ids"], json!(["200"]));
-        assert_eq!(receipt["result_hash"], "0123456789abcdef");
+        assert_eq!(receipt["result_hash"], response["result_fingerprint"]);
     }
 
     #[test]
@@ -7368,8 +7544,20 @@ mod tests {
             "permission"
         );
         assert_eq!(
-            soap_probe_block_class(500, None, "<fault>AuthenticationError.NO_NETWORKS_TO_ACCESS</fault>"),
+            soap_probe_block_class(
+                500,
+                None,
+                "<fault>AuthenticationError.NO_NETWORKS_TO_ACCESS</fault>"
+            ),
             "permission"
+        );
+        assert_eq!(
+            soap_probe_block_class(
+                500,
+                Some("AuthenticationError.CONNECTION_ERROR"),
+                ""
+            ),
+            "upstream"
         );
         assert_eq!(
             soap_probe_block_class(500, Some("StatementError.INVALID"), ""),

@@ -48,6 +48,11 @@ operator must still review the underlying result before using it.
 
 Target rows contribute dependency evidence only when their resource names bind
 exactly to the canonical requested network and positive numeric ad-unit ID.
-Permission and authentication SOAP faults remain explicit permission blocks.
+Ancestor, placement, and placement-member resource identities use the same
+network-bound rule. Invalid nested identities cannot contribute dependencies
+and keep the affected proof surface incomplete. Invalid SOAP API versions fail
+before an upstream read. Caller-actionable permission and authentication faults
+remain explicit permission blocks; authentication-service connection failures
+remain upstream read blocks.
 
 The helper is read-only and always reports `mutation_performed=false`.

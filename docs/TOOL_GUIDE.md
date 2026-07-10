@@ -98,7 +98,10 @@ with `source_version=gam-evidence-producer-v1`. Complete API proof remains
 `manual_ui_proof_required` until the unsupported GAM UI surfaces are reviewed.
 Unknown yield-group activity remains partial. Probe network codes are
 canonicalized once, and foreign-network or malformed resource rows cannot
-contribute targets or exposure decisions.
+contribute targets or exposure decisions. Nested ancestor identities use the
+same network and canonical-ID rule; malformed hierarchy data makes the proof
+partial instead of being treated as a clear hierarchy read. Invalid SOAP API
+versions fail input validation before any provider read.
 
 ## `gam_ad_unit_dependency_probe`
 
@@ -128,10 +131,14 @@ evidence. Do not archive, deactivate, or retarget inventory solely because this
 tool returns `no_dependencies_observed` or `incomplete_no_dependencies_observed`.
 The response includes a stable `result_fingerprint` and emits the same
 versioned receipt template only for one to ten fully resolved, exact,
-network-bound target rows. Unresolved, ambiguous, duplicate, id-only, or
-cross-network target scopes receive an explicit `not_generated` marker instead.
-SOAP permission and authentication faults are classified separately from
-generic upstream read failures.
+network-bound target rows. Unresolved, ambiguous, id-only, or cross-network
+resolved target scopes receive an explicit `not_generated` marker instead;
+duplicate request inputs fail validation. Placement resources, placement
+members, and ad-unit ancestors are also checked against the requested network.
+Malformed nested identities make the relevant surface incomplete and cannot
+create a dependency. Invalid SOAP API versions fail before provider access.
+Caller-actionable SOAP permission and authentication faults are classified
+separately from server-side connection and generic upstream read failures.
 
 ## `gam_report_run`
 

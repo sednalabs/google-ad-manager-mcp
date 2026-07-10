@@ -1,4 +1,5 @@
 use mcp_toolkit_testing::stdio_contract::StdioMcpProcess;
+use serde_json::json;
 
 #[test]
 fn stdio_initializes_and_lists_tools() {
@@ -38,4 +39,45 @@ fn stdio_initializes_and_lists_tools() {
     expected.sort();
     let expected = expected.into_iter().map(str::to_string).collect::<Vec<_>>();
     assert_eq!(names, expected);
+}
+
+#[test]
+fn probe_handlers_reject_invalid_soap_versions_before_provider_access() {
+    let mut process = StdioMcpProcess::start(env!("CARGO_BIN_EXE_google-ad-manager-mcp"));
+    for (id, tool_name, arguments) in [
+        (
+            3,
+            "gam_exchange_protection_probe",
+            json!({
+                "network_code": "1015422",
+                "ad_unit_codes": ["Section_Page_LS"],
+                "api_version": "invalid"
+            }),
+        ),
+        (
+            4,
+            "gam_ad_unit_dependency_probe",
+            json!({
+                "network_code": "1015422",
+                "ad_unit_ids": ["200"],
+                "api_version": "invalid"
+            }),
+        ),
+    ] {
+        let response = process.call_tool(id, tool_name, arguments);
+        assert!(
+            response.get("error").is_none() || response["error"].is_null(),
+            "JSON-RPC error: {response}"
+        );
+        let result = &response["result"]["structuredContent"];
+        assert_eq!(result["ok"], false);
+        assert_eq!(result["error"]["code"], "invalid_input");
+        assert_eq!(result["error"]["reason"], "validation_failed");
+        assert!(
+            result["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("api_version"))
+        );
+        assert!(result.get("data").is_none());
+    }
 }
