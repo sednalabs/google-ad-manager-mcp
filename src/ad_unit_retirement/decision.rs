@@ -29,11 +29,19 @@ pub(super) fn recommendation(identity: &Value, descendants: &Value, evidence: &V
                 .to_string(),
         ));
     }
-    let blocking = states
+    let mut blocking = states
         .iter()
         .filter(|(_, state)| state == "complete_blocked")
         .map(|(surface, _)| surface.clone())
         .collect::<Vec<_>>();
+    let observed_active_descendants = descendants
+        .get("blocking_external_descendant_count")
+        .and_then(Value::as_u64)
+        .is_some_and(|count| count > 0);
+    let descendants_complete_blocked = blocking.iter().any(|surface| surface == "descendants");
+    if observed_active_descendants && !descendants_complete_blocked {
+        blocking.push("descendants_observed_active".to_string());
+    }
     let incomplete = states
         .iter()
         .filter(|(_, state)| state != "complete_clear" && state != "complete_blocked")
@@ -51,6 +59,12 @@ pub(super) fn recommendation(identity: &Value, descendants: &Value, evidence: &V
         .iter()
         .filter_map(|(surface, state)| next_action(surface, state))
         .collect::<Vec<_>>();
+    if observed_active_descendants && !descendants_complete_blocked {
+        next_actions.push(json!({
+            "surface": "descendants_observed_active",
+            "action": "archive or retarget the observed active descendants before reassessment"
+        }));
+    }
     if evidence_complete {
         next_actions.push(json!({
             "surface": "operator_review",

@@ -17,7 +17,7 @@ pub(super) struct DescendantScan {
     listed_has_children: BTreeMap<String, bool>,
     listed_target_ids: BTreeSet<String>,
     parent_by_id: BTreeMap<String, Option<String>>,
-    reported_ancestors_by_id: BTreeMap<String, BTreeSet<String>>,
+    reported_ancestors_by_id: BTreeMap<String, Vec<String>>,
     duplicate_catalog_id: bool,
     max_rows: u32,
     page_count: u32,
@@ -27,6 +27,7 @@ pub(super) struct DescendantScan {
     repeated_page_token: bool,
     hierarchy_shape_observed: bool,
     invalid_network_resource: bool,
+    invalid_parent_path: bool,
     seen_page_tokens: BTreeSet<String>,
     target_has_children: BTreeSet<String>,
     target_ids_with_descendants: BTreeSet<String>,
@@ -62,6 +63,7 @@ impl DescendantScan {
             repeated_page_token: false,
             hierarchy_shape_observed: false,
             invalid_network_resource: false,
+            invalid_parent_path: false,
             seen_page_tokens: BTreeSet::new(),
             target_has_children: BTreeSet::new(),
             target_ids_with_descendants: BTreeSet::new(),
@@ -126,9 +128,13 @@ impl DescendantScan {
         if row.get("parentAdUnit").is_some() && parent_id.is_none() {
             self.invalid_network_resource = true;
         }
-        let reported_ancestors = ancestor_ids(row, &self.network_code)
-            .into_iter()
-            .collect::<BTreeSet<_>>();
+        let reported_ancestors = match ancestor_ids(row, &self.network_code, parent_id.as_deref()) {
+            Ok(ancestors) => ancestors,
+            Err(()) => {
+                self.invalid_parent_path = true;
+                Vec::new()
+            }
+        };
         if row.get("parentAdUnit").is_some() || row.get("parentPath").is_some() {
             self.hierarchy_shape_observed = true;
         }
@@ -159,12 +165,12 @@ impl DescendantScan {
             "id": ad_unit_id,
             "status": bounded_string(row.get("status"), 32),
             "parent": parent_id,
-            "ancestors": reported_ancestors,
+            "ancestors": reported_ancestors.clone(),
             "has_children": row.get("hasChildren").and_then(Value::as_bool),
             "updated": bounded_string(row.get("updateTime"), 64),
         }));
 
-        let ancestors = reported_ancestors;
+        let ancestors = reported_ancestors.into_iter().collect::<BTreeSet<_>>();
         let matched_targets = ancestors
             .intersection(&self.target_ids)
             .cloned()
@@ -222,6 +228,7 @@ impl DescendantScan {
                 .is_none_or(|resolved| &resolved != reported)
         });
         let hierarchy_inconsistent = self.invalid_network_resource
+            || self.invalid_parent_path
             || self.duplicate_catalog_id
             || missing_target_list_row
             || ancestry_mismatch
@@ -267,6 +274,7 @@ impl DescendantScan {
             "hierarchy_inconsistent": hierarchy_inconsistent,
             "identity_list_child_flag_mismatch": child_flag_mismatch,
             "invalid_network_resource": self.invalid_network_resource,
+            "invalid_parent_path": self.invalid_parent_path,
             "duplicate_catalog_id": self.duplicate_catalog_id,
             "missing_target_list_row": missing_target_list_row,
             "ancestry_mismatch": ancestry_mismatch,
@@ -337,57 +345,58 @@ fn ad_unit_rows(payload: &Value) -> &[Value] {
         .unwrap_or_default()
 }
 
-fn ancestor_ids(row: &Value, network_code: &str) -> Vec<String> {
-    let mut ids = BTreeSet::new();
-    collect_ids(row.get("parentAdUnit"), network_code, &mut ids);
-    collect_ids(row.get("parentPath"), network_code, &mut ids);
-    ids.into_iter().collect()
-}
-
-fn collect_ids(value: Option<&Value>, network_code: &str, ids: &mut BTreeSet<String>) {
-    match value {
-        Some(Value::String(value)) => {
-            if let Some(id) = scoped_numeric_id(value, network_code) {
-                ids.insert(id);
-            }
+fn ancestor_ids(
+    row: &Value,
+    network_code: &str,
+    direct_parent_id: Option<&str>,
+) -> Result<Vec<String>, ()> {
+    let Some(path) = row.get("parentPath") else {
+        return direct_parent_id.is_none().then_some(Vec::new()).ok_or(());
+    };
+    let entries = path.as_array().ok_or(())?;
+    let mut ids = Vec::with_capacity(entries.len());
+    let mut seen = BTreeSet::new();
+    for entry in entries {
+        let resource_name = entry
+            .as_object()
+            .and_then(|object| object.get("parentAdUnit"))
+            .and_then(Value::as_str)
+            .ok_or(())?;
+        let id = scoped_numeric_id(resource_name, network_code).ok_or(())?;
+        if !seen.insert(id.clone()) {
+            return Err(());
         }
-        Some(Value::Array(values)) => {
-            for value in values {
-                collect_ids(Some(value), network_code, ids);
-            }
-        }
-        Some(Value::Object(object)) => {
-            for key in ["adUnitId", "adUnit", "id", "name", "parentAdUnit"] {
-                collect_ids(object.get(key), network_code, ids);
-            }
-        }
-        _ => {}
+        ids.push(id);
     }
+    if ids.last().map(String::as_str) != direct_parent_id {
+        return Err(());
+    }
+    Ok(ids)
 }
 
 fn scoped_numeric_id(value: &str, network_code: &str) -> Option<String> {
-    if value.contains('/') {
-        let prefix = format!("networks/{network_code}/adUnits/");
-        let raw_id = value.strip_prefix(&prefix)?;
-        if raw_id.contains('/') {
-            return None;
-        }
-        return numeric_id(raw_id);
+    let prefix = format!("networks/{network_code}/adUnits/");
+    let raw_id = value.strip_prefix(&prefix)?;
+    if raw_id.contains('/') {
+        return None;
     }
-    numeric_id(value)
+    numeric_id(raw_id)
 }
 
 fn resolve_catalog_ancestors(
     ad_unit_id: &str,
     parent_by_id: &BTreeMap<String, Option<String>>,
-) -> Option<BTreeSet<String>> {
-    let mut resolved = BTreeSet::new();
+) -> Option<Vec<String>> {
+    let mut resolved = Vec::new();
+    let mut seen = BTreeSet::new();
     let mut current = parent_by_id.get(ad_unit_id)?.clone();
     while let Some(parent_id) = current {
-        if !resolved.insert(parent_id.clone()) {
+        if !seen.insert(parent_id.clone()) {
             return None;
         }
+        resolved.push(parent_id.clone());
         current = parent_by_id.get(&parent_id)?.clone();
     }
+    resolved.reverse();
     Some(resolved)
 }

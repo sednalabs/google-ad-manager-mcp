@@ -1044,7 +1044,7 @@ impl AdManagerServer {
             receipt_state,
         );
 
-        Ok(contract::success_with_meta(
+        Ok(success_with_wire_guard(
             response,
             json!({
                 "mutation_performed": false,
@@ -1055,6 +1055,7 @@ impl AdManagerServer {
                 "policy": provider_safety_contract_json(),
             }),
             started,
+            "exchange_protection_result",
         ))
     }
 
@@ -1219,7 +1220,7 @@ impl AdManagerServer {
             receipt_state,
         );
 
-        Ok(contract::success_with_meta(
+        Ok(success_with_wire_guard(
             response,
             json!({
                 "mutation_performed": false,
@@ -1232,6 +1233,7 @@ impl AdManagerServer {
                 "policy": provider_safety_contract_json(),
             }),
             started,
+            "dependency_probe_result",
         ))
     }
 
@@ -1252,7 +1254,7 @@ impl AdManagerServer {
         };
         let serialized_response_bytes = response_bytes(&response);
 
-        Ok(retirement_success_with_wire_guard(
+        Ok(success_with_wire_guard(
             response,
             json!({
                 "mutation_performed": false,
@@ -1264,6 +1266,7 @@ impl AdManagerServer {
                 "policy": provider_safety_contract_json(),
             }),
             started,
+            "assessment_result",
         ))
     }
 
@@ -3689,29 +3692,27 @@ fn attach_retirement_receipt_template(
         .insert("evidence_receipt_template".to_string(), template);
 }
 
-fn retirement_success_with_wire_guard(
+fn success_with_wire_guard(
     data: Value,
     meta: Value,
     started: Instant,
+    field: &'static str,
 ) -> CallToolResult {
     let error_started = started;
     let result = contract::success_with_meta(data, meta, started);
     match serde_json::to_vec(&result) {
         Ok(serialized) if serialized.len() <= MAX_WIRE_RESULT_BYTES => result,
-        Ok(serialized) => contract::error(
+        Ok(_) => contract::error(
             AdManagerError::invalid(
-                "assessment_result",
-                format!(
-                    "final tool result would be {} bytes, above the {MAX_WIRE_RESULT_BYTES}-byte wire cap; assess fewer targets",
-                    serialized.len()
-                ),
+                field,
+                "tool result exceeded its model-visible wire cap; narrow the target set, reduce page limits, omit raw XML, or ingest the evidence into the scratchpad",
             ),
             error_started,
         ),
         Err(_) => contract::error(
             AdManagerError::invalid(
-                "assessment_result",
-                "final tool result could not be serialized for its wire-size guard",
+                field,
+                "tool result could not be serialized for its model-visible wire-size guard",
             ),
             error_started,
         ),
@@ -7226,11 +7227,12 @@ mod tests {
     }
 
     #[test]
-    fn retirement_wire_guard_replaces_oversized_results() {
-        let result = retirement_success_with_wire_guard(
+    fn proof_tool_wire_guard_replaces_oversized_results() {
+        let result = success_with_wire_guard(
             json!({"value":"x".repeat(MAX_WIRE_RESULT_BYTES)}),
             json!({"mutation_performed":false}),
             Instant::now(),
+            "dependency_probe_result",
         );
         let serialized = serde_json::to_string(&result).expect("serialize guarded result");
         assert!(serialized.len() < MAX_WIRE_RESULT_BYTES);

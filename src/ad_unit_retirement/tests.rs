@@ -16,7 +16,16 @@ fn receipt(
     RetirementEvidenceReceipt {
         network_code: "1234567".to_string(),
         source,
-        source_version: "0.1.1-alpha.0".to_string(),
+        source_version: match source {
+            RetirementEvidenceSource::DependencyProbe
+            | RetirementEvidenceSource::ExchangeProtectionReview => {
+                env!("CARGO_PKG_VERSION")
+            }
+            RetirementEvidenceSource::DeliveryReport => "gam-report-v1",
+            RetirementEvidenceSource::SiteContract => "site-contract-v1",
+            RetirementEvidenceSource::Telemetry => "telemetry-v1",
+        }
+        .to_string(),
         state,
         result_hash: Some("sha256:0123456789abcdef".to_string()),
         observed_at_unix_seconds: Some(observed_at),
@@ -259,6 +268,39 @@ fn sparse_or_cross_network_hierarchy_fails_closed() {
 }
 
 #[test]
+fn malformed_or_reordered_parent_paths_fail_closed() {
+    for parent_path in [
+        json!([
+            {"parentAdUnit":"networks/1234567/adUnits/100"},
+            {"parentAdUnit":"networks/1234567/adUnits/100"}
+        ]),
+        json!([
+            {"parentAdUnit":"networks/1234567/adUnits/200"},
+            {"parentAdUnit":"networks/1234567/adUnits/100"}
+        ]),
+        json!([
+            {"parentAdUnit":"networks/9999999/adUnits/100"},
+            {"parentAdUnit":"networks/1234567/adUnits/200"}
+        ]),
+    ] {
+        let mut scan = DescendantScan::new(
+            "1234567",
+            &["200".to_string()],
+            &child_claims(&[("200", true)]),
+            100,
+        );
+        scan.consume_page(&json!({"adUnits":[
+            {"name":"networks/1234567/adUnits/100","parentPath":[],"hasChildren":true},
+            {"name":"networks/1234567/adUnits/200","parentAdUnit":"networks/1234567/adUnits/100","parentPath":[{"parentAdUnit":"networks/1234567/adUnits/100"}],"hasChildren":true},
+            {"name":"networks/1234567/adUnits/201","parentAdUnit":"networks/1234567/adUnits/200","parentPath":parent_path,"status":"ACTIVE"}
+        ]}));
+        let summary = scan.finish(100);
+        assert_eq!(summary["proof_state"], "partial_capped");
+        assert_eq!(summary["invalid_parent_path"], true);
+    }
+}
+
+#[test]
 fn missing_target_catalog_row_fails_closed() {
     let mut scan = DescendantScan::new("1234567", &["200".to_string()], &BTreeMap::new(), 100);
     scan.consume_page(&json!({
@@ -300,7 +342,9 @@ fn evidence_is_network_source_target_and_freshness_bound() {
     )
     .expect("mismatched evidence");
     assert_eq!(mismatch["state"], "invalid_binding");
-    assert_eq!(mismatch["source_matches"], false);
+    assert!(mismatch["binding_errors"].as_array().is_some_and(|errors| {
+        errors.iter().any(|error| error.as_str() == Some("source"))
+    }));
 
     evidence.source = RetirementEvidenceSource::DeliveryReport;
     evidence.window_start_unix_seconds = None;
@@ -316,7 +360,60 @@ fn evidence_is_network_source_target_and_freshness_bound() {
     )
     .expect("missing activity window");
     assert_eq!(unbound["state"], "invalid_binding");
-    assert_eq!(unbound["window_valid"], false);
+    assert!(unbound["binding_errors"].as_array().is_some_and(|errors| {
+        errors
+            .iter()
+            .any(|error| error.as_str() == Some("activity_window"))
+    }));
+}
+
+#[test]
+fn evidence_rejects_unknown_source_contract_versions() {
+    let mut evidence = receipt(
+        RetirementEvidenceSource::DeliveryReport,
+        RetirementEvidenceState::CompleteClear,
+        3_999_900,
+    );
+    evidence.source_version = "gam-report-v99".to_string();
+    let graded = grade_evidence(
+        "delivery",
+        RetirementEvidenceSource::DeliveryReport,
+        Some(&evidence),
+        "1234567",
+        &["200".to_string()],
+        4_000_000,
+        false,
+    )
+    .expect("unknown contract versions grade fail-closed");
+    assert_eq!(graded["state"], "invalid_binding");
+    assert!(graded["binding_errors"].as_array().is_some_and(|errors| {
+        errors
+            .iter()
+            .any(|error| error.as_str() == Some("source_version"))
+    }));
+}
+
+#[test]
+fn invalid_evidence_enum_errors_do_not_echo_unbounded_input() {
+    let payload = json!({
+        "network_code":"1234567",
+        "source":"x".repeat(16 * 1024),
+        "source_version":"gam-report-v1",
+        "state":"complete_clear",
+        "result_hash":"sha256:0123456789abcdef",
+        "observed_at_unix_seconds":3_999_900,
+        "ttl_seconds":3_600,
+        "target_ad_unit_ids":["200"],
+        "window_start_unix_seconds":1_407_900,
+        "window_end_unix_seconds":3_999_900,
+        "manual_ui_proof_included":false,
+        "note":null
+    });
+    let error = serde_json::from_value::<RetirementEvidenceReceipt>(payload)
+        .expect_err("unknown evidence sources must be rejected")
+        .to_string();
+    assert!(error.len() < 200);
+    assert_eq!(error, "unsupported retirement evidence source");
 }
 
 #[test]
@@ -355,7 +452,11 @@ fn evidence_rejects_stale_or_noncanonical_bounded_fields() {
     )
     .expect("noncanonical hash");
     assert_eq!(untrusted["state"], "invalid_binding");
-    assert_eq!(untrusted["result_hash"], Value::Null);
+    assert!(untrusted["binding_errors"].as_array().is_some_and(|errors| {
+        errors
+            .iter()
+            .any(|error| error.as_str() == Some("result_hash"))
+    }));
     assert!(response_bytes(&untrusted) < 4_096);
 }
 
@@ -455,6 +556,25 @@ fn protection_clear_requires_manual_ui_proof() {
     .expect("manual proof accepted");
     assert_eq!(graded["state"], "complete_clear");
     assert_eq!(graded["complete_for_summary"], true);
+
+    let mut dependency = receipt(
+        RetirementEvidenceSource::DependencyProbe,
+        RetirementEvidenceState::ManualUiProofRequired,
+        3_999_900,
+    );
+    dependency.manual_ui_proof_included = true;
+    let graded = grade_evidence(
+        "dependency",
+        RetirementEvidenceSource::DependencyProbe,
+        Some(&dependency),
+        "1234567",
+        &["200".to_string()],
+        4_000_000,
+        false,
+    )
+    .expect("manual UI flag is protection-only");
+    assert_eq!(graded["state"], "manual_ui_proof_required");
+    assert_eq!(graded["complete_for_summary"], false);
 }
 
 #[test]
@@ -526,6 +646,34 @@ fn every_incomplete_state_prevents_evidence_completion() {
 }
 
 #[test]
+fn observed_active_descendant_blocks_even_when_scan_is_partial() {
+    let evidence = json!({
+        "dependency":{"state":"complete_clear"},
+        "delivery":{"state":"complete_clear"},
+        "exchange_protection":{"state":"complete_clear"},
+        "site_contract":{"state":"complete_clear"},
+        "telemetry":{"state":"complete_clear"}
+    });
+    let result = recommendation(
+        &json!({"proof_state":"complete_clear"}),
+        &json!({
+            "proof_state":"partial_capped",
+            "blocking_external_descendant_count":1,
+            "requires_child_first_sequence":false,
+            "required_child_first_target_order":[]
+        }),
+        &evidence,
+    );
+    assert_eq!(result["decision"], "blocked_by_dependencies_or_activity");
+    assert_eq!(result["evidence_summary_complete"], false);
+    assert!(result["blocking_surfaces"].as_array().is_some_and(|surfaces| {
+        surfaces
+            .iter()
+            .any(|surface| surface.as_str() == Some("descendants_observed_active"))
+    }));
+}
+
+#[test]
 fn positive_recommendation_uses_real_evidence_grader() {
     let mut dependency = receipt(
         RetirementEvidenceSource::DependencyProbe,
@@ -561,21 +709,52 @@ fn positive_recommendation_uses_real_evidence_grader() {
         4_000_000,
     )
     .expect("graded bundle");
-    let result = recommendation(
-        &json!({"proof_state":"complete_clear"}),
+    let target = RetirementTarget {
+        ad_unit_id: "200".to_string(),
+        resource_name: "networks/1234567/adUnits/200".to_string(),
+    };
+    let identity = summarize_identities(&[summarize_identity(
+        &target,
         &json!({
-            "proof_state":"complete_clear",
-            "requires_child_first_sequence":false,
-            "required_child_first_target_order":["200"]
+            "name":"networks/1234567/adUnits/200",
+            "adUnitCode":"fixture_unit",
+            "status":"ARCHIVED",
+            "adUnitSizes":[{"size":{"width":160,"height":600}}],
+            "hasChildren":false,
+            "parentPath":[],
+            "updateTime":"2026-07-10T00:00:00Z"
         }),
-        &evidence,
+    )]);
+    let mut scan = DescendantScan::new(
+        "1234567",
+        &["200".to_string()],
+        &child_claims(&[("200", false)]),
+        100,
     );
+    scan.consume_page(&json!({
+        "adUnits":[{"name":"networks/1234567/adUnits/200","parentPath":[],"hasChildren":false,"status":"ARCHIVED"}]
+    }));
+    let result = build_assessment_response(
+        "1234567".to_string(),
+        vec!["200".to_string()],
+        identity,
+        scan.finish(100),
+        evidence,
+    )
+    .expect("representative all-clear response must fit its cap");
     assert_eq!(
-        result["decision"],
+        result["recommendation"]["decision"],
         "evidence_complete_operator_review_required"
     );
-    assert_eq!(result["evidence_summary_complete"], true);
-    assert_eq!(result["automated_retirement_eligible"], false);
+    assert_eq!(
+        result["recommendation"]["evidence_summary_complete"],
+        true
+    );
+    assert_eq!(
+        result["recommendation"]["automated_retirement_eligible"],
+        false
+    );
+    assert!(response_bytes(&result) <= MAX_INNER_DATA_BYTES);
 }
 
 #[test]

@@ -30,13 +30,25 @@ const MAX_RETIREMENT_TARGETS: usize = 10;
 const MAX_INNER_DATA_BYTES: usize = 5 * 1024;
 pub(crate) const MAX_WIRE_RESULT_BYTES: usize = 8 * 1024;
 
+#[allow(dead_code)]
+#[derive(JsonSchema)]
+struct RetirementAdUnitIdSchema(
+    #[schemars(length(min = 1, max = 20), regex(pattern = r"^[0-9]+$"))] String,
+);
+
 #[derive(Debug, Deserialize, JsonSchema)]
 pub(crate) struct AdUnitRetirementAssessmentArgs {
     /// Raw positive numeric Ad Manager network code, for example 1234567.
-    #[schemars(length(min = 1, max = 20))]
+    #[schemars(
+        length(min = 1, max = 20),
+        regex(pattern = r"^[1-9][0-9]{0,19}$")
+    )]
     pub network_code: String,
     /// Exact positive numeric ad-unit ids to assess.
-    #[schemars(length(min = 1, max = 10))]
+    #[schemars(
+        with = "Vec<RetirementAdUnitIdSchema>",
+        length(min = 1, max = 10)
+    )]
     pub ad_unit_ids: Vec<String>,
     /// Freshness-bound external proof receipts. Raw reports and telemetry are not accepted.
     #[serde(default)]
@@ -101,6 +113,16 @@ pub(crate) async fn assess_ad_unit_retirement(
     let now_unix_seconds = current_unix_seconds()?;
     let evidence =
         grade_evidence_bundle(&args.evidence, &network_code, &target_ids, now_unix_seconds)?;
+    build_assessment_response(network_code, target_ids, identity, descendants, evidence)
+}
+
+fn build_assessment_response(
+    network_code: String,
+    target_ids: Vec<String>,
+    identity: Value,
+    descendants: Value,
+    evidence: Value,
+) -> Result<Value, AdManagerError> {
     let recommendation = recommendation(&identity, &descendants, &evidence);
     let response = json!({
         "network_code": network_code,

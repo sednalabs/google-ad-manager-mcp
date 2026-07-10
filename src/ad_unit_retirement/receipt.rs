@@ -2,20 +2,34 @@ use std::collections::BTreeSet;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Value, json};
 
 use crate::AdManagerError;
 use crate::fingerprint::stable_fingerprint;
 
-use super::MAX_RETIREMENT_TARGETS;
+use super::{MAX_RETIREMENT_TARGETS, RetirementAdUnitIdSchema};
 use super::inventory::{validate_network_code, validate_numeric_ids};
 
 const EVIDENCE_MAX_TTL_SECONDS: u64 = 31 * 24 * 60 * 60;
 const EVIDENCE_FUTURE_SKEW_SECONDS: u64 = 5 * 60;
 pub(super) const MIN_ACTIVITY_WINDOW_SECONDS: u64 = 30 * 24 * 60 * 60;
 
-#[derive(Debug, Clone, Copy, Deserialize, Serialize, JsonSchema)]
+#[allow(dead_code)]
+#[derive(JsonSchema)]
+struct RetirementEvidenceHashSchema(
+    #[schemars(
+        length(min = 16, max = 128),
+        regex(pattern = r"^[A-Za-z0-9:_.-]+$")
+    )]
+    String,
+);
+
+#[allow(dead_code)]
+#[derive(JsonSchema)]
+struct RetirementEvidenceNoteSchema(#[schemars(length(max = 500))] String);
+
+#[derive(Debug, Clone, Copy, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum RetirementEvidenceState {
     CompleteClear,
@@ -26,6 +40,27 @@ pub(crate) enum RetirementEvidenceState {
     UnsupportedSurface,
     ManualUiProofRequired,
     NotRun,
+}
+
+impl<'de> Deserialize<'de> for RetirementEvidenceState {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        match String::deserialize(deserializer)?.as_str() {
+            "complete_clear" => Ok(Self::CompleteClear),
+            "complete_blocked" => Ok(Self::CompleteBlocked),
+            "partial_capped" => Ok(Self::PartialCapped),
+            "blocked_permission" => Ok(Self::BlockedPermission),
+            "blocked_read" => Ok(Self::BlockedRead),
+            "unsupported_surface" => Ok(Self::UnsupportedSurface),
+            "manual_ui_proof_required" => Ok(Self::ManualUiProofRequired),
+            "not_run" => Ok(Self::NotRun),
+            _ => Err(serde::de::Error::custom(
+                "unsupported retirement evidence state",
+            )),
+        }
+    }
 }
 
 impl RetirementEvidenceState {
@@ -43,7 +78,7 @@ impl RetirementEvidenceState {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum RetirementEvidenceSource {
     DependencyProbe,
@@ -51,6 +86,24 @@ pub(crate) enum RetirementEvidenceSource {
     ExchangeProtectionReview,
     SiteContract,
     Telemetry,
+}
+
+impl<'de> Deserialize<'de> for RetirementEvidenceSource {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        match String::deserialize(deserializer)?.as_str() {
+            "dependency_probe" => Ok(Self::DependencyProbe),
+            "delivery_report" => Ok(Self::DeliveryReport),
+            "exchange_protection_review" => Ok(Self::ExchangeProtectionReview),
+            "site_contract" => Ok(Self::SiteContract),
+            "telemetry" => Ok(Self::Telemetry),
+            _ => Err(serde::de::Error::custom(
+                "unsupported retirement evidence source",
+            )),
+        }
+    }
 }
 
 impl RetirementEvidenceSource {
@@ -68,14 +121,23 @@ impl RetirementEvidenceSource {
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub(crate) struct RetirementEvidenceReceipt {
     /// Network code covered by this evidence receipt.
+    #[schemars(
+        length(min = 1, max = 20),
+        regex(pattern = r"^[1-9][0-9]{0,19}$")
+    )]
     pub network_code: String,
     /// Expected evidence source for this proof surface.
     pub source: RetirementEvidenceSource,
     /// Source tool, schema, or contract version that produced the result hash.
+    #[schemars(
+        length(min = 1, max = 64),
+        regex(pattern = r"^[A-Za-z0-9._+-]+$")
+    )]
     pub source_version: String,
     /// Evidence conclusion before freshness, target binding, and provenance grading.
     pub state: RetirementEvidenceState,
     /// Opaque result hash from the source proof. Raw payloads are not accepted.
+    #[schemars(with = "Option<RetirementEvidenceHashSchema>")]
     pub result_hash: Option<String>,
     /// Unix epoch seconds when the source proof completed.
     pub observed_at_unix_seconds: Option<u64>,
@@ -83,6 +145,10 @@ pub(crate) struct RetirementEvidenceReceipt {
     pub ttl_seconds: Option<u64>,
     /// Exact canonical ad-unit ids covered by the source proof.
     #[serde(default)]
+    #[schemars(
+        with = "Vec<RetirementAdUnitIdSchema>",
+        length(min = 1, max = 10)
+    )]
     pub target_ad_unit_ids: Vec<String>,
     /// Optional evidence-window start. Required for delivery-report and telemetry receipts.
     pub window_start_unix_seconds: Option<u64>,
@@ -92,6 +158,7 @@ pub(crate) struct RetirementEvidenceReceipt {
     #[serde(default)]
     pub manual_ui_proof_included: bool,
     /// Optional bounded, non-sensitive operator note. The note is not echoed.
+    #[schemars(with = "Option<RetirementEvidenceNoteSchema>")]
     pub note: Option<String>,
 }
 
@@ -220,7 +287,8 @@ pub(super) fn grade_evidence(
     let network_matches = canonical_receipt_network.as_deref() == Some(network_code);
     let source_matches = receipt.source.as_str() == expected_source.as_str();
     let version_valid = valid_source_version(&receipt.source_version)
-        && receipt.source_version == receipt.source_version.trim();
+        && receipt.source_version == receipt.source_version.trim()
+        && supported_source_version(receipt.source, &receipt.source_version);
     let safe_source_version = version_valid.then(|| receipt.source_version.clone());
     let targets_match = receipt_ids == expected_ids;
     let safe_result_hash = receipt.result_hash.as_deref().and_then(|value| {
@@ -255,6 +323,21 @@ pub(super) fn grade_evidence(
         && ttl_valid
         && timestamp_valid
         && window_valid;
+    let mut binding_errors = Vec::new();
+    for (valid, label) in [
+        (network_matches, "network"),
+        (source_matches, "source"),
+        (version_valid, "source_version"),
+        (targets_match, "targets"),
+        (hash_valid, "result_hash"),
+        (ttl_valid, "ttl"),
+        (timestamp_valid, "observed_at"),
+        (window_valid, "activity_window"),
+    ] {
+        if !valid {
+            binding_errors.push(label);
+        }
+    }
 
     let (state, reason) = if !structurally_complete {
         (
@@ -266,10 +349,12 @@ pub(super) fn grade_evidence(
             "stale",
             "the evidence observation or activity-window end exceeded its TTL",
         )
-    } else if matches!(
-        receipt.state,
-        RetirementEvidenceState::ManualUiProofRequired
-    ) {
+    } else if manual_ui_required_for_clear
+        && matches!(
+            receipt.state,
+            RetirementEvidenceState::ManualUiProofRequired
+        )
+    {
         if receipt.manual_ui_proof_included {
             (
                 "complete_clear",
@@ -300,10 +385,12 @@ pub(super) fn grade_evidence(
         && (matches!(
             receipt.state,
             RetirementEvidenceState::CompleteClear | RetirementEvidenceState::CompleteBlocked
-        ) || (matches!(
-            receipt.state,
-            RetirementEvidenceState::ManualUiProofRequired
-        ) && receipt.manual_ui_proof_included))
+        ) || (manual_ui_required_for_clear
+            && matches!(
+                receipt.state,
+                RetirementEvidenceState::ManualUiProofRequired
+            )
+            && receipt.manual_ui_proof_included))
         && !(manual_ui_required_for_clear
             && matches!(receipt.state, RetirementEvidenceState::CompleteClear)
             && !receipt.manual_ui_proof_included);
@@ -324,25 +411,10 @@ pub(super) fn grade_evidence(
         "surface": surface,
         "state": state,
         "input_state": receipt.state.as_str(),
-        "network_code": canonical_receipt_network,
-        "network_matches": network_matches,
-        "source": receipt.source.as_str(),
-        "expected_source": expected_source.as_str(),
-        "source_matches": source_matches,
-        "source_version": safe_source_version,
         "provenance": "caller_supplied_unverified",
         "binding_valid": structurally_complete,
+        "binding_errors": binding_errors,
         "complete_for_summary": complete_for_summary,
-        "target_binding_complete": targets_match,
-        "result_hash": safe_result_hash,
-        "hash_valid": hash_valid,
-        "observed_at_unix_seconds": observed,
-        "window_start_unix_seconds": receipt.window_start_unix_seconds,
-        "window_end_unix_seconds": receipt.window_end_unix_seconds,
-        "window_valid": window_valid,
-        "ttl_seconds": receipt.ttl_seconds,
-        "observation_age_seconds": observation_age,
-        "window_end_age_seconds": window_end_age,
         "freshness_age_seconds": freshness_age,
         "manual_ui_proof_included": receipt.manual_ui_proof_included,
         "receipt_binding_fingerprint": stable_fingerprint(&receipt_binding.to_string()),
@@ -369,6 +441,18 @@ fn valid_source_version(value: &str) -> bool {
         && trimmed
             .chars()
             .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-' | '+'))
+}
+
+fn supported_source_version(source: RetirementEvidenceSource, value: &str) -> bool {
+    match source {
+        RetirementEvidenceSource::DependencyProbe
+        | RetirementEvidenceSource::ExchangeProtectionReview => {
+            value == env!("CARGO_PKG_VERSION")
+        }
+        RetirementEvidenceSource::DeliveryReport => value == "gam-report-v1",
+        RetirementEvidenceSource::SiteContract => value == "site-contract-v1",
+        RetirementEvidenceSource::Telemetry => value == "telemetry-v1",
+    }
 }
 
 fn valid_evidence_window(

@@ -23,6 +23,11 @@ code/name lookup remain separate workflows. Evidence is a list of no more than
 five receipts, with at most one receipt for each required source. Each receipt
 must bind the same canonical network and target set, the expected source and
 source version, an opaque result hash, observation epoch, and bounded TTL.
+Accepted source contracts are the running MCP package version for
+`dependency_probe` and `exchange_protection_review`, `gam-report-v1` for
+`delivery_report`, `site-contract-v1` for `site_contract`, and `telemetry-v1`
+for `telemetry`. Unknown versions fail closed instead of being treated as
+compatible evidence.
 
 Delivery and telemetry receipts must cover a non-zero activity window of at
 least 30 days. Both the observation and window end must remain inside the
@@ -40,5 +45,7 @@ guarded write remain separate workflows.
 
 Parent and child targets may be assessed together, but the response records a
 required child-first order. Inner assessment data is capped at 5 KiB and the
-final serialized tool result at 8 KiB. Over-limit results fail closed and ask
-the operator to assess fewer targets.
+final serialized tool result at 8 KiB. The dependency and exchange/protection
+proof tools use the same final wire cap. Over-limit results fail closed and ask
+the operator to narrow targets or page limits, omit optional raw XML, or ingest
+the underlying evidence into the scratchpad.

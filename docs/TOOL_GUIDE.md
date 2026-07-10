@@ -152,6 +152,12 @@ failures remain `blocked_read`, and binding mismatches remain `invalid_binding`.
 Dependency and exchange/protection probes emit canonical templates only when
 their complete requested target scope resolved exactly.
 
+Supported source versions are the running MCP package version for
+`dependency_probe` and `exchange_protection_review`, `gam-report-v1` for
+`delivery_report`, `site-contract-v1` for `site_contract`, and `telemetry-v1`
+for `telemetry`. A syntactically valid but unknown version is still an invalid
+binding.
+
 Complete API exchange/protection proof emits `manual_ui_proof_required` because
 the API cannot authoritatively cover every GAM protection, inventory-rule, or
 unified-pricing surface. Recording `manual_ui_proof_included=true` on that same
@@ -164,6 +170,10 @@ therefore `evidence_complete_operator_review_required`, never automatic
 retirement eligibility. The response always reports `mutation_performed=false`.
 Identity and descendant details are compact, ancestry mismatches fail closed,
 and the response is capped at 5 KiB for inner data and 8 KiB on the final wire.
+The dependency and exchange/protection probes also fail closed above the 8 KiB
+wire cap. Narrow targets or page limits, omit optional raw XML, or preserve the
+full evidence in the scratchpad when a proof is too large for the model-visible
+result.
 
 ## `gam_report_run`
 
