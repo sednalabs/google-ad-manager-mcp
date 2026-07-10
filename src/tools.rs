@@ -19,8 +19,7 @@ use crate::auth_ux::{gcloud_adc_login_command, shell_join_with_cloudsdk_config};
 use crate::client::{
     CatalogCollection, DEFAULT_SOAP_API_VERSION, RestWriteOperation, RestWritePlan,
     RestWriteResource, SoapTraffickingApplyResult, SoapTraffickingOperation, SoapTraffickingPlan,
-    YieldGroupUpdateSoapRequest, soap_error_message, soap_error_message_with_truncation,
-    validate_soap_api_version,
+    YieldGroupUpdateSoapRequest, soap_error_message_with_truncation, validate_soap_api_version,
 };
 use crate::config::{
     GCLOUD_ADC_REQUIRED_SCOPE, server_adc_credentials_path, server_cloudsdk_config_dir,
@@ -3126,38 +3125,7 @@ async fn probe_yield_groups(
     )?;
     let applied = server.client().execute_soap_trafficking_plan(&plan).await?;
     if applied.upstream_status >= 400 || applied.soap_fault.is_some() {
-        let block_class = soap_probe_block_class(
-            applied.upstream_status,
-            applied.soap_fault.as_deref(),
-            &applied.upstream_response_xml,
-        );
-        let (message_source, message_source_truncated) =
-            soap_error_message_with_truncation(&applied);
-        let (message, message_projection_truncated) =
-            bounded_redacted_probe_text(&message_source);
-        let message_truncated = message_source_truncated || message_projection_truncated;
-        let (request_id, request_id_truncated) =
-            bounded_redacted_probe_text_option(applied.request_id);
-        let (response_time, response_time_truncated) =
-            bounded_redacted_probe_text_option(applied.response_time);
-        let (soap_fault, soap_fault_truncated) =
-            bounded_redacted_probe_text_option(applied.soap_fault);
-        return Ok(json!({
-            "surface": "yield_groups",
-            "decision": "blocked",
-            "proof_state": "blocked",
-            "block_class": block_class,
-            "upstream_status": applied.upstream_status,
-            "request_id": request_id,
-            "request_id_truncated": request_id_truncated,
-            "response_time": response_time,
-            "response_time_truncated": response_time_truncated,
-            "soap_fault": soap_fault,
-            "soap_fault_truncated": soap_fault_truncated,
-            "message": message,
-            "message_truncated": message_truncated,
-            "mutation_performed": false,
-        }));
+        return Ok(blocked_yield_group_response(applied));
     }
 
     Ok(summarize_yield_groups(
@@ -3168,6 +3136,40 @@ async fn probe_yield_groups(
         target_ad_units,
         include_raw,
     ))
+}
+
+fn blocked_yield_group_response(applied: SoapTraffickingApplyResult) -> Value {
+    let block_class = soap_probe_block_class(
+        applied.upstream_status,
+        applied.soap_fault.as_deref(),
+        &applied.upstream_response_xml,
+    );
+    let (message_source, message_source_truncated) =
+        soap_error_message_with_truncation(&applied);
+    let (message, message_projection_truncated) = bounded_redacted_probe_text(&message_source);
+    let message_truncated = message_source_truncated || message_projection_truncated;
+    let (request_id, request_id_truncated) =
+        bounded_redacted_probe_text_option(applied.request_id);
+    let (response_time, response_time_truncated) =
+        bounded_redacted_probe_text_option(applied.response_time);
+    let (soap_fault, soap_fault_truncated) =
+        bounded_redacted_probe_text_option(applied.soap_fault);
+    json!({
+        "surface": "yield_groups",
+        "decision": "blocked",
+        "proof_state": "blocked",
+        "block_class": block_class,
+        "upstream_status": applied.upstream_status,
+        "request_id": request_id,
+        "request_id_truncated": request_id_truncated,
+        "response_time": response_time,
+        "response_time_truncated": response_time_truncated,
+        "soap_fault": soap_fault,
+        "soap_fault_truncated": soap_fault_truncated,
+        "message": message,
+        "message_truncated": message_truncated,
+        "mutation_performed": false,
+    })
 }
 
 fn summarize_yield_groups(
@@ -3700,6 +3702,8 @@ async fn probe_ad_unit_line_item_dependencies(
         }));
     }
     if !scope_allows_write(server.client().scope()) {
+        let (current_scope, current_scope_truncated) =
+            bounded_redacted_probe_text(server.client().scope());
         return Ok(json!({
             "surface": "line_items",
             "decision": "blocked",
@@ -3707,7 +3711,8 @@ async fn probe_ad_unit_line_item_dependencies(
             "block_class": "permission",
             "reason": "LineItemService SOAP reads require the Google Ad Manager manage scope",
             "required_scope": MANAGE_SCOPE,
-            "current_scope": server.client().scope(),
+            "current_scope": current_scope,
+            "current_scope_truncated": current_scope_truncated,
             "mutation_performed": false,
         }));
     }
@@ -6888,6 +6893,45 @@ mod tests {
     }
 
     #[test]
+    fn yield_group_diagnostics_are_bounded_redacted_and_explicit() {
+        let blocked = blocked_yield_group_response(SoapTraffickingApplyResult {
+            upstream_status: 503,
+            upstream_response_xml: "<Fault>ServerError.SERVER_ERROR</Fault>".to_string(),
+            response_truncated: true,
+            request_id: Some(format!(
+                "google_access_token=opaque-secret {}",
+                "A".repeat(PROBE_DIAGNOSTIC_SAMPLE_BYTES + 100)
+            )),
+            response_time: Some("1".repeat(799) + "€tail"),
+            soap_fault: Some(format!(
+                "Authorization: Bearer opaque-secret {}",
+                "€".repeat(400)
+            )),
+        });
+        assert_eq!(blocked["proof_state"], "blocked");
+        assert_eq!(blocked["request_id_truncated"], true);
+        assert_eq!(blocked["response_time_truncated"], true);
+        assert_eq!(blocked["soap_fault_truncated"], true);
+        assert_eq!(blocked["message_truncated"], true);
+        assert!(!blocked.to_string().contains("opaque-secret"));
+
+        let complete = summarize_yield_groups(
+            "<rval><totalResultSetSize>0</totalResultSetSize></rval>",
+            false,
+            Some(format!(
+                "oauth_client_secret=opaque-secret {}",
+                "A".repeat(PROBE_DIAGNOSTIC_SAMPLE_BYTES + 100)
+            )),
+            Some("1".repeat(799) + "€tail"),
+            &probe_targets(&["200"]),
+            false,
+        );
+        assert_eq!(complete["request_id_truncated"], true);
+        assert_eq!(complete["response_time_truncated"], true);
+        assert!(!complete.to_string().contains("opaque-secret"));
+    }
+
+    #[test]
     fn exchange_probe_parses_yield_group_target_matches() {
         let xml = r#"
         <getYieldGroupsByStatementResponse>
@@ -7630,6 +7674,38 @@ mod tests {
         assert_eq!(blocked["error_truncated"], true);
         assert_eq!(blocked["hint_truncated"], false);
         assert!(!blocked["error"].to_string().contains("opaque-secret"));
+    }
+
+    #[tokio::test]
+    async fn line_item_permission_block_bounds_and_redacts_the_current_scope() {
+        let settings = crate::Settings {
+            scope: format!(
+                "access_token is opaque-secret {}",
+                "A".repeat(PROBE_DIAGNOSTIC_SAMPLE_BYTES + 100)
+            ),
+            ..crate::Settings::default()
+        };
+        let server = AdManagerServer::new(settings).expect("server");
+        let target = dependency_target("200", &[], &[]);
+        let response = probe_ad_unit_line_item_dependencies(
+            &server,
+            LineItemDependencyProbeOptions {
+                network_code: "1234567",
+                api_version: Some("v202605"),
+                line_item_page_size: 100,
+                max_line_items: 100,
+                include_line_item_xml: false,
+            },
+            &[target],
+            &json!({}),
+        )
+        .await
+        .expect("permission block");
+
+        assert_eq!(response["proof_state"], "blocked");
+        assert_eq!(response["block_class"], "permission");
+        assert_eq!(response["current_scope_truncated"], true);
+        assert!(!response["current_scope"].to_string().contains("opaque-secret"));
     }
 
     #[test]

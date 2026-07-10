@@ -17,7 +17,7 @@ use crate::config::{
     server_cloudsdk_config_dir,
 };
 use crate::contract::redact_secret_text;
-use crate::{AdManagerClient, AuthSource, MANAGE_SCOPE};
+use crate::{AdManagerClient, AdManagerError, AuthSource, MANAGE_SCOPE};
 
 const AD_MANAGER_API_NAME: &str = "Google Ad Manager API";
 const AD_MANAGER_API_SERVICE: &str = "admanager.googleapis.com";
@@ -206,19 +206,7 @@ async fn build_report(settings: &Settings, verify: bool) -> AuthReport {
                 },
                 None,
             ),
-            Err(err) => {
-                let classification_text = err.to_string();
-                (
-                    VerificationReport {
-                        checked: true,
-                        ok: Some(false),
-                        sample_network_count: None,
-                        error: Some(redact_secret_text(&classification_text)),
-                        hint: Some(err.hint().to_string()),
-                    },
-                    Some(classification_text),
-                )
-            }
+            Err(err) => verification_failure(&err),
         }
     } else {
         (
@@ -271,6 +259,20 @@ async fn build_report(settings: &Settings, verify: bool) -> AuthReport {
         ready,
         next_steps,
     }
+}
+
+fn verification_failure(err: &AdManagerError) -> (VerificationReport, Option<String>) {
+    let classification_text = err.to_string();
+    (
+        VerificationReport {
+            checked: true,
+            ok: Some(false),
+            sample_network_count: None,
+            error: Some(redact_secret_text(&classification_text)),
+            hint: Some(err.hint().to_string()),
+        },
+        Some(classification_text),
+    )
 }
 
 fn effective_quota_project(settings: &Settings) -> QuotaProjectStatus {
@@ -583,10 +585,11 @@ mod tests {
     use std::path::Path;
 
     use crate::config::Settings;
+    use crate::AdManagerError;
 
     use super::{
-        QuotaProjectStatus, VerificationReport, gcloud_adc_login_command, next_steps, shell_join,
-        shell_join_with_cloudsdk_config,
+        QuotaProjectStatus, gcloud_adc_login_command, next_steps, shell_join,
+        shell_join_with_cloudsdk_config, verification_failure,
     };
 
     #[test]
@@ -631,18 +634,25 @@ mod tests {
             value: Some("synthetic-project".to_string()),
             source: Some("test".to_string()),
         };
-        let verification = VerificationReport {
-            checked: true,
-            ok: Some(false),
-            sample_network_count: None,
-            error: Some("authorization failed: [redacted]".to_string()),
-            hint: None,
-        };
+        let (verification, raw_classification) = verification_failure(
+            &AdManagerError::AuthBootstrap(
+                "google_access_token=opaque-secret quota project and insufficient authentication scopes"
+                    .to_string(),
+            ),
+        );
+        let serialized = serde_json::to_string(&verification).expect("serialize verification");
+        assert!(serialized.contains("[redacted]"));
+        assert!(!serialized.contains("opaque-secret"));
+        assert!(
+            raw_classification
+                .as_deref()
+                .is_some_and(|text| text.contains("opaque-secret"))
+        );
         let steps = next_steps(
             &settings,
             &quota_project,
             &verification,
-            Some("authorization failed: quota project and insufficient authentication scopes"),
+            raw_classification.as_deref(),
         );
 
         assert!(steps.iter().any(|step| step.contains("quota project")));

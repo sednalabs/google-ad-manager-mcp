@@ -124,6 +124,14 @@ Placement and line-item dependencies are returned as counts plus bounded
 samples. When `include_line_item_xml=true`, matched XML is still capped and
 marked with byte and truncation metadata.
 
+`line_items.request_ids` and `line_items.response_times` are prefix samples,
+not authoritative totals. Consumers must use `request_id_count` and
+`response_time_count` for observed totals, inspect `request_ids_truncated` and
+`response_times_truncated`, and honor `transport_metadata_sample_limit`. A
+sample is complete only when its truncation flag is false and its length equals
+the corresponding count. This rule applies to existing consumers even though
+the evidence producer version remains unchanged.
+
 The response uses `dependency_decision` plus `proof_flags`, not a cleanup
 approval. Any capped line-item read, truncated SOAP response, id-only target,
 unknown placement membership shape, or blocked SOAP scope remains incomplete

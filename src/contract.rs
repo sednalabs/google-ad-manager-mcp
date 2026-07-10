@@ -112,7 +112,10 @@ pub fn redact_secret_text(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     let mut redact_following = 0_usize;
     let mut redact_rest = false;
-    for token in input.split_whitespace() {
+    let tokens = input.split_whitespace().collect::<Vec<_>>();
+    for (index, token) in tokens.iter().enumerate() {
+        let token = *token;
+        let next = tokens.get(index + 1).copied();
         if !out.is_empty() {
             out.push(' ');
         }
@@ -121,11 +124,11 @@ pub fn redact_secret_text(input: &str) -> String {
             out.push_str("[redacted]");
         } else if redact_following > 0 {
             out.push_str("[redacted]");
-            if !redaction_separator_token(token) {
+            if !redaction_separator_token(token) && !redaction_connector_token(token) {
                 redact_following = redact_following.saturating_sub(1);
                 extend_secret_redaction(&lower, &mut redact_following, &mut redact_rest);
             }
-        } else if looks_secret_bearing(token) {
+        } else if looks_secret_bearing(token, next) {
             out.push_str("[redacted]");
             extend_secret_redaction(&lower, &mut redact_following, &mut redact_rest);
         } else {
@@ -136,7 +139,7 @@ pub fn redact_secret_text(input: &str) -> String {
 }
 
 fn extend_secret_redaction(lower: &str, following: &mut usize, rest: &mut bool) {
-    if has_secret_key(lower, "private_key") || lower.contains("-----begin") {
+    if has_compound_secret_key(lower, "private_key") || lower.contains("-----begin") {
         *rest = true;
     } else if has_secret_key(lower, "authorization") {
         if authorization_needs_following_value(lower) {
@@ -144,12 +147,16 @@ fn extend_secret_redaction(lower: &str, following: &mut usize, rest: &mut bool) 
         }
     } else if ["access_token", "refresh_token", "client_secret"]
         .into_iter()
-        .find(|key| has_secret_key(lower, key))
+        .find(|key| has_compound_secret_key(lower, key))
         .is_some_and(|key| assigned_value_after_key(lower, key).is_none_or(str::is_empty))
         || scheme_needs_following_value(lower)
     {
         *following = (*following).max(1);
     }
+}
+
+fn has_compound_secret_key(lower: &str, key: &str) -> bool {
+    lower.contains(key)
 }
 
 fn has_secret_key(lower: &str, key: &str) -> bool {
@@ -189,6 +196,47 @@ fn redaction_separator_token(token: &str) -> bool {
             .all(|ch| !(ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.')))
 }
 
+fn redaction_connector_token(token: &str) -> bool {
+    matches!(
+        token
+            .trim_matches(|ch: char| !ch.is_ascii_alphanumeric())
+            .to_ascii_lowercase()
+            .as_str(),
+        "as" | "equals" | "is" | "key" | "token" | "value" | "was"
+    )
+}
+
+fn authorization_key_context(lower: &str, next: Option<&str>) -> bool {
+    has_secret_key(lower, "authorization")
+        && ((lower.contains(':') || lower.contains('='))
+            || next.is_some_and(redaction_separator_token)
+            || next.is_some_and(|value| scheme_needs_following_value(&value.to_ascii_lowercase())))
+}
+
+fn scheme_starts_credential(lower: &str, next: Option<&str>) -> bool {
+    if !scheme_needs_following_value(lower) {
+        return false;
+    }
+    let Some(next) = next else {
+        return false;
+    };
+    !matches!(
+        next
+            .trim_matches(|ch: char| !ch.is_ascii_alphanumeric())
+            .to_ascii_lowercase()
+            .as_str(),
+        "authentication"
+            | "authorization"
+            | "check"
+            | "error"
+            | "failed"
+            | "failure"
+            | "mode"
+            | "support"
+            | "validation"
+    )
+}
+
 pub fn redact_secret_value(value: Value) -> Value {
     match value {
         Value::String(text) => Value::String(redact_secret_text(&text)),
@@ -216,18 +264,13 @@ fn elapsed_ms(started: Instant) -> u64 {
     }
 }
 
-fn looks_secret_bearing(token: &str) -> bool {
+fn looks_secret_bearing(token: &str, next: Option<&str>) -> bool {
     let lower = token.to_ascii_lowercase();
-    [
-        "access_token",
-        "refresh_token",
-        "client_secret",
-        "private_key",
-        "authorization",
-    ]
+    ["access_token", "refresh_token", "client_secret", "private_key"]
     .into_iter()
-    .any(|key| has_secret_key(&lower, key))
-        || scheme_needs_following_value(&lower)
+    .any(|key| has_compound_secret_key(&lower, key))
+        || authorization_key_context(&lower, next)
+        || scheme_starts_credential(&lower, next)
         || lower.contains("-----begin")
         || lower
             .trim_matches(|ch: char| !ch.is_ascii_alphanumeric())
@@ -269,9 +312,34 @@ mod tests {
                 "client_secret : opaque-secret ok",
                 "[redacted] [redacted] [redacted] ok",
             ),
+            (
+                "google_access_token=opaque-secret ok",
+                "[redacted] ok",
+            ),
+            (
+                "oauth_client_secret=opaque-secret ok",
+                "[redacted] ok",
+            ),
+            (
+                "service_account_private_key=opaque-secret ok",
+                "[redacted] [redacted]",
+            ),
+            (
+                "access_token is opaque-secret ok",
+                "[redacted] [redacted] [redacted] ok",
+            ),
+            (
+                "access_token IS opaque-secret ok",
+                "[redacted] [redacted] [redacted] ok",
+            ),
+            (
+                "Bearer token opaque-secret ok",
+                "[redacted] [redacted] [redacted] ok",
+            ),
             ("access_token=opaque-secret ok", "[redacted] ok"),
             ("ya29.synthetic ok", "[redacted] ok"),
-            ("safe authorization_failed message", "safe authorization_failed message"),
+            ("authorization failed safely", "authorization failed safely"),
+            ("basic validation failed", "basic validation failed"),
         ] {
             assert_eq!(redact_secret_text(source), expected);
         }
