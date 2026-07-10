@@ -2690,9 +2690,8 @@ fn summarize_probe_ad_unit(network_code: &str, code: &str, payload: &Value) -> V
     let ancestor_ad_unit_ids = ad_unit_ancestor_ids(row);
     let applied_adsense = row.get("appliedAdsenseEnabled").and_then(Value::as_bool);
     let effective_adsense = row.get("effectiveAdsenseEnabled").and_then(Value::as_bool);
-    let proof_complete = target_resolved_exact
-        && applied_adsense.is_some()
-        && effective_adsense.is_some();
+    let proof_complete =
+        target_resolved_exact && applied_adsense.is_some() && effective_adsense.is_some();
     let decision = if applied_adsense == Some(true) || effective_adsense == Some(true) {
         "attention_required"
     } else if proof_complete {
@@ -3618,10 +3617,7 @@ fn attach_result_fingerprint(response: &mut Value) {
     response
         .as_object_mut()
         .expect("probe response is an object")
-        .insert(
-            "result_fingerprint".to_string(),
-            Value::String(fingerprint),
-        );
+        .insert("result_fingerprint".to_string(), Value::String(fingerprint));
 }
 
 fn attach_evidence_receipt_template(
@@ -3641,13 +3637,7 @@ fn attach_evidence_receipt_template(
                         "probe response did not contain its producer fingerprint",
                     )
                 })?;
-            evidence_receipt_template(
-                network_code,
-                source,
-                state,
-                result_fingerprint,
-                target_ids,
-            )?
+            evidence_receipt_template(network_code, source, state, result_fingerprint, target_ids)?
         }
         None => {
             json!({
@@ -3674,9 +3664,7 @@ fn evidence_receipt_target_ids(response: &Value, network_code: &str) -> Option<V
     let rows = response.get("ad_units")?.as_array()?;
     if rows.is_empty()
         || rows.len() > 10
-        || rows
-            .iter()
-            .any(|row| !exact_target_row(row, network_code))
+        || rows.iter().any(|row| !exact_target_row(row, network_code))
     {
         return None;
     }
@@ -3696,8 +3684,7 @@ fn exact_target_row(row: &Value, network_code: &str) -> bool {
     };
     let expected_resource_name = format!("networks/{network_code}/adUnits/{ad_unit_id}");
     row.get("proof_state").and_then(Value::as_str) == Some("resolved_exact")
-        && row.get("resource_name").and_then(Value::as_str)
-            == Some(expected_resource_name.as_str())
+        && row.get("resource_name").and_then(Value::as_str) == Some(expected_resource_name.as_str())
 }
 
 fn dependency_evidence_state(decision: &str, response: &Value) -> EvidenceState {

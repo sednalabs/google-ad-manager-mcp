@@ -172,10 +172,7 @@ fn validate_canonical_numeric_id(
     field: &'static str,
     value: &str,
 ) -> Result<String, AdManagerError> {
-    if value.is_empty()
-        || value.len() > 20
-        || !value.chars().all(|ch| ch.is_ascii_digit())
-    {
+    if value.is_empty() || value.len() > 20 || !value.chars().all(|ch| ch.is_ascii_digit()) {
         return Err(AdManagerError::invalid(
             field,
             "must use a canonical positive numeric identifier of at most 20 digits",
@@ -203,12 +200,9 @@ fn validate_canonical_numeric_id(
 
 fn valid_result_hash(value: &str) -> bool {
     value.len() == 16
-        && value
-            .bytes()
-            .all(|byte| {
-                byte.is_ascii_digit()
-                    || (byte.is_ascii_hexdigit() && byte.is_ascii_lowercase())
-            })
+        && value.bytes().all(|byte| {
+            byte.is_ascii_digit() || (byte.is_ascii_hexdigit() && byte.is_ascii_lowercase())
+        })
 }
 
 #[cfg(test)]
