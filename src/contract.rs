@@ -219,11 +219,27 @@ fn allowed_credential_key_extension(key: &str, extension: &str) -> bool {
 }
 
 fn credential_occurrence_needs_following_value(lower: &str, start: usize, key: &str) -> bool {
-    match assigned_value_after_occurrence(lower, start, key) {
-        None | Some("") => true,
-        Some("bearer" | "basic") if key == "authorization" => true,
-        Some(_) => false,
+    if assignment_delegates_to_next_marker(lower, start, key) {
+        return false;
     }
+    match assigned_value_after_occurrence(lower, start, key) {
+        Some(value) if value.chars().any(|ch| ch.is_ascii_alphanumeric()) => false,
+        _ => true,
+    }
+}
+
+fn assignment_delegates_to_next_marker(lower: &str, start: usize, key: &str) -> bool {
+    let marker_end = start + key.len();
+    let next_marker = next_secret_marker_start(lower, marker_end);
+    if next_marker == lower.len() {
+        return false;
+    }
+    let prefix = &lower[marker_end..next_marker];
+    let Some(separator) = prefix.find([':', '=']) else {
+        return false;
+    };
+    allowed_credential_key_extension(key, &prefix[..separator])
+        && separator + 1 == prefix.len()
 }
 
 fn marker_has_inline_material(lower: &str, start: usize, marker_len: usize) -> bool {
@@ -604,6 +620,12 @@ mod tests {
                 "access_token==reason=missing opaque-secret",
                 "[redacted] [redacted]",
             ),
+            ("access_token=ya29.synthetic ok", "[redacted] ok"),
+            ("Authorization=Bearer:opaque ok", "[redacted] ok"),
+            ("access_token=client_secret=masked ok", "[redacted] ok"),
+            ("authorization=Bearer opaque-secret", "[redacted] [redacted]"),
+            ("access_token=--- opaque-secret", "[redacted] [redacted]"),
+            ("access_token=... opaque-secret", "[redacted] [redacted]"),
             (
                 "Bearer#reason=missing opaque-secret",
                 "[redacted] [redacted]",
