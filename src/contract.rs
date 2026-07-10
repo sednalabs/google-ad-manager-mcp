@@ -192,9 +192,8 @@ mod tests {
 
     #[test]
     fn redacts_secret_bearing_tokens() {
-        let redacted = redact_secret_text(
-            "authorization: Bearer opaque-secret access_token next-secret ok",
-        );
+        let redacted =
+            redact_secret_text("authorization: Bearer opaque-secret access_token next-secret ok");
         assert!(!redacted.contains("opaque-secret"));
         assert!(!redacted.contains("next-secret"));
         assert!(redacted.contains("ok"));
