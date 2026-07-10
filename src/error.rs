@@ -15,6 +15,11 @@ pub enum AdManagerError {
     UpstreamJson(#[from] serde_json::Error),
     #[error("upstream returned status {status}: {message}")]
     UpstreamApi { status: u16, message: String },
+    #[error("result contract failed for {field}: {message}")]
+    ResultContract {
+        field: &'static str,
+        message: String,
+    },
     #[error("write action disabled: {message}")]
     WriteActionDisabled { message: String },
     #[error("write scope required: current scope is `{scope}`")]
@@ -45,6 +50,13 @@ impl AdManagerError {
         }
     }
 
+    pub fn result_contract(field: &'static str, message: impl Into<String>) -> Self {
+        Self::ResultContract {
+            field,
+            message: message.into(),
+        }
+    }
+
     pub fn code(&self) -> &'static str {
         match self {
             Self::InvalidInput { .. } => "invalid_input",
@@ -52,6 +64,7 @@ impl AdManagerError {
             Self::Transport(_) => "transport_error",
             Self::UpstreamJson(_) => "upstream_json_error",
             Self::UpstreamApi { .. } => "upstream_api_error",
+            Self::ResultContract { .. } => "result_contract_error",
             Self::WriteActionDisabled { .. } => "write_action_disabled",
             Self::WriteScopeRequired { .. } => "write_scope_required",
             Self::UnsupportedRestWrite { .. } => "unsupported_rest_write",
@@ -68,6 +81,7 @@ impl AdManagerError {
             Self::Transport(_) => "upstream_transport_failed",
             Self::UpstreamJson(_) => "upstream_json_invalid",
             Self::UpstreamApi { .. } => "upstream_request_failed",
+            Self::ResultContract { .. } => "result_contract_failed",
             Self::WriteActionDisabled { .. } => "write_runtime_gate_closed",
             Self::WriteScopeRequired { .. } => "google_scope_not_write_capable",
             Self::UnsupportedRestWrite { .. } => "rest_beta_surface_gap",
@@ -82,6 +96,7 @@ impl AdManagerError {
             Self::InvalidInput { .. } => "input",
             Self::AuthBootstrap(_) => "auth",
             Self::Transport(_) | Self::UpstreamJson(_) | Self::UpstreamApi { .. } => "upstream",
+            Self::ResultContract { .. } => "safety",
             Self::WriteActionDisabled { .. }
             | Self::WriteScopeRequired { .. }
             | Self::UnsupportedRestWrite { .. }
@@ -100,6 +115,9 @@ impl AdManagerError {
             }
             Self::Transport(_) | Self::UpstreamJson(_) | Self::UpstreamApi { .. } => {
                 "Retry the request, then confirm the Google principal can access the target network."
+            }
+            Self::ResultContract { .. } => {
+                "Narrow the target or page limits and omit optional raw output; report an adapter defect if a bounded projection still fails."
             }
             Self::WriteActionDisabled { .. } => {
                 "Start the server with GOOGLE_AD_MANAGER_MCP_WRITE_MODE=enabled only in an operator-approved environment."

@@ -10,7 +10,7 @@ use crate::{AdManagerError, contract};
 
 pub(crate) const EVIDENCE_PRODUCER_CONTRACT_VERSION: &str = "gam-evidence-producer-v1";
 pub(crate) const MAX_EVIDENCE_TARGETS: usize = 10;
-pub(crate) const MAX_MODEL_VISIBLE_RESULT_BYTES: usize = 8 * 1024;
+pub(crate) const MAX_CONTRACT_ENVELOPE_BYTES: usize = 8 * 1024;
 pub(crate) const MAX_RMCP_TRANSPORT_BYTES: usize = 20 * 1024;
 const DEFAULT_EVIDENCE_TTL_SECONDS: u64 = 3_600;
 
@@ -94,14 +94,21 @@ pub(crate) fn success_with_wire_guard(
     started: Instant,
     field: &'static str,
 ) -> CallToolResult {
-    let guarded = guarded_success(data, meta.clone(), started).or_else(|primary_failure| {
-        compact_data
-            .map(|compact| guarded_success(compact, meta, started))
-            .unwrap_or(Err(primary_failure))
-    });
+    let guarded = match guarded_success(data, meta.clone(), started) {
+        Ok(result) => Ok(result),
+        Err(primary_failure) => match compact_data {
+            None => Err(primary_failure.to_string()),
+            Some(compact) if !valid_compact_projection(&compact) => Err(format!(
+                "primary result: {primary_failure}; compact projection omitted its required truncated, fingerprint, receipt, or binding fields"
+            )),
+            Some(compact) => guarded_success(compact, meta, started).map_err(|failure| {
+                format!("primary result: {primary_failure}; compact projection: {failure}")
+            }),
+        },
+    };
     match guarded {
         Ok(result) => result,
-        Err(failure) => contract::error(AdManagerError::invalid(field, failure), started),
+        Err(failure) => contract::error(AdManagerError::result_contract(field, failure), started),
     }
 }
 
@@ -111,11 +118,11 @@ fn guarded_success(
     started: Instant,
 ) -> Result<CallToolResult, &'static str> {
     let envelope = contract::success_envelope_with_meta(data, meta, started);
-    let model_visible = serde_json::to_vec(&envelope)
-        .map_err(|_| "tool result could not be serialized for its model-visible size guard")?;
-    if model_visible.len() > MAX_MODEL_VISIBLE_RESULT_BYTES {
+    let envelope_bytes = serde_json::to_vec(&envelope)
+        .map_err(|_| "tool result could not be serialized for its Contract V1 envelope guard")?;
+    if envelope_bytes.len() > MAX_CONTRACT_ENVELOPE_BYTES {
         return Err(
-            "tool result exceeded its 8 KiB model-visible Contract V1 cap; narrow the target set, reduce page limits, or omit optional raw output",
+            "tool result exceeded its 8 KiB Contract V1 envelope cap; narrow the target set, reduce page limits, or omit optional raw output",
         );
     }
 
@@ -128,6 +135,21 @@ fn guarded_success(
         );
     }
     Ok(result)
+}
+
+fn valid_compact_projection(value: &Value) -> bool {
+    value.pointer("/result_projection/truncated").and_then(Value::as_bool) == Some(true)
+        && value
+            .pointer("/result_projection/receipt_binds_returned_projection")
+            .and_then(Value::as_bool)
+            .is_some()
+        && value
+            .get("result_fingerprint")
+            .and_then(Value::as_str)
+            .is_some_and(valid_result_hash)
+        && value
+            .get("evidence_receipt_template")
+            .is_some_and(Value::is_object)
 }
 
 fn current_unix_seconds() -> Result<u64, AdManagerError> {
@@ -197,7 +219,7 @@ mod tests {
 
     use super::{
         EVIDENCE_PRODUCER_CONTRACT_VERSION, EvidenceSource, EvidenceState,
-        MAX_MODEL_VISIBLE_RESULT_BYTES, MAX_RMCP_TRANSPORT_BYTES, evidence_receipt_template,
+        MAX_CONTRACT_ENVELOPE_BYTES, MAX_RMCP_TRANSPORT_BYTES, evidence_receipt_template,
         success_with_wire_guard,
     };
 
@@ -263,8 +285,8 @@ mod tests {
     fn wire_guard_rejects_oversized_results() {
         for (data, expected) in [
             (
-                json!({"optional_raw_output":"x".repeat(MAX_MODEL_VISIBLE_RESULT_BYTES)}),
-                "8 KiB model-visible Contract V1 cap",
+                json!({"optional_raw_output":"x".repeat(MAX_CONTRACT_ENVELOPE_BYTES)}),
+                "8 KiB Contract V1 envelope cap",
             ),
             (
                 json!({"optional_raw_output":"\"".repeat(3_800)}),
@@ -273,7 +295,7 @@ mod tests {
         ] {
             let rendered = render_guard(data, None);
             assert!(rendered.contains("\"ok\":false"));
-            assert!(rendered.contains("invalid_input"));
+            assert!(rendered.contains("result_contract_error"));
             assert!(rendered.contains(expected));
         }
     }
@@ -287,10 +309,24 @@ mod tests {
         assert!(bounded.contains("\"ok\":true"));
 
         let rendered = render_guard(
-            json!({"optional_raw_output":"x".repeat(MAX_MODEL_VISIBLE_RESULT_BYTES)}),
-            Some(json!({"result_projection":{"truncated":true}})),
+            json!({"optional_raw_output":"x".repeat(MAX_CONTRACT_ENVELOPE_BYTES)}),
+            Some(json!({
+                "result_fingerprint":"0123456789abcdef",
+                "evidence_receipt_template":{"state":"not_generated"},
+                "result_projection":{
+                    "truncated":true,
+                    "receipt_binds_returned_projection":false
+                }
+            })),
         );
         assert!(rendered.contains("\"ok\":true"));
         assert!(rendered.contains("\"truncated\":true"));
+
+        let rejected = render_guard(
+            json!({"optional_raw_output":"x".repeat(MAX_CONTRACT_ENVELOPE_BYTES)}),
+            Some(json!({"result_projection":{"truncated":true}})),
+        );
+        assert!(rejected.contains("result_contract_error"));
+        assert!(rejected.contains("compact projection omitted its required"));
     }
 }
