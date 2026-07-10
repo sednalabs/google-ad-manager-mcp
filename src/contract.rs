@@ -150,22 +150,17 @@ fn secret_value_extends_past_token(lower: &str) -> bool {
         }
     }
     for scheme in ["bearer", "basic"] {
-        if lower
-            .match_indices(scheme)
-            .any(|(start, _)| {
-                !marker_assignment_delegates_to_next_marker(lower, start, scheme.len())
-                    && !marker_has_inline_material(lower, start, scheme.len())
-            })
-        {
+        if lower.match_indices(scheme).any(|(start, _)| {
+            !marker_assignment_delegates_to_next_marker(lower, start, scheme.len())
+                && !marker_has_inline_material(lower, start, scheme.len())
+        }) {
             return true;
         }
     }
-    lower
-        .match_indices("ya29.")
-        .any(|(start, _)| {
-            !marker_assignment_delegates_to_next_marker(lower, start, "ya29.".len())
-                && !marker_has_inline_material(lower, start, "ya29.".len())
-        })
+    lower.match_indices("ya29.").any(|(start, _)| {
+        !marker_assignment_delegates_to_next_marker(lower, start, "ya29.".len())
+            && !marker_has_inline_material(lower, start, "ya29.".len())
+    })
 }
 
 fn compound_secret_key_start(lower: &str, key: &str) -> Option<usize> {
