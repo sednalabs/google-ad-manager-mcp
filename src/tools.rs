@@ -19,7 +19,8 @@ use crate::auth_ux::{gcloud_adc_login_command, shell_join_with_cloudsdk_config};
 use crate::client::{
     CatalogCollection, DEFAULT_SOAP_API_VERSION, RestWriteOperation, RestWritePlan,
     RestWriteResource, SoapTraffickingApplyResult, SoapTraffickingOperation, SoapTraffickingPlan,
-    YieldGroupUpdateSoapRequest, soap_error_message, validate_soap_api_version,
+    YieldGroupUpdateSoapRequest, soap_error_message, soap_error_message_with_truncation,
+    validate_soap_api_version,
 };
 use crate::config::{
     GCLOUD_ADC_REQUIRED_SCOPE, server_adc_credentials_path, server_cloudsdk_config_dir,
@@ -43,6 +44,7 @@ const DEPENDENCY_TARGET_PLACEMENT_ID_LIMIT: usize = 200;
 const DEPENDENCY_LINE_ITEM_MATCH_SAMPLE_LIMIT: usize = 50;
 const DEPENDENCY_LINE_ITEM_XML_SAMPLE_BYTES: usize = 4096;
 const PROBE_DIAGNOSTIC_SAMPLE_BYTES: usize = 800;
+const PROBE_TRANSPORT_METADATA_SAMPLE_LIMIT: usize = 50;
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct GetStartedArgs {}
@@ -3059,12 +3061,16 @@ fn apply_probe_collection_decision(
 
 fn blocked_probe_surface(surface: &str, err: AdManagerError) -> Value {
     let block_class = probe_error_block_class(&err);
+    let (error, error_truncated) = bounded_redacted_probe_text(&err.to_string());
+    let (hint, hint_truncated) = bounded_redacted_probe_text(err.hint());
     json!({
         "surface": surface,
         "proof_state": "blocked",
         "block_class": block_class,
-        "error": bounded_redacted_probe_text(&err.to_string()),
-        "hint": err.hint(),
+        "error": error,
+        "error_truncated": error_truncated,
+        "hint": hint,
+        "hint_truncated": hint_truncated,
     })
 }
 
@@ -3097,6 +3103,8 @@ async fn probe_yield_groups(
         }));
     }
     if !scope_allows_write(server.client().scope()) {
+        let (current_scope, current_scope_truncated) =
+            bounded_redacted_probe_text(server.client().scope());
         return Ok(json!({
             "surface": "yield_groups",
             "decision": "blocked",
@@ -3104,7 +3112,8 @@ async fn probe_yield_groups(
             "block_class": "permission",
             "reason": "YieldGroupService SOAP reads require the Google Ad Manager manage scope",
             "required_scope": MANAGE_SCOPE,
-            "current_scope": server.client().scope(),
+            "current_scope": current_scope,
+            "current_scope_truncated": current_scope_truncated,
             "mutation_performed": false,
         }));
     }
@@ -3122,10 +3131,17 @@ async fn probe_yield_groups(
             applied.soap_fault.as_deref(),
             &applied.upstream_response_xml,
         );
-        let message = bounded_redacted_probe_text(&soap_error_message(&applied));
-        let request_id = bounded_redacted_probe_text_option(applied.request_id);
-        let response_time = bounded_redacted_probe_text_option(applied.response_time);
-        let soap_fault = bounded_redacted_probe_text_option(applied.soap_fault);
+        let (message_source, message_source_truncated) =
+            soap_error_message_with_truncation(&applied);
+        let (message, message_projection_truncated) =
+            bounded_redacted_probe_text(&message_source);
+        let message_truncated = message_source_truncated || message_projection_truncated;
+        let (request_id, request_id_truncated) =
+            bounded_redacted_probe_text_option(applied.request_id);
+        let (response_time, response_time_truncated) =
+            bounded_redacted_probe_text_option(applied.response_time);
+        let (soap_fault, soap_fault_truncated) =
+            bounded_redacted_probe_text_option(applied.soap_fault);
         return Ok(json!({
             "surface": "yield_groups",
             "decision": "blocked",
@@ -3133,9 +3149,13 @@ async fn probe_yield_groups(
             "block_class": block_class,
             "upstream_status": applied.upstream_status,
             "request_id": request_id,
+            "request_id_truncated": request_id_truncated,
             "response_time": response_time,
+            "response_time_truncated": response_time_truncated,
             "soap_fault": soap_fault,
+            "soap_fault_truncated": soap_fault_truncated,
             "message": message,
+            "message_truncated": message_truncated,
             "mutation_performed": false,
         }));
     }
@@ -3284,12 +3304,17 @@ fn summarize_yield_groups(
     } else {
         "complete"
     };
+    let (request_id, request_id_truncated) = bounded_redacted_probe_text_option(request_id);
+    let (response_time, response_time_truncated) =
+        bounded_redacted_probe_text_option(response_time);
     let mut response = json!({
         "surface": "yield_groups",
         "decision": decision,
         "proof_state": proof_state,
         "request_id": request_id,
+        "request_id_truncated": request_id_truncated,
         "response_time": response_time,
+        "response_time_truncated": response_time_truncated,
         "total_result_set_size": total_result_set_size,
         "inspected_results": results.len(),
         "response_truncated": response_truncated,
@@ -3325,7 +3350,11 @@ struct LineItemDependencyScanState {
     total_result_set_size: Option<u64>,
     response_truncated: bool,
     request_ids: Vec<String>,
+    request_id_count: usize,
+    request_ids_truncated: bool,
     response_times: Vec<String>,
+    response_time_count: usize,
+    response_times_truncated: bool,
     dependency_matches_sample: Vec<Value>,
     dependency_match_count: usize,
     dependency_matches_truncated: bool,
@@ -3344,24 +3373,34 @@ enum LineItemProbeBlock {
     Error {
         block_class: &'static str,
         error: String,
-        hint: &'static str,
+        error_truncated: bool,
+        hint: String,
+        hint_truncated: bool,
     },
     Soap {
         block_class: &'static str,
         upstream_status: u16,
         request_id: Option<String>,
+        request_id_truncated: bool,
         response_time: Option<String>,
+        response_time_truncated: bool,
         soap_fault: Option<String>,
+        soap_fault_truncated: bool,
         message: String,
+        message_truncated: bool,
     },
 }
 
 impl LineItemProbeBlock {
     fn from_error(err: &AdManagerError) -> Self {
+        let (error, error_truncated) = bounded_redacted_probe_text(&err.to_string());
+        let (hint, hint_truncated) = bounded_redacted_probe_text(err.hint());
         Self::Error {
             block_class: probe_error_block_class(err),
-            error: bounded_redacted_probe_text(&err.to_string()),
-            hint: err.hint(),
+            error,
+            error_truncated,
+            hint,
+            hint_truncated,
         }
     }
 
@@ -3370,26 +3409,47 @@ impl LineItemProbeBlock {
             Self::Error {
                 block_class,
                 error,
+                error_truncated,
                 hint,
+                hint_truncated,
             } => {
                 response.insert("block_class".to_string(), json!(block_class));
                 response.insert("error".to_string(), json!(error));
+                response.insert("error_truncated".to_string(), json!(error_truncated));
                 response.insert("hint".to_string(), json!(hint));
+                response.insert("hint_truncated".to_string(), json!(hint_truncated));
             }
             Self::Soap {
                 block_class,
                 upstream_status,
                 request_id,
+                request_id_truncated,
                 response_time,
+                response_time_truncated,
                 soap_fault,
+                soap_fault_truncated,
                 message,
+                message_truncated,
             } => {
                 response.insert("block_class".to_string(), json!(block_class));
                 response.insert("upstream_status".to_string(), json!(upstream_status));
                 response.insert("request_id".to_string(), json!(request_id));
+                response.insert(
+                    "request_id_truncated".to_string(),
+                    json!(request_id_truncated),
+                );
                 response.insert("response_time".to_string(), json!(response_time));
+                response.insert(
+                    "response_time_truncated".to_string(),
+                    json!(response_time_truncated),
+                );
                 response.insert("soap_fault".to_string(), json!(soap_fault));
+                response.insert(
+                    "soap_fault_truncated".to_string(),
+                    json!(soap_fault_truncated),
+                );
                 response.insert("message".to_string(), json!(message));
+                response.insert("message_truncated".to_string(), json!(message_truncated));
             }
         }
     }
@@ -3404,10 +3464,22 @@ impl LineItemDependencyScanState {
         include_line_item_xml: bool,
     ) -> u32 {
         if let Some(request_id) = page.request_id {
-            self.request_ids.push(request_id);
+            self.request_id_count = self.request_id_count.saturating_add(1);
+            let (request_id, value_truncated) = bounded_redacted_probe_text(&request_id);
+            self.request_ids_truncated |= value_truncated
+                || self.request_ids.len() >= PROBE_TRANSPORT_METADATA_SAMPLE_LIMIT;
+            if self.request_ids.len() < PROBE_TRANSPORT_METADATA_SAMPLE_LIMIT {
+                self.request_ids.push(request_id);
+            }
         }
         if let Some(response_time) = page.response_time {
-            self.response_times.push(response_time);
+            self.response_time_count = self.response_time_count.saturating_add(1);
+            let (response_time, value_truncated) = bounded_redacted_probe_text(&response_time);
+            self.response_times_truncated |= value_truncated
+                || self.response_times.len() >= PROBE_TRANSPORT_METADATA_SAMPLE_LIMIT;
+            if self.response_times.len() < PROBE_TRANSPORT_METADATA_SAMPLE_LIMIT {
+                self.response_times.push(response_time);
+            }
         }
         self.response_truncated |= page.response_truncated;
         let page_total = extract_xml_tag_text(page.upstream_response_xml, "totalResultSetSize")
@@ -3461,7 +3533,11 @@ impl LineItemDependencyScanState {
             "response_truncated": self.response_truncated,
             "missing_total_result_set_size": self.missing_total_result_set_size,
             "request_ids": self.request_ids,
+            "request_id_count": self.request_id_count,
+            "request_ids_truncated": self.request_ids_truncated,
             "response_times": self.response_times,
+            "response_time_count": self.response_time_count,
+            "response_times_truncated": self.response_times_truncated,
             "status_counts": self.status_counts,
             "dependency_match_count": self.dependency_match_count,
             "dependency_matches_sample": self.dependency_matches_sample,
@@ -3509,19 +3585,30 @@ impl LineItemDependencyScanState {
             applied.soap_fault.as_deref(),
             &applied.upstream_response_xml,
         );
-        let message = bounded_redacted_probe_text(&soap_error_message(&applied));
-        let request_id = bounded_redacted_probe_text_option(applied.request_id);
-        let response_time = bounded_redacted_probe_text_option(applied.response_time);
-        let soap_fault = bounded_redacted_probe_text_option(applied.soap_fault);
+        let (message_source, message_source_truncated) =
+            soap_error_message_with_truncation(&applied);
+        let (message, message_projection_truncated) =
+            bounded_redacted_probe_text(&message_source);
+        let message_truncated = message_source_truncated || message_projection_truncated;
+        let (request_id, request_id_truncated) =
+            bounded_redacted_probe_text_option(applied.request_id);
+        let (response_time, response_time_truncated) =
+            bounded_redacted_probe_text_option(applied.response_time);
+        let (soap_fault, soap_fault_truncated) =
+            bounded_redacted_probe_text_option(applied.soap_fault);
         self.into_blocked_response(
             options,
             LineItemProbeBlock::Soap {
                 block_class,
                 upstream_status: applied.upstream_status,
                 request_id,
+                request_id_truncated,
                 response_time,
+                response_time_truncated,
                 soap_fault,
+                soap_fault_truncated,
                 message,
+                message_truncated,
             },
         )
     }
@@ -3762,13 +3849,19 @@ fn bounded_text_sample(value: &str, max_bytes: usize) -> (String, bool) {
     (value[..end].to_string(), true)
 }
 
-fn bounded_redacted_probe_text(value: &str) -> String {
+fn bounded_redacted_probe_text(value: &str) -> (String, bool) {
     let redacted = contract::redact_secret_text(value);
-    bounded_text_sample(&redacted, PROBE_DIAGNOSTIC_SAMPLE_BYTES).0
+    bounded_text_sample(&redacted, PROBE_DIAGNOSTIC_SAMPLE_BYTES)
 }
 
-fn bounded_redacted_probe_text_option(value: Option<String>) -> Option<String> {
-    value.map(|value| bounded_redacted_probe_text(&value))
+fn bounded_redacted_probe_text_option(value: Option<String>) -> (Option<String>, bool) {
+    match value {
+        Some(value) => {
+            let (value, truncated) = bounded_redacted_probe_text(&value);
+            (Some(value), truncated)
+        }
+        None => (None, false),
+    }
 }
 
 fn unique_xml_texts(value: &str, tag: &str) -> Vec<String> {
@@ -7517,6 +7610,71 @@ mod tests {
         assert_eq!(entry["custom_targeting_key_ids"][0], "20229275");
     }
 
+    #[test]
+    fn bounded_probe_diagnostics_report_utf8_safe_truncation() {
+        let source = "A".repeat(799) + "€tail";
+        let (sample, truncated) = bounded_redacted_probe_text(&source);
+        assert!(truncated);
+        assert_eq!(sample, "A".repeat(799));
+        assert!(sample.is_char_boundary(sample.len()));
+
+        let blocked = blocked_probe_surface(
+            "placements",
+            AdManagerError::AuthBootstrap(format!(
+                "access_token = opaque-secret {}",
+                "€".repeat(400)
+            )),
+        );
+        assert_eq!(blocked["proof_state"], "blocked");
+        assert_eq!(blocked["error_truncated"], true);
+        assert_eq!(blocked["hint_truncated"], false);
+        assert!(!blocked["error"].to_string().contains("opaque-secret"));
+    }
+
+    #[test]
+    fn repeated_success_metadata_is_bounded_counted_and_explicitly_truncated() {
+        let options = LineItemDependencyProbeOptions {
+            network_code: "1234567",
+            api_version: Some("v202605"),
+            line_item_page_size: 1,
+            max_line_items: 100,
+            include_line_item_xml: false,
+        };
+        let mut state = LineItemDependencyScanState::default();
+        for index in 0..55 {
+            state.record_successful_page(
+                SuccessfulLineItemPage {
+                    upstream_response_xml: "<rval><totalResultSetSize>0</totalResultSetSize></rval>",
+                    response_truncated: false,
+                    request_id: Some(format!(
+                        "request-{index} access_token = opaque-secret {}",
+                        "A".repeat(900)
+                    )),
+                    response_time: Some("1".repeat(799) + "€tail"),
+                },
+                &[],
+                &json!({}),
+                false,
+            );
+        }
+        let response = state.into_completed_response(&options);
+
+        assert_eq!(response["request_id_count"], 55);
+        assert_eq!(response["response_time_count"], 55);
+        assert_eq!(response["request_ids_truncated"], true);
+        assert_eq!(response["response_times_truncated"], true);
+        assert_eq!(response["request_ids"].as_array().map(Vec::len), Some(50));
+        assert_eq!(response["response_times"].as_array().map(Vec::len), Some(50));
+        assert!(response["request_ids"].as_array().is_some_and(|values| {
+            values.iter().all(|value| {
+                value
+                    .as_str()
+                    .is_some_and(|value| value.len() <= PROBE_DIAGNOSTIC_SAMPLE_BYTES)
+            })
+        }));
+        assert!(!response.to_string().contains("opaque-secret"));
+    }
+
     #[tokio::test]
     async fn dependency_scan_preserves_positive_evidence_when_a_later_soap_page_blocks() {
         let options = LineItemDependencyProbeOptions {
@@ -7588,7 +7746,9 @@ mod tests {
         assert_eq!(blocked["block_class"], "upstream");
         assert_eq!(blocked["upstream_status"], 503);
         assert_eq!(blocked["request_id"], "request-2");
+        assert_eq!(blocked["request_id_truncated"], false);
         assert_eq!(blocked["response_time"], "44");
+        assert_eq!(blocked["response_time_truncated"], false);
         assert!(
             blocked["soap_fault"]
                 .as_str()
@@ -7600,10 +7760,16 @@ mod tests {
                 .is_some_and(|fault| fault.len() <= PROBE_DIAGNOSTIC_SAMPLE_BYTES)
         );
         assert!(!blocked["soap_fault"].to_string().contains("opaque-secret"));
+        assert_eq!(blocked["soap_fault_truncated"], true);
+        assert_eq!(blocked["message_truncated"], true);
         assert_eq!(blocked["total_result_set_size"], 2);
         assert_eq!(blocked["inspected_results"], 1);
         assert_eq!(blocked["request_ids"], json!(["request-1"]));
+        assert_eq!(blocked["request_id_count"], 1);
+        assert_eq!(blocked["request_ids_truncated"], false);
         assert_eq!(blocked["response_times"], json!(["42"]));
+        assert_eq!(blocked["response_time_count"], 1);
+        assert_eq!(blocked["response_times_truncated"], false);
         assert_eq!(blocked["response_truncated"], true);
         assert_eq!(blocked["status_counts"]["DELIVERING"], 1);
         assert_eq!(blocked["dependency_match_count"], 1);
@@ -7701,7 +7867,11 @@ mod tests {
                 "response_truncated": false,
                 "missing_total_result_set_size": false,
                 "request_ids": ["request-2"],
+                "request_id_count": 1,
+                "request_ids_truncated": false,
                 "response_times": ["43"],
+                "response_time_count": 1,
+                "response_times_truncated": false,
                 "status_counts": {"PAUSED": 1},
                 "dependency_match_count": 0,
                 "dependency_matches_sample": [],

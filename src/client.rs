@@ -1616,19 +1616,25 @@ fn clip_xml_response(value: String) -> (String, bool) {
 }
 
 pub(crate) fn soap_error_message(result: &SoapTraffickingApplyResult) -> String {
+    soap_error_message_with_truncation(result).0
+}
+
+pub(crate) fn soap_error_message_with_truncation(
+    result: &SoapTraffickingApplyResult,
+) -> (String, bool) {
     if let Some(fault) = result
         .soap_fault
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
-        return clip_message(fault.to_string());
+        return clip_message_with_truncation(fault.to_string());
     }
     let trimmed = result.upstream_response_xml.trim();
     if trimmed.is_empty() {
-        "no upstream SOAP response body".to_string()
+        ("no upstream SOAP response body".to_string(), false)
     } else {
-        clip_message(trimmed.to_string())
+        clip_message_with_truncation(trimmed.to_string())
     }
 }
 
@@ -1702,15 +1708,19 @@ fn non_empty(value: Option<String>) -> Option<String> {
 }
 
 fn clip_message(message: String) -> String {
+    clip_message_with_truncation(message).0
+}
+
+fn clip_message_with_truncation(message: String) -> (String, bool) {
     let trimmed = message.trim();
     if trimmed.len() <= 800 {
-        trimmed.to_string()
+        (trimmed.to_string(), false)
     } else {
         let mut end = 800;
         while !trimmed.is_char_boundary(end) {
             end -= 1;
         }
-        format!("{}...", &trimmed[..end])
+        (format!("{}...", &trimmed[..end]), true)
     }
 }
 
@@ -1719,8 +1729,9 @@ mod tests {
     use super::{
         AdManagerClient, CatalogCollection, MAX_SOAP_RESPONSE_XML_BYTES, RestWriteOperation,
         RestWriteResource, SOAP_ENVELOPE_NAMESPACE, SoapTraffickingOperation, classify_soap_impact,
-        clip_message, clip_xml_response, extract_xml_tag, validate_operation_name,
-        validate_report_result_name, validate_rest_write_body, validate_soap_payload_xml,
+        clip_message, clip_message_with_truncation, clip_xml_response, extract_xml_tag,
+        validate_operation_name, validate_report_result_name, validate_rest_write_body,
+        validate_soap_payload_xml,
     };
     use crate::Settings;
     use serde_json::json;
@@ -2002,9 +2013,12 @@ mod tests {
 
     #[test]
     fn clip_message_respects_utf8_boundaries() {
-        let clipped = clip_message("A".repeat(799) + "€tail");
+        let source = "A".repeat(799) + "€tail";
+        let (clipped, truncated) = clip_message_with_truncation(source.clone());
+        assert!(truncated);
         assert_eq!(clipped, format!("{}...", "A".repeat(799)));
         assert!(clipped.is_char_boundary(clipped.len()));
+        assert_eq!(clip_message(source), clipped);
     }
 
     #[test]

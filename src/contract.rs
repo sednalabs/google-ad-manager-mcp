@@ -121,8 +121,10 @@ pub fn redact_secret_text(input: &str) -> String {
             out.push_str("[redacted]");
         } else if redact_following > 0 {
             out.push_str("[redacted]");
-            redact_following = redact_following.saturating_sub(1);
-            extend_secret_redaction(&lower, &mut redact_following, &mut redact_rest);
+            if !redaction_separator_token(token) {
+                redact_following = redact_following.saturating_sub(1);
+                extend_secret_redaction(&lower, &mut redact_following, &mut redact_rest);
+            }
         } else if looks_secret_bearing(token) {
             out.push_str("[redacted]");
             extend_secret_redaction(&lower, &mut redact_following, &mut redact_rest);
@@ -134,17 +136,57 @@ pub fn redact_secret_text(input: &str) -> String {
 }
 
 fn extend_secret_redaction(lower: &str, following: &mut usize, rest: &mut bool) {
-    if lower.contains("private_key") || lower.contains("-----begin") {
+    if has_secret_key(lower, "private_key") || lower.contains("-----begin") {
         *rest = true;
-    } else if lower.contains("authorization:") || lower == "authorization" {
-        *following = (*following).max(3);
-    } else if matches!(lower, "bearer" | "basic")
-        || lower.contains("access_token")
-        || lower.contains("refresh_token")
-        || lower.contains("client_secret")
+    } else if has_secret_key(lower, "authorization") {
+        if authorization_needs_following_value(lower) {
+            *following = (*following).max(1);
+        }
+    } else if ["access_token", "refresh_token", "client_secret"]
+        .into_iter()
+        .find(|key| has_secret_key(lower, key))
+        .is_some_and(|key| assigned_value_after_key(lower, key).is_none_or(str::is_empty))
+        || scheme_needs_following_value(lower)
     {
         *following = (*following).max(1);
     }
+}
+
+fn has_secret_key(lower: &str, key: &str) -> bool {
+    lower
+        .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+        .any(|segment| segment == key)
+}
+
+fn assigned_value_after_key<'a>(lower: &'a str, key: &str) -> Option<&'a str> {
+    let start = lower.find(key)? + key.len();
+    let tail = &lower[start..];
+    let separator = tail.find([':', '='])?;
+    Some(
+        tail[separator + 1..]
+            .trim_matches(|ch: char| !(ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-'))),
+    )
+}
+
+fn authorization_needs_following_value(lower: &str) -> bool {
+    match assigned_value_after_key(lower, "authorization") {
+        None | Some("") | Some("bearer" | "basic") => true,
+        Some(_) => false,
+    }
+}
+
+fn scheme_needs_following_value(lower: &str) -> bool {
+    matches!(
+        lower.trim_matches(|ch: char| !ch.is_ascii_alphanumeric()),
+        "bearer" | "basic"
+    )
+}
+
+fn redaction_separator_token(token: &str) -> bool {
+    !token.is_empty()
+        && token
+            .chars()
+            .all(|ch| !(ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.')))
 }
 
 pub fn redact_secret_value(value: Value) -> Value {
@@ -176,14 +218,20 @@ fn elapsed_ms(started: Instant) -> u64 {
 
 fn looks_secret_bearing(token: &str) -> bool {
     let lower = token.to_ascii_lowercase();
-    lower.contains("access_token")
-        || lower.contains("refresh_token")
-        || lower.contains("client_secret")
-        || lower.contains("private_key")
-        || lower.contains("authorization:")
-        || matches!(lower.as_str(), "authorization" | "bearer" | "basic")
+    [
+        "access_token",
+        "refresh_token",
+        "client_secret",
+        "private_key",
+        "authorization",
+    ]
+    .into_iter()
+    .any(|key| has_secret_key(&lower, key))
+        || scheme_needs_following_value(&lower)
         || lower.contains("-----begin")
-        || lower.starts_with("ya29.")
+        || lower
+            .trim_matches(|ch: char| !ch.is_ascii_alphanumeric())
+            .starts_with("ya29.")
 }
 
 #[cfg(test)]
@@ -192,14 +240,41 @@ mod tests {
 
     #[test]
     fn redacts_secret_bearing_tokens() {
-        let redacted =
-            redact_secret_text("authorization: Bearer opaque-secret access_token next-secret ok");
-        assert!(!redacted.contains("opaque-secret"));
-        assert!(!redacted.contains("next-secret"));
-        assert!(redacted.contains("ok"));
-
-        let spaced = redact_secret_text("Authorization : Bearer another-opaque-secret ok");
-        assert!(!spaced.contains("another-opaque-secret"));
+        for (source, expected) in [
+            (
+                "authorization: Bearer opaque-secret ok",
+                "[redacted] [redacted] [redacted] ok",
+            ),
+            (
+                "Authorization : Bearer opaque-secret ok",
+                "[redacted] [redacted] [redacted] [redacted] ok",
+            ),
+            (
+                "Authorization=Bearer opaque-secret ok",
+                "[redacted] [redacted] ok",
+            ),
+            (
+                "access_token = opaque-secret ok",
+                "[redacted] [redacted] [redacted] ok",
+            ),
+            (
+                "\"access_token\" : \"opaque-secret\" ok",
+                "[redacted] [redacted] [redacted] ok",
+            ),
+            (
+                "\"Authorization\" : \"Bearer opaque-secret\" ok",
+                "[redacted] [redacted] [redacted] [redacted] ok",
+            ),
+            (
+                "client_secret : opaque-secret ok",
+                "[redacted] [redacted] [redacted] ok",
+            ),
+            ("access_token=opaque-secret ok", "[redacted] ok"),
+            ("ya29.synthetic ok", "[redacted] ok"),
+            ("safe authorization_failed message", "safe authorization_failed message"),
+        ] {
+            assert_eq!(redact_secret_text(source), expected);
+        }
 
         let private_key = redact_secret_text("private_key: -----BEGIN PRIVATE KEY----- secret");
         assert!(!private_key.contains("BEGIN"));

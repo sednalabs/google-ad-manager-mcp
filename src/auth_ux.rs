@@ -191,34 +191,46 @@ async fn build_report(settings: &Settings, verify: bool) -> AuthReport {
     let client = AdManagerClient::from_settings(settings);
     let adc_file = selected_adc_file_status();
     let quota_project = effective_quota_project(settings);
-    let verification = if verify {
+    let (verification, verification_error_for_classification) = if verify {
         match client.list_networks(Some(1), None).await {
-            Ok(payload) => VerificationReport {
-                checked: true,
-                ok: Some(true),
-                sample_network_count: payload
-                    .get("networks")
-                    .and_then(|value| value.as_array())
-                    .map(Vec::len),
+            Ok(payload) => (
+                VerificationReport {
+                    checked: true,
+                    ok: Some(true),
+                    sample_network_count: payload
+                        .get("networks")
+                        .and_then(|value| value.as_array())
+                        .map(Vec::len),
+                    error: None,
+                    hint: None,
+                },
+                None,
+            ),
+            Err(err) => {
+                let classification_text = err.to_string();
+                (
+                    VerificationReport {
+                        checked: true,
+                        ok: Some(false),
+                        sample_network_count: None,
+                        error: Some(redact_secret_text(&classification_text)),
+                        hint: Some(err.hint().to_string()),
+                    },
+                    Some(classification_text),
+                )
+            }
+        }
+    } else {
+        (
+            VerificationReport {
+                checked: false,
+                ok: None,
+                sample_network_count: None,
                 error: None,
                 hint: None,
             },
-            Err(err) => VerificationReport {
-                checked: true,
-                ok: Some(false),
-                sample_network_count: None,
-                error: Some(redact_secret_text(&err.to_string())),
-                hint: Some(err.hint().to_string()),
-            },
-        }
-    } else {
-        VerificationReport {
-            checked: false,
-            ok: None,
-            sample_network_count: None,
-            error: None,
-            hint: None,
-        }
+            None,
+        )
     };
 
     let ready = match verification.ok {
@@ -238,7 +250,12 @@ async fn build_report(settings: &Settings, verify: bool) -> AuthReport {
         || env.service_account_path
         || env.service_account_json
         || verification.ok == Some(true);
-    let next_steps = next_steps(settings, &quota_project, &verification);
+    let next_steps = next_steps(
+        settings,
+        &quota_project,
+        &verification,
+        verification_error_for_classification.as_deref(),
+    );
 
     AuthReport {
         server: "google-ad-manager-mcp",
@@ -289,6 +306,7 @@ fn next_steps(
     settings: &Settings,
     quota_project: &QuotaProjectStatus,
     verification: &VerificationReport,
+    verification_error_for_classification: Option<&str>,
 ) -> Vec<String> {
     let mut steps = Vec::new();
     if !verification.checked {
@@ -304,7 +322,9 @@ fn next_steps(
         );
     }
     if verification.ok == Some(false) {
-        let error = verification.error.as_deref().unwrap_or_default();
+        let error = verification_error_for_classification
+            .or(verification.error.as_deref())
+            .unwrap_or_default();
         if mentions_quota_project(error) {
             steps.push(
                 "Set a quota project for ADC and enable the Google Ad Manager API on that project."
@@ -562,7 +582,12 @@ struct VerificationReport {
 mod tests {
     use std::path::Path;
 
-    use super::{gcloud_adc_login_command, shell_join, shell_join_with_cloudsdk_config};
+    use crate::config::Settings;
+
+    use super::{
+        QuotaProjectStatus, VerificationReport, gcloud_adc_login_command, next_steps, shell_join,
+        shell_join_with_cloudsdk_config,
+    };
 
     #[test]
     fn adc_login_command_includes_cloud_platform_and_ad_manager_scope() {
@@ -596,5 +621,31 @@ mod tests {
         let rendered = shell_join_with_cloudsdk_config(&command, Some(Path::new("/tmp/gam adc")));
         assert!(rendered.starts_with("CLOUDSDK_CONFIG='/tmp/gam adc' gcloud auth"));
         assert!(rendered.contains("admanager.readonly"));
+    }
+
+    #[test]
+    fn remediation_classification_uses_raw_error_while_display_stays_redacted() {
+        let settings = Settings::default();
+        let quota_project = QuotaProjectStatus {
+            configured: true,
+            value: Some("synthetic-project".to_string()),
+            source: Some("test".to_string()),
+        };
+        let verification = VerificationReport {
+            checked: true,
+            ok: Some(false),
+            sample_network_count: None,
+            error: Some("authorization failed: [redacted]".to_string()),
+            hint: None,
+        };
+        let steps = next_steps(
+            &settings,
+            &quota_project,
+            &verification,
+            Some("authorization failed: quota project and insufficient authentication scopes"),
+        );
+
+        assert!(steps.iter().any(|step| step.contains("quota project")));
+        assert!(steps.iter().any(|step| step.contains("configured scope")));
     }
 }
