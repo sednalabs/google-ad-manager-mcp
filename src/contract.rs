@@ -186,10 +186,9 @@ fn assigned_value_after_key<'a>(lower: &'a str, key: &str) -> Option<&'a str> {
     let start = compound_secret_key_start(lower, key)? + key.len();
     let tail = &lower[start..];
     let separator = tail.find([':', '='])?;
-    Some(
-        tail[separator + 1..]
-            .trim_matches(|ch: char| !(ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-'))),
-    )
+    Some(tail[separator + 1..].trim_matches(|ch: char| {
+        !(ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-'))
+    }))
 }
 
 fn inline_value_after_key(lower: &str, key: &str) -> bool {
@@ -211,8 +210,7 @@ fn benign_secret_status_phrase(lower: &str, key: &str, following: &[&str]) -> bo
         return true;
     }
     (tail == "_rotation_failed" && exact_ascii_phrase(following, &["please", "retry"]))
-        || (tail == "_missing"
-            && exact_ascii_phrase(following, &["use", "workload", "identity"]))
+        || (tail == "_missing" && exact_ascii_phrase(following, &["use", "workload", "identity"]))
 }
 
 fn exact_ascii_phrase(actual: &[&str], expected: &[&str]) -> bool {
@@ -265,8 +263,7 @@ fn scheme_starts_credential(lower: &str, following: &[&str]) -> bool {
     if !contains_scheme_marker(lower) {
         return false;
     }
-    !matches!(lower, "bearer" | "basic")
-        || following.first().is_some_and(|next| !next.is_empty())
+    !matches!(lower, "bearer" | "basic") || following.first().is_some_and(|next| !next.is_empty())
 }
 
 fn benign_authorization_diagnostic_phrase(following: &[&str]) -> bool {
@@ -382,30 +379,15 @@ mod tests {
                 "proxy_authorization: opaque-secret ok",
                 "[redacted] [redacted] [redacted]",
             ),
-            (
-                "proxy_authorization:opaque-secret ok",
-                "[redacted] ok",
-            ),
-            (
-                "google_access_token=opaque-secret ok",
-                "[redacted] ok",
-            ),
-            (
-                "oauth_client_secret=opaque-secret ok",
-                "[redacted] ok",
-            ),
+            ("proxy_authorization:opaque-secret ok", "[redacted] ok"),
+            ("google_access_token=opaque-secret ok", "[redacted] ok"),
+            ("oauth_client_secret=opaque-secret ok", "[redacted] ok"),
             (
                 "service_account_private_key=opaque-secret ok",
                 "[redacted] ok",
             ),
-            (
-                "access_token_value=opaque-secret ok",
-                "[redacted] ok",
-            ),
-            (
-                "private_key_material=opaque-secret ok",
-                "[redacted] ok",
-            ),
+            ("access_token_value=opaque-secret ok", "[redacted] ok"),
+            ("private_key_material=opaque-secret ok", "[redacted] ok"),
             (
                 "access_token is opaque-secret ok",
                 "[redacted] [redacted] [redacted] [redacted]",
@@ -449,46 +431,25 @@ mod tests {
                 "client_secret_missing use workload identity",
                 "client_secret_missing use workload identity",
             ),
-            (
-                "client_secret_missing-opaque-secret",
-                "[redacted]",
-            ),
+            ("client_secret_missing-opaque-secret", "[redacted]"),
             (
                 "client_secret_missing opaque-secret",
                 "[redacted] [redacted]",
             ),
-            (
-                "client_secret_missing\u{79d8}\u{5bc6}",
-                "[redacted]",
-            ),
+            ("client_secret_missing\u{79d8}\u{5bc6}", "[redacted]"),
             (
                 "client_secret_missing use workload identity\u{79d8}\u{5bc6}",
                 "[redacted] [redacted] [redacted] [redacted]",
             ),
-            (
-                "access_token\u{79d8}\u{5bc6}",
-                "[redacted]",
-            ),
-            (
-                "opaque-secret_client_secret_missing",
-                "[redacted]",
-            ),
-            (
-                "opaqueclient_secret_missing",
-                "[redacted]",
-            ),
+            ("access_token\u{79d8}\u{5bc6}", "[redacted]"),
+            ("opaque-secret_client_secret_missing", "[redacted]"),
+            ("opaqueclient_secret_missing", "[redacted]"),
             (
                 "Authorization failed\u{79d8}\u{5bc6}",
                 "[redacted] [redacted]",
             ),
-            (
-                "Authorization [failed]",
-                "[redacted] [redacted]",
-            ),
-            (
-                "opaque_authorization failed",
-                "[redacted] [redacted]",
-            ),
+            ("Authorization [failed]", "[redacted] [redacted]"),
+            ("opaque_authorization failed", "[redacted] [redacted]"),
             (
                 "opaque-secret_authorization failed",
                 "[redacted] [redacted]",

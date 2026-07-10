@@ -3144,16 +3144,13 @@ fn blocked_yield_group_response(applied: SoapTraffickingApplyResult) -> Value {
         applied.soap_fault.as_deref(),
         &applied.upstream_response_xml,
     );
-    let (message_source, message_source_truncated) =
-        soap_error_message_with_truncation(&applied);
+    let (message_source, message_source_truncated) = soap_error_message_with_truncation(&applied);
     let (message, message_projection_truncated) = bounded_redacted_probe_text(&message_source);
     let message_truncated = message_source_truncated || message_projection_truncated;
-    let (request_id, request_id_truncated) =
-        bounded_redacted_probe_text_option(applied.request_id);
+    let (request_id, request_id_truncated) = bounded_redacted_probe_text_option(applied.request_id);
     let (response_time, response_time_truncated) =
         bounded_redacted_probe_text_option(applied.response_time);
-    let (soap_fault, soap_fault_truncated) =
-        bounded_redacted_probe_text_option(applied.soap_fault);
+    let (soap_fault, soap_fault_truncated) = bounded_redacted_probe_text_option(applied.soap_fault);
     json!({
         "surface": "yield_groups",
         "decision": "blocked",
@@ -3468,8 +3465,8 @@ impl LineItemDependencyScanState {
         if let Some(request_id) = page.request_id {
             self.request_id_count = self.request_id_count.saturating_add(1);
             let (request_id, value_truncated) = bounded_redacted_probe_text(&request_id);
-            self.request_ids_truncated |= value_truncated
-                || self.request_ids.len() >= PROBE_TRANSPORT_METADATA_SAMPLE_LIMIT;
+            self.request_ids_truncated |=
+                value_truncated || self.request_ids.len() >= PROBE_TRANSPORT_METADATA_SAMPLE_LIMIT;
             if self.request_ids.len() < PROBE_TRANSPORT_METADATA_SAMPLE_LIMIT {
                 self.request_ids.push(request_id);
             }
@@ -3590,8 +3587,7 @@ impl LineItemDependencyScanState {
         );
         let (message_source, message_source_truncated) =
             soap_error_message_with_truncation(&applied);
-        let (message, message_projection_truncated) =
-            bounded_redacted_probe_text(&message_source);
+        let (message, message_projection_truncated) = bounded_redacted_probe_text(&message_source);
         let message_truncated = message_source_truncated || message_projection_truncated;
         let (request_id, request_id_truncated) =
             bounded_redacted_probe_text_option(applied.request_id);
@@ -7707,7 +7703,11 @@ mod tests {
         assert_eq!(response["proof_state"], "blocked");
         assert_eq!(response["block_class"], "permission");
         assert_eq!(response["current_scope_truncated"], true);
-        assert!(!response["current_scope"].to_string().contains("opaque-secret"));
+        assert!(
+            !response["current_scope"]
+                .to_string()
+                .contains("opaque-secret")
+        );
     }
 
     #[test]
@@ -7744,7 +7744,10 @@ mod tests {
         assert_eq!(response["response_times_truncated"], true);
         assert_eq!(response["transport_metadata_sample_limit"], 50);
         assert_eq!(response["request_ids"].as_array().map(Vec::len), Some(50));
-        assert_eq!(response["response_times"].as_array().map(Vec::len), Some(50));
+        assert_eq!(
+            response["response_times"].as_array().map(Vec::len),
+            Some(50)
+        );
         assert!(response["request_ids"].as_array().is_some_and(|values| {
             values.iter().all(|value| {
                 value
@@ -7931,7 +7934,11 @@ mod tests {
         assert_eq!(blocked["inspected_results"], 1);
         assert_eq!(blocked["error_truncated"], true);
         assert_eq!(blocked["hint_truncated"], false);
-        assert!(blocked["hint"].as_str().is_some_and(|hint| !hint.is_empty()));
+        assert!(
+            blocked["hint"]
+                .as_str()
+                .is_some_and(|hint| !hint.is_empty())
+        );
         assert!(!blocked["error"].to_string().contains("opaque-secret"));
         assert!(
             blocked["error"]

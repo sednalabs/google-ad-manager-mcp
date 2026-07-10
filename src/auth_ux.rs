@@ -584,8 +584,8 @@ struct VerificationReport {
 mod tests {
     use std::path::Path;
 
-    use crate::config::Settings;
     use crate::AdManagerError;
+    use crate::config::Settings;
 
     use super::{
         QuotaProjectStatus, gcloud_adc_login_command, next_steps, shell_join,
