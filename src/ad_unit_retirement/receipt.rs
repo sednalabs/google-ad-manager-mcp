@@ -266,7 +266,10 @@ pub(super) fn grade_evidence(
             "stale",
             "the evidence observation or activity-window end exceeded its TTL",
         )
-    } else if matches!(receipt.state, RetirementEvidenceState::ManualUiProofRequired) {
+    } else if matches!(
+        receipt.state,
+        RetirementEvidenceState::ManualUiProofRequired
+    ) {
         if receipt.manual_ui_proof_included {
             (
                 "complete_clear",
@@ -298,9 +301,9 @@ pub(super) fn grade_evidence(
             receipt.state,
             RetirementEvidenceState::CompleteClear | RetirementEvidenceState::CompleteBlocked
         ) || (matches!(
-                receipt.state,
-                RetirementEvidenceState::ManualUiProofRequired
-            ) && receipt.manual_ui_proof_included))
+            receipt.state,
+            RetirementEvidenceState::ManualUiProofRequired
+        ) && receipt.manual_ui_proof_included))
         && !(manual_ui_required_for_clear
             && matches!(receipt.state, RetirementEvidenceState::CompleteClear)
             && !receipt.manual_ui_proof_included);

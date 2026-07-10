@@ -7175,7 +7175,10 @@ mod tests {
             RetirementEvidenceSource::DependencyProbe,
             RetirementEvidenceState::PartialCapped,
         );
-        assert_eq!(response["evidence_receipt_template"]["state"], "not_generated");
+        assert_eq!(
+            response["evidence_receipt_template"]["state"],
+            "not_generated"
+        );
     }
 
     #[test]

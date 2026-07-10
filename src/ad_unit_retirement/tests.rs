@@ -210,14 +210,17 @@ fn successful_two_page_scan_reconciles_full_ancestry() {
         "nextPageToken":"page-2"
     }));
     assert_eq!(next.as_deref(), Some("page-2"));
-    assert!(scan.consume_page(&json!({
-        "adUnits": [{
-            "name":"networks/1234567/adUnits/201",
-            "parentAdUnit":"networks/1234567/adUnits/200",
-            "parentPath":[{"parentAdUnit":"networks/1234567/adUnits/200"}],
-            "status":"ARCHIVED"
-        }]
-    })).is_none());
+    assert!(
+        scan.consume_page(&json!({
+            "adUnits": [{
+                "name":"networks/1234567/adUnits/201",
+                "parentAdUnit":"networks/1234567/adUnits/200",
+                "parentPath":[{"parentAdUnit":"networks/1234567/adUnits/200"}],
+                "status":"ARCHIVED"
+            }]
+        }))
+        .is_none()
+    );
     let summary = scan.finish(100);
     assert_eq!(summary["proof_state"], "complete_clear");
     assert_eq!(summary["page_count"], 2);
@@ -257,12 +260,7 @@ fn sparse_or_cross_network_hierarchy_fails_closed() {
 
 #[test]
 fn missing_target_catalog_row_fails_closed() {
-    let mut scan = DescendantScan::new(
-        "1234567",
-        &["200".to_string()],
-        &BTreeMap::new(),
-        100,
-    );
+    let mut scan = DescendantScan::new("1234567", &["200".to_string()], &BTreeMap::new(), 100);
     scan.consume_page(&json!({
         "adUnits":[{"name":"networks/1234567/adUnits/300","parentPath":[],"hasChildren":false}]
     }));

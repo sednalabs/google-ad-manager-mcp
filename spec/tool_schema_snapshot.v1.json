@@ -118,73 +118,11 @@
       "name": "gam_ad_unit_dependency_probe"
     },
     {
-      "description": "Read-only evidence-graded retirement assessment for exact Ad Manager ad-unit ids or resource names, with current identity and descendant proof.",
+      "description": "Read-only evidence-graded retirement assessment for exact Ad Manager ad-unit ids, with current identity and descendant proof.",
       "inputSchema": {
         "$defs": {
-          "RetirementEvidenceBundle": {
-            "properties": {
-              "delivery": {
-                "anyOf": [
-                  {
-                    "$ref": "#/$defs/RetirementEvidenceReceipt"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
-              },
-              "dependency": {
-                "anyOf": [
-                  {
-                    "$ref": "#/$defs/RetirementEvidenceReceipt"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
-              },
-              "exchange_protection": {
-                "anyOf": [
-                  {
-                    "$ref": "#/$defs/RetirementEvidenceReceipt"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
-              },
-              "site_contract": {
-                "anyOf": [
-                  {
-                    "$ref": "#/$defs/RetirementEvidenceReceipt"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
-              },
-              "telemetry": {
-                "anyOf": [
-                  {
-                    "$ref": "#/$defs/RetirementEvidenceReceipt"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
-              }
-            },
-            "type": "object"
-          },
           "RetirementEvidenceReceipt": {
             "properties": {
-              "attested_by": {
-                "description": "Bounded non-sensitive operator or role identifier. Required when trust is operator_attested.",
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
               "manual_ui_proof_included": {
                 "default": false,
                 "description": "Required for exchange/protection complete-clear proof while GAM UI-only surfaces remain unsupported by API.",
@@ -236,11 +174,6 @@
                   "type": "string"
                 },
                 "type": "array"
-              },
-              "trust": {
-                "$ref": "#/$defs/RetirementEvidenceTrust",
-                "default": "caller_supplied",
-                "description": "Caller-supplied evidence is untrusted unless an operator explicitly attests it."
               },
               "ttl_seconds": {
                 "description": "Maximum age accepted for this proof. Maximum 31 days.",
@@ -294,16 +227,10 @@
               "complete_blocked",
               "partial_capped",
               "blocked_permission",
+              "blocked_read",
               "unsupported_surface",
               "manual_ui_proof_required",
               "not_run"
-            ],
-            "type": "string"
-          },
-          "RetirementEvidenceTrust": {
-            "enum": [
-              "caller_supplied",
-              "operator_attested"
             ],
             "type": "string"
           }
@@ -311,45 +238,38 @@
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "ad_unit_ids": {
-            "default": [],
-            "description": "Exact positive numeric ad-unit ids to assess. Maximum 10 unique targets.",
+            "description": "Exact positive numeric ad-unit ids to assess.",
             "items": {
               "type": "string"
             },
+            "maxItems": 10,
+            "minItems": 1,
             "type": "array"
           },
           "ad_unit_page_size": {
             "description": "Number of ad-unit rows to fetch per descendant-scan page. Defaults to 1000, max 1000.",
             "format": "uint32",
-            "minimum": 0,
+            "maximum": 1000,
+            "minimum": 1,
             "type": [
               "integer",
               "null"
             ]
           },
-          "ad_unit_resource_names": {
-            "default": [],
-            "description": "Exact resource names, for example networks/1234567/adUnits/456.",
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
-          },
           "evidence": {
-            "$ref": "#/$defs/RetirementEvidenceBundle",
-            "default": {
-              "delivery": null,
-              "dependency": null,
-              "exchange_protection": null,
-              "site_contract": null,
-              "telemetry": null
+            "default": [],
+            "description": "Freshness-bound external proof receipts. Raw reports and telemetry are not accepted.",
+            "items": {
+              "$ref": "#/$defs/RetirementEvidenceReceipt"
             },
-            "description": "Freshness-bound external proof receipts. Raw reports and telemetry are not accepted."
+            "maxItems": 5,
+            "type": "array"
           },
           "max_ad_units": {
             "description": "Maximum ad-unit rows to inspect before the descendant proof becomes partial. Defaults to 5000, max 10000.",
             "format": "uint32",
-            "minimum": 0,
+            "maximum": 10000,
+            "minimum": 1,
             "type": [
               "integer",
               "null"
@@ -357,11 +277,14 @@
           },
           "network_code": {
             "description": "Raw positive numeric Ad Manager network code, for example 1234567.",
+            "maxLength": 20,
+            "minLength": 1,
             "type": "string"
           }
         },
         "required": [
-          "network_code"
+          "network_code",
+          "ad_unit_ids"
         ],
         "type": "object"
       },

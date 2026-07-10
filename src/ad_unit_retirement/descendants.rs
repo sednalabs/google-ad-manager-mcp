@@ -143,15 +143,17 @@ impl DescendantScan {
                 self.target_has_children.insert(id.clone());
             }
         }
-        if let Some(id) = &ad_unit_id {
-            if self.parent_by_id.insert(id.clone(), parent_id.clone()).is_some()
+        if let Some(id) = &ad_unit_id
+            && (self
+                .parent_by_id
+                .insert(id.clone(), parent_id.clone())
+                .is_some()
                 || self
                     .reported_ancestors_by_id
                     .insert(id.clone(), reported_ancestors.clone())
-                    .is_some()
-            {
-                self.duplicate_catalog_id = true;
-            }
+                    .is_some())
+        {
+            self.duplicate_catalog_id = true;
         }
         self.fingerprint_rows.push(json!({
             "id": ad_unit_id,
@@ -229,12 +231,16 @@ impl DescendantScan {
                 .difference(&self.target_ids_with_descendants)
                 .next()
                 .is_some();
-        let state = if blocking_count > 0 {
-            "complete_blocked"
-        } else if self.capped || self.zero_progress || self.repeated_page_token {
+        let state = if self.capped
+            || self.zero_progress
+            || self.repeated_page_token
+            || hierarchy_inconsistent
+        {
             "partial_capped"
-        } else if !self.hierarchy_shape_observed || hierarchy_inconsistent {
+        } else if !self.hierarchy_shape_observed {
             "unsupported_surface"
+        } else if blocking_count > 0 {
+            "complete_blocked"
         } else {
             "complete_clear"
         };
