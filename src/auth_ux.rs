@@ -17,7 +17,7 @@ use crate::config::{
     server_cloudsdk_config_dir,
 };
 use crate::contract::redact_secret_text;
-use crate::{AdManagerClient, AuthSource, MANAGE_SCOPE};
+use crate::{AdManagerClient, AdManagerError, AuthSource, MANAGE_SCOPE};
 
 const AD_MANAGER_API_NAME: &str = "Google Ad Manager API";
 const AD_MANAGER_API_SERVICE: &str = "admanager.googleapis.com";
@@ -191,34 +191,34 @@ async fn build_report(settings: &Settings, verify: bool) -> AuthReport {
     let client = AdManagerClient::from_settings(settings);
     let adc_file = selected_adc_file_status();
     let quota_project = effective_quota_project(settings);
-    let verification = if verify {
+    let (verification, verification_error_for_classification) = if verify {
         match client.list_networks(Some(1), None).await {
-            Ok(payload) => VerificationReport {
-                checked: true,
-                ok: Some(true),
-                sample_network_count: payload
-                    .get("networks")
-                    .and_then(|value| value.as_array())
-                    .map(Vec::len),
+            Ok(payload) => (
+                VerificationReport {
+                    checked: true,
+                    ok: Some(true),
+                    sample_network_count: payload
+                        .get("networks")
+                        .and_then(|value| value.as_array())
+                        .map(Vec::len),
+                    error: None,
+                    hint: None,
+                },
+                None,
+            ),
+            Err(err) => verification_failure(&err),
+        }
+    } else {
+        (
+            VerificationReport {
+                checked: false,
+                ok: None,
+                sample_network_count: None,
                 error: None,
                 hint: None,
             },
-            Err(err) => VerificationReport {
-                checked: true,
-                ok: Some(false),
-                sample_network_count: None,
-                error: Some(redact_secret_text(&err.to_string())),
-                hint: Some(err.hint().to_string()),
-            },
-        }
-    } else {
-        VerificationReport {
-            checked: false,
-            ok: None,
-            sample_network_count: None,
-            error: None,
-            hint: None,
-        }
+            None,
+        )
     };
 
     let ready = match verification.ok {
@@ -238,7 +238,12 @@ async fn build_report(settings: &Settings, verify: bool) -> AuthReport {
         || env.service_account_path
         || env.service_account_json
         || verification.ok == Some(true);
-    let next_steps = next_steps(settings, &quota_project, &verification);
+    let next_steps = next_steps(
+        settings,
+        &quota_project,
+        &verification,
+        verification_error_for_classification.as_deref(),
+    );
 
     AuthReport {
         server: "google-ad-manager-mcp",
@@ -254,6 +259,20 @@ async fn build_report(settings: &Settings, verify: bool) -> AuthReport {
         ready,
         next_steps,
     }
+}
+
+fn verification_failure(err: &AdManagerError) -> (VerificationReport, Option<String>) {
+    let classification_text = err.to_string();
+    (
+        VerificationReport {
+            checked: true,
+            ok: Some(false),
+            sample_network_count: None,
+            error: Some(redact_secret_text(&classification_text)),
+            hint: Some(err.hint().to_string()),
+        },
+        Some(classification_text),
+    )
 }
 
 fn effective_quota_project(settings: &Settings) -> QuotaProjectStatus {
@@ -289,6 +308,7 @@ fn next_steps(
     settings: &Settings,
     quota_project: &QuotaProjectStatus,
     verification: &VerificationReport,
+    verification_error_for_classification: Option<&str>,
 ) -> Vec<String> {
     let mut steps = Vec::new();
     if !verification.checked {
@@ -304,7 +324,9 @@ fn next_steps(
         );
     }
     if verification.ok == Some(false) {
-        let error = verification.error.as_deref().unwrap_or_default();
+        let error = verification_error_for_classification
+            .or(verification.error.as_deref())
+            .unwrap_or_default();
         if mentions_quota_project(error) {
             steps.push(
                 "Set a quota project for ADC and enable the Google Ad Manager API on that project."
@@ -562,7 +584,13 @@ struct VerificationReport {
 mod tests {
     use std::path::Path;
 
-    use super::{gcloud_adc_login_command, shell_join, shell_join_with_cloudsdk_config};
+    use crate::AdManagerError;
+    use crate::config::Settings;
+
+    use super::{
+        QuotaProjectStatus, gcloud_adc_login_command, next_steps, shell_join,
+        shell_join_with_cloudsdk_config, verification_failure,
+    };
 
     #[test]
     fn adc_login_command_includes_cloud_platform_and_ad_manager_scope() {
@@ -596,5 +624,38 @@ mod tests {
         let rendered = shell_join_with_cloudsdk_config(&command, Some(Path::new("/tmp/gam adc")));
         assert!(rendered.starts_with("CLOUDSDK_CONFIG='/tmp/gam adc' gcloud auth"));
         assert!(rendered.contains("admanager.readonly"));
+    }
+
+    #[test]
+    fn remediation_classification_uses_raw_error_while_display_stays_redacted() {
+        let settings = Settings::default();
+        let quota_project = QuotaProjectStatus {
+            configured: true,
+            value: Some("synthetic-project".to_string()),
+            source: Some("test".to_string()),
+        };
+        let (verification, raw_classification) = verification_failure(
+            &AdManagerError::AuthBootstrap(
+                "google_access_token=opaque-secret quota project and insufficient authentication scopes"
+                    .to_string(),
+            ),
+        );
+        let serialized = serde_json::to_string(&verification).expect("serialize verification");
+        assert!(serialized.contains("[redacted]"));
+        assert!(!serialized.contains("opaque-secret"));
+        assert!(
+            raw_classification
+                .as_deref()
+                .is_some_and(|text| text.contains("opaque-secret"))
+        );
+        let steps = next_steps(
+            &settings,
+            &quota_project,
+            &verification,
+            raw_classification.as_deref(),
+        );
+
+        assert!(steps.iter().any(|step| step.contains("quota project")));
+        assert!(steps.iter().any(|step| step.contains("configured scope")));
     }
 }
