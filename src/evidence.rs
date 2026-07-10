@@ -363,8 +363,7 @@ mod tests {
         assert!(rejected.contains("compact projection failed its required"));
 
         let mut mismatched_receipt = compact_projection(json!({"decision":"clear"}), true);
-        mismatched_receipt["evidence_receipt_template"]["result_hash"] =
-            json!("fedcba9876543210");
+        mismatched_receipt["evidence_receipt_template"]["result_hash"] = json!("fedcba9876543210");
         let rejected = render_guard(
             json!({"optional_raw_output":"x".repeat(MAX_CONTRACT_ENVELOPE_BYTES)}),
             Some(mismatched_receipt),
