@@ -93,7 +93,11 @@ fn exchange(generated: bool, raw: usize) -> Value {
 }
 
 fn dependency(generated: bool, raw: usize) -> Value {
-    let count = if generated { 1 } else { 50 };
+    let count = match (generated, raw) {
+        (true, 0) => 1,
+        (true, _) => 10,
+        (false, _) => 50,
+    };
     let xml_sample_bytes = raw.min(4_096);
     let target_map = (1..=count)
         .map(|id| {
