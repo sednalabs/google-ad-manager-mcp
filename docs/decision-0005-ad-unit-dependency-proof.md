@@ -43,7 +43,7 @@ The response includes a stable `result_fingerprint` over the bounded proof
 payload. It can bind a later evidence-grading receipt, but it does not upgrade a
 capped or blocked proof state. For one to ten resolved exact targets in the
 requested network, the probe also returns a canonical caller-supplied receipt
-template under the explicit `gam-evidence-producer-v1` source contract. An
+template under the explicit `gam-evidence-producer-v2` source contract. An
 operator must still review the underlying result before using it.
 
 Target rows contribute dependency evidence only when their resource names bind

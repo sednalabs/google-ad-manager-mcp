@@ -142,7 +142,10 @@ This server bounds that surface by:
 
 Errors are redacted before being returned through Contract V1 envelopes.
 Secret-bearing tokens such as `access_token`, `private_key`, and bearer headers
-are replaced with `[redacted]`.
+are replaced with `[redacted]`. When an explicit credential marker has no
+inline syntactic value boundary, the remainder of that diagnostic is redacted;
+the adapter does not guess which later prose token contains the secret. Benign
+authorization-failure wording without credential syntax remains readable.
 
 Probe provider diagnostics use the same redaction boundary and a UTF-8-safe
 byte cap before fingerprinting. SOAP faults, request metadata, and provider

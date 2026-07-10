@@ -110,7 +110,6 @@ pub fn scratchpad_error(err: ScratchpadError, started: Instant) -> CallToolResul
 
 pub fn redact_secret_text(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
-    let mut redact_following = 0_usize;
     let mut redact_rest = false;
     let tokens = input.split_whitespace().collect::<Vec<_>>();
     for (index, token) in tokens.iter().enumerate() {
@@ -122,15 +121,9 @@ pub fn redact_secret_text(input: &str) -> String {
         let lower = token.to_ascii_lowercase();
         if redact_rest {
             out.push_str("[redacted]");
-        } else if redact_following > 0 {
-            out.push_str("[redacted]");
-            if !redaction_separator_token(token) && !redaction_connector_token(token) {
-                redact_following = redact_following.saturating_sub(1);
-                extend_secret_redaction(&lower, &mut redact_following, &mut redact_rest);
-            }
         } else if looks_secret_bearing(token, next) {
             out.push_str("[redacted]");
-            extend_secret_redaction(&lower, &mut redact_following, &mut redact_rest);
+            redact_rest = secret_value_extends_past_token(&lower);
         } else {
             out.push_str(token);
         }
@@ -138,35 +131,38 @@ pub fn redact_secret_text(input: &str) -> String {
     out
 }
 
-fn extend_secret_redaction(lower: &str, following: &mut usize, rest: &mut bool) {
-    if has_compound_secret_key(lower, "private_key") || lower.contains("-----begin") {
-        *rest = true;
-    } else if has_secret_key(lower, "authorization") {
-        if authorization_needs_following_value(lower) {
-            *following = (*following).max(1);
-        }
-    } else if ["access_token", "refresh_token", "client_secret"]
-        .into_iter()
-        .find(|key| has_compound_secret_key(lower, key))
-        .is_some_and(|key| assigned_value_after_key(lower, key).is_none_or(str::is_empty))
-        || scheme_needs_following_value(lower)
-    {
-        *following = (*following).max(1);
+fn secret_value_extends_past_token(lower: &str) -> bool {
+    if lower.contains("-----begin") {
+        true
+    } else if credential_key_context(lower, "private_key") {
+        assigned_value_after_key(lower, "private_key").is_none_or(str::is_empty)
+    } else if credential_key_context(lower, "authorization") {
+        authorization_needs_following_value(lower)
+    } else {
+        ["access_token", "refresh_token", "client_secret"]
+            .into_iter()
+            .find(|key| credential_key_context(lower, key))
+            .is_some_and(|key| assigned_value_after_key(lower, key).is_none_or(str::is_empty))
+            || scheme_needs_following_value(lower)
     }
 }
 
-fn has_compound_secret_key(lower: &str, key: &str) -> bool {
-    lower.contains(key)
+fn credential_key_context(lower: &str, key: &str) -> bool {
+    compound_secret_key_start(lower, key).is_some()
 }
 
-fn has_secret_key(lower: &str, key: &str) -> bool {
-    lower
-        .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
-        .any(|segment| segment == key)
+fn compound_secret_key_start(lower: &str, key: &str) -> Option<usize> {
+    lower.match_indices(key).find_map(|(start, _)| {
+        let before = lower[..start].chars().next_back();
+        let after = lower[start + key.len()..].chars().next();
+        let before_is_boundary = before.is_none_or(|ch| !ch.is_ascii_alphanumeric());
+        let after_is_boundary = after.is_none_or(|ch| !ch.is_ascii_alphanumeric() && ch != '_');
+        (before_is_boundary && after_is_boundary).then_some(start)
+    })
 }
 
 fn assigned_value_after_key<'a>(lower: &'a str, key: &str) -> Option<&'a str> {
-    let start = lower.find(key)? + key.len();
+    let start = compound_secret_key_start(lower, key)? + key.len();
     let tail = &lower[start..];
     let separator = tail.find([':', '='])?;
     Some(
@@ -196,18 +192,8 @@ fn redaction_separator_token(token: &str) -> bool {
             .all(|ch| !(ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.')))
 }
 
-fn redaction_connector_token(token: &str) -> bool {
-    matches!(
-        token
-            .trim_matches(|ch: char| !ch.is_ascii_alphanumeric())
-            .to_ascii_lowercase()
-            .as_str(),
-        "as" | "equals" | "is" | "key" | "token" | "value" | "was"
-    )
-}
-
 fn authorization_key_context(lower: &str, next: Option<&str>) -> bool {
-    has_secret_key(lower, "authorization")
+    credential_key_context(lower, "authorization")
         && ((lower.contains(':') || lower.contains('='))
             || next.is_some_and(redaction_separator_token)
             || next.is_some_and(|value| scheme_needs_following_value(&value.to_ascii_lowercase())))
@@ -267,8 +253,8 @@ fn elapsed_ms(started: Instant) -> u64 {
 fn looks_secret_bearing(token: &str, next: Option<&str>) -> bool {
     let lower = token.to_ascii_lowercase();
     ["access_token", "refresh_token", "client_secret", "private_key"]
-    .into_iter()
-    .any(|key| has_compound_secret_key(&lower, key))
+        .into_iter()
+        .any(|key| credential_key_context(&lower, key))
         || authorization_key_context(&lower, next)
         || scheme_starts_credential(&lower, next)
         || lower.contains("-----begin")
@@ -286,31 +272,43 @@ mod tests {
         for (source, expected) in [
             (
                 "authorization: Bearer opaque-secret ok",
-                "[redacted] [redacted] [redacted] ok",
+                "[redacted] [redacted] [redacted] [redacted]",
             ),
             (
                 "Authorization : Bearer opaque-secret ok",
-                "[redacted] [redacted] [redacted] [redacted] ok",
+                "[redacted] [redacted] [redacted] [redacted] [redacted]",
             ),
             (
                 "Authorization=Bearer opaque-secret ok",
-                "[redacted] [redacted] ok",
+                "[redacted] [redacted] [redacted]",
             ),
             (
                 "access_token = opaque-secret ok",
-                "[redacted] [redacted] [redacted] ok",
+                "[redacted] [redacted] [redacted] [redacted]",
             ),
             (
                 "\"access_token\" : \"opaque-secret\" ok",
-                "[redacted] [redacted] [redacted] ok",
+                "[redacted] [redacted] [redacted] [redacted]",
             ),
             (
                 "\"Authorization\" : \"Bearer opaque-secret\" ok",
-                "[redacted] [redacted] [redacted] [redacted] ok",
+                "[redacted] [redacted] [redacted] [redacted] [redacted]",
             ),
             (
                 "client_secret : opaque-secret ok",
-                "[redacted] [redacted] [redacted] ok",
+                "[redacted] [redacted] [redacted] [redacted]",
+            ),
+            (
+                "http_authorization=Bearer opaque-secret ok",
+                "[redacted] [redacted] [redacted]",
+            ),
+            (
+                "proxy_authorization: opaque-secret ok",
+                "[redacted] [redacted] [redacted]",
+            ),
+            (
+                "proxy_authorization:opaque-secret ok",
+                "[redacted] ok",
             ),
             (
                 "google_access_token=opaque-secret ok",
@@ -326,20 +324,28 @@ mod tests {
             ),
             (
                 "access_token is opaque-secret ok",
-                "[redacted] [redacted] [redacted] ok",
+                "[redacted] [redacted] [redacted] [redacted]",
             ),
             (
-                "access_token IS opaque-secret ok",
-                "[redacted] [redacted] [redacted] ok",
+                "access_token has value opaque-secret ok",
+                "[redacted] [redacted] [redacted] [redacted] [redacted]",
             ),
             (
-                "Bearer token opaque-secret ok",
-                "[redacted] [redacted] [redacted] ok",
+                "Bearer credential opaque-secret ok",
+                "[redacted] [redacted] [redacted] [redacted]",
             ),
             ("access_token=opaque-secret ok", "[redacted] ok"),
             ("ya29.synthetic ok", "[redacted] ok"),
             ("authorization failed safely", "authorization failed safely"),
             ("basic validation failed", "basic validation failed"),
+            (
+                "private_key_rotation_failed please retry",
+                "private_key_rotation_failed please retry",
+            ),
+            (
+                "client_secret_missing use workload identity",
+                "client_secret_missing use workload identity",
+            ),
         ] {
             assert_eq!(redact_secret_text(source), expected);
         }

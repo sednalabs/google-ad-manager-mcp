@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 
 use crate::{AdManagerError, contract, fingerprint::stable_fingerprint};
 
-pub(crate) const EVIDENCE_PRODUCER_CONTRACT_VERSION: &str = "gam-evidence-producer-v1";
+pub(crate) const EVIDENCE_PRODUCER_CONTRACT_VERSION: &str = "gam-evidence-producer-v2";
 pub(crate) const MAX_EVIDENCE_TARGETS: usize = 10;
 pub(crate) const MAX_CONTRACT_ENVELOPE_BYTES: usize = 8 * 1024;
 pub(crate) const MAX_RMCP_TRANSPORT_BYTES: usize = 20 * 1024;

@@ -7917,13 +7917,25 @@ mod tests {
 
         let mut blocked_state = LineItemDependencyScanState::default();
         assert_eq!(record_page(&mut blocked_state), 1);
-        let auth_error = AdManagerError::AuthBootstrap("credential unavailable".to_string());
+        let auth_error = AdManagerError::AuthBootstrap(format!(
+            "google_access_token=opaque-secret {}",
+            "€".repeat(PROBE_DIAGNOSTIC_SAMPLE_BYTES)
+        ));
         let blocked = blocked_state.into_error_blocked_response(&options, &auth_error);
         assert_eq!(blocked["decision"], "blocked");
         assert_eq!(blocked["proof_state"], "blocked");
         assert_eq!(blocked["block_class"], "permission");
         assert_eq!(blocked["dependency_match_count"], 0);
         assert_eq!(blocked["inspected_results"], 1);
+        assert_eq!(blocked["error_truncated"], true);
+        assert_eq!(blocked["hint_truncated"], false);
+        assert!(blocked["hint"].as_str().is_some_and(|hint| !hint.is_empty()));
+        assert!(!blocked["error"].to_string().contains("opaque-secret"));
+        assert!(
+            blocked["error"]
+                .as_str()
+                .is_some_and(|error| error.is_char_boundary(error.len()))
+        );
         assert_eq!(
             dependency_evidence_state("blocked", &json!({"line_items": blocked.clone()})),
             EvidenceState::BlockedPermission

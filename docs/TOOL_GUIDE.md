@@ -94,7 +94,7 @@ adds authoritative coverage. Do not interpret their absence from the probe as
 proof that those settings are clean in the GAM UI. The response includes a
 stable `result_fingerprint`. For one to ten exact targets resolved to resource
 names in the requested network, it also includes a canonical receipt template
-with `source_version=gam-evidence-producer-v1`. Complete API proof remains
+with `source_version=gam-evidence-producer-v2`. Complete API proof remains
 `manual_ui_proof_required` until the unsupported GAM UI surfaces are reviewed.
 Unknown yield-group activity remains partial. Probe network codes are
 canonicalized once, and foreign-network or malformed resource rows cannot
@@ -129,8 +129,9 @@ not authoritative totals. Consumers must use `request_id_count` and
 `response_time_count` for observed totals, inspect `request_ids_truncated` and
 `response_times_truncated`, and honor `transport_metadata_sample_limit`. A
 sample is complete only when its truncation flag is false and its length equals
-the corresponding count. This rule applies to existing consumers even though
-the evidence producer version remains unchanged.
+the corresponding count. Results using this sampling contract identify
+`source_version=gam-evidence-producer-v2`; consumers that only understand v1
+must reject the result rather than treat a prefix sample as complete.
 
 The response uses `dependency_decision` plus `proof_flags`, not a cleanup
 approval. Any capped line-item read, truncated SOAP response, id-only target,
