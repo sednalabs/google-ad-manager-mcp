@@ -60,6 +60,21 @@ jobs:
       - name: Run baseline lane
         run: ${{ matrix.lane.command }}
 
+      - name: Generate rustfmt patch
+        if: ${{ always() && matrix.lane.phase_name == 'fmt' }}
+        run: |
+          cargo fmt --all
+          git diff --binary > rustfmt.patch
+
+      - name: Upload rustfmt patch
+        if: ${{ always() && matrix.lane.phase_name == 'fmt' }}
+        # actions/upload-artifact v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: rustfmt-patch
+          path: rustfmt.patch
+          if-no-files-found: error
+
   rust-baseline:
     name: Run targeted Rust baseline
     runs-on: ubuntu-24.04
