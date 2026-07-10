@@ -26,10 +26,9 @@ mod client;
 mod config;
 mod contract;
 mod error;
-// The bounded projection guard is consumed after receipt integration.
-#[allow(dead_code)]
 mod evidence;
 mod fingerprint;
+mod probe_projection;
 mod tool_surface;
 mod tools;
 

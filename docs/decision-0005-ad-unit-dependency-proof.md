@@ -63,4 +63,28 @@ when an earlier page proved at least one dependency, and otherwise remains
 `blocked`. A blocked result independently retains capped/truncated proof flags,
 including truncation reported by the failed SOAP response itself.
 
+## Bounded Output Contract
+
+The native response is returned unchanged while it fits both the 8 KiB
+Contract V1 envelope and 20 KiB RMCP transport limits. An oversized dependency
+proof keeps the dependency decision, all proof flags, cleanup prohibition,
+surface proof and block states, counts, progress, truncation, and status
+semantics. Expanded target, placement, line-item, request-metadata, and optional
+XML details are removed rather than silently shortened, then accounted for in a
+typed omission ledger with exact counts and bounded witnesses. The compact
+fingerprint and an eligible receipt bind the returned projection; an ineligible
+full target scope remains unbound as `not_generated`. Semantic drift, false completeness, receipt
+drift, or a still-oversized compact result fails closed.
+
+The projection contract is visible at `data.result_projection`.
+`source_result_fingerprint` is an audit link to the full producer result, while
+the returned `result_fingerprint` is the value bound by the returned receipt.
+Consumers must use the latter for subsequent receipt validation.
+
+Valid pre-scan `skipped` and permission-blocked surfaces remain compactable
+without synthetic scan counters. Optional per-match XML is summarized with its
+original bytes, retained bytes, sample count, and truncation count. Projection
+also re-derives the root dependency decision and rejects nested target evidence
+outside the top-level probe target scope before rebinding a receipt.
+
 The helper is read-only and always reports `mutation_performed=false`.

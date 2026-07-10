@@ -87,37 +87,225 @@ pub(crate) fn evidence_receipt_template(
     }))
 }
 
-pub(crate) fn success_with_wire_guard(
-    data: Value,
-    compact_data: Option<Value>,
-    meta: Value,
-    started: Instant,
-    field: &'static str,
-) -> CallToolResult {
-    let guarded = match compact_data {
-        None => guarded_success(data, meta, started).map_err(str::to_string),
-        Some(compact) => match guarded_success(data, meta.clone(), started) {
-            Ok(result) => Ok(result),
-            Err(primary_failure) if !valid_compact_projection(&compact) => Err(format!(
-                "primary result: {primary_failure}; compact projection failed its required truncated, fingerprint, and receipt-binding validation"
-            )),
-            Err(primary_failure) => guarded_success(compact, meta, started).map_err(|failure| {
-                format!("primary result: {primary_failure}; compact projection: {failure}")
-            }),
-        },
-    };
-    match guarded {
-        Ok(result) => result,
-        Err(failure) => contract::result_contract_error(field, failure, started),
+pub(crate) fn evidence_receipt_target_ids(
+    response: &Value,
+    network_code: &str,
+) -> Option<Vec<String>> {
+    validate_canonical_numeric_id("network_code", network_code).ok()?;
+    if response
+        .get("target_resolution_issues")
+        .and_then(Value::as_array)
+        .is_some_and(|issues| !issues.is_empty())
+    {
+        return None;
+    }
+    let rows = response.get("ad_units")?.as_array()?;
+    if rows.is_empty()
+        || rows.len() > MAX_EVIDENCE_TARGETS
+        || rows.iter().any(|row| !exact_target_row(row, network_code))
+    {
+        return None;
+    }
+    let target_ids = rows
+        .iter()
+        .filter_map(|row| row.get("ad_unit_id").and_then(Value::as_str))
+        .map(str::to_string)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    (target_ids.len() == rows.len()).then_some(target_ids)
+}
+
+pub(crate) fn exact_ad_unit_id_from_resource_name(
+    network_code: &str,
+    resource_name: &str,
+) -> Option<String> {
+    exact_resource_id_from_name(network_code, "adUnits", resource_name)
+}
+
+pub(crate) fn exact_resource_id_from_name(
+    network_code: &str,
+    resource_collection: &str,
+    resource_name: &str,
+) -> Option<String> {
+    validate_canonical_numeric_id("network_code", network_code).ok()?;
+    let prefix = format!("networks/{network_code}/{resource_collection}/");
+    let raw_id = resource_name.strip_prefix(&prefix)?;
+    if raw_id.is_empty() || raw_id.contains('/') {
+        return None;
+    }
+    let canonical_id = validate_canonical_numeric_id("resource_id", raw_id).ok()?;
+    (canonical_id == raw_id).then(|| canonical_id.to_string())
+}
+
+pub(crate) fn dependency_evidence_state(decision: &str, response: &Value) -> EvidenceState {
+    match decision {
+        "dependencies_found" => EvidenceState::CompleteBlocked,
+        "no_dependencies_observed" => EvidenceState::CompleteClear,
+        "incomplete_no_dependencies_observed" | "missing_or_ambiguous_targets" => {
+            EvidenceState::PartialCapped
+        }
+        "blocked" => blocked_evidence_state(response),
+        _ => EvidenceState::NotRun,
     }
 }
 
-fn guarded_success(
+pub(crate) fn dependency_probe_decision(
+    target_resolution_issues: &[String],
+    placement_summary: &Value,
+    line_item_summary: &Value,
+) -> &'static str {
+    let placement_dependencies = placement_summary
+        .get("target_placement_match_count")
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+        > 0;
+    let line_item_dependencies = line_item_summary
+        .get("dependency_match_count")
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+        > 0;
+    if placement_dependencies || line_item_dependencies {
+        "dependencies_found"
+    } else if line_item_summary
+        .get("proof_state")
+        .and_then(Value::as_str)
+        .is_some_and(|state| state == "blocked")
+        || placement_summary
+            .get("proof_state")
+            .and_then(Value::as_str)
+            .is_some_and(|state| state == "blocked")
+    {
+        "blocked"
+    } else if !target_resolution_issues.is_empty() {
+        "missing_or_ambiguous_targets"
+    } else if dependency_proof_incomplete(placement_summary, line_item_summary) {
+        "incomplete_no_dependencies_observed"
+    } else {
+        "no_dependencies_observed"
+    }
+}
+
+fn dependency_proof_incomplete(placement_summary: &Value, line_item_summary: &Value) -> bool {
+    placement_summary
+        .get("proof_state")
+        .and_then(Value::as_str)
+        .map(|state| state != "complete_for_page")
+        .unwrap_or(true)
+        || line_item_summary
+            .get("proof_state")
+            .and_then(Value::as_str)
+            .map(|state| state != "complete")
+            .unwrap_or(true)
+}
+
+pub(crate) fn exchange_evidence_state(response: &Value) -> EvidenceState {
+    let target_exposed = response
+        .get("ad_units")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .any(|row| row.get("decision").and_then(Value::as_str) == Some("attention_required"))
+        || response
+            .get("yield_groups")
+            .and_then(|value| value.get("decision"))
+            .and_then(Value::as_str)
+            == Some("targeted_exposed");
+    if target_exposed {
+        return EvidenceState::CompleteBlocked;
+    }
+
+    let blocked = [
+        "private_auctions",
+        "private_auction_deals",
+        "yield_groups",
+        "rest_discovery",
+    ]
+    .into_iter()
+    .any(|surface| {
+        response
+            .get(surface)
+            .and_then(|value| value.get("proof_state"))
+            .and_then(Value::as_str)
+            == Some("blocked")
+    });
+    if blocked {
+        return blocked_evidence_state(response);
+    }
+
+    let yield_group_activity_unknown = response.get("yield_groups").is_some_and(|yield_groups| {
+        yield_groups.get("decision").and_then(Value::as_str) == Some("targeted_activity_unknown")
+            || yield_groups
+                .get("targeted_activity_unknown")
+                .and_then(Value::as_array)
+                .is_some_and(|matches| !matches.is_empty())
+    });
+    if yield_group_activity_unknown {
+        return EvidenceState::PartialCapped;
+    }
+
+    let api_complete = response
+        .get("certainty")
+        .and_then(Value::as_object)
+        .is_some_and(|certainty| {
+            [
+                "can_prove_requested_ad_unit_flags",
+                "can_prove_private_auction_absence_or_presence",
+                "can_prove_private_deal_absence_or_presence",
+                "can_prove_yield_group_targeting",
+            ]
+            .into_iter()
+            .all(|field| certainty.get(field).and_then(Value::as_bool) == Some(true))
+        });
+    if api_complete {
+        EvidenceState::ManualUiProofRequired
+    } else {
+        EvidenceState::PartialCapped
+    }
+}
+
+fn exact_target_row(row: &Value, network_code: &str) -> bool {
+    let Some(ad_unit_id) = row.get("ad_unit_id").and_then(Value::as_str) else {
+        return false;
+    };
+    let Some(resource_name) = row.get("resource_name").and_then(Value::as_str) else {
+        return false;
+    };
+    row.get("proof_state").and_then(Value::as_str) == Some("resolved_exact")
+        && exact_ad_unit_id_from_resource_name(network_code, resource_name).as_deref()
+            == Some(ad_unit_id)
+}
+
+fn blocked_evidence_state(response: &Value) -> EvidenceState {
+    if contains_permission_block(response) {
+        EvidenceState::BlockedPermission
+    } else {
+        EvidenceState::BlockedRead
+    }
+}
+
+fn contains_permission_block(value: &Value) -> bool {
+    match value {
+        Value::Object(object) => {
+            (object.get("proof_state").and_then(Value::as_str) == Some("blocked")
+                && object.get("block_class").and_then(Value::as_str) == Some("permission"))
+                || object.values().any(contains_permission_block)
+        }
+        Value::Array(values) => values.iter().any(contains_permission_block),
+        _ => false,
+    }
+}
+
+pub(crate) fn guarded_success(
     data: Value,
     meta: Value,
     started: Instant,
 ) -> Result<CallToolResult, &'static str> {
     let envelope = contract::success_envelope_with_meta(data, meta, started);
+    guard_envelope(envelope)
+}
+
+pub(crate) fn guard_envelope(envelope: Value) -> Result<CallToolResult, &'static str> {
     let envelope_bytes = serde_json::to_vec(&envelope)
         .map_err(|_| "tool result could not be serialized for its Contract V1 envelope guard")?;
     if envelope_bytes.len() > MAX_CONTRACT_ENVELOPE_BYTES {
@@ -137,41 +325,26 @@ fn guarded_success(
     Ok(result)
 }
 
-fn valid_compact_projection(value: &Value) -> bool {
-    let truncated = value
-        .pointer("/result_projection/truncated")
-        .and_then(Value::as_bool)
-        == Some(true);
-    let binding_claim = value
-        .pointer("/result_projection/receipt_binds_returned_projection")
-        .and_then(Value::as_bool);
-    let fingerprint = value.get("result_fingerprint").and_then(Value::as_str);
-    let receipt = value
-        .get("evidence_receipt_template")
-        .and_then(Value::as_object);
-    let (Some(binding_claim), Some(fingerprint), Some(receipt)) =
-        (binding_claim, fingerprint, receipt)
-    else {
-        return false;
-    };
-    if !truncated || !valid_result_hash(fingerprint) {
-        return false;
+pub(crate) fn validated_receipt_binding(value: &Value) -> Option<bool> {
+    let fingerprint = value.get("result_fingerprint")?.as_str()?;
+    if !valid_result_hash(fingerprint) {
+        return None;
     }
-
     let mut fingerprint_input = value.clone();
-    let Some(object) = fingerprint_input.as_object_mut() else {
-        return false;
-    };
+    let object = fingerprint_input.as_object_mut()?;
     object.remove("result_fingerprint");
     object.remove("evidence_receipt_template");
     if stable_fingerprint(&fingerprint_input.to_string()) != fingerprint {
-        return false;
+        return None;
     }
 
-    match (binding_claim, receipt.get("result_hash")) {
-        (true, Some(Value::String(receipt_hash))) => receipt_hash == fingerprint,
-        (false, None) => true,
-        _ => false,
+    let receipt = value.get("evidence_receipt_template")?.as_object()?;
+    match receipt.get("result_hash") {
+        Some(Value::String(receipt_hash)) if receipt_hash == fingerprint => Some(true),
+        None if receipt.get("state").and_then(Value::as_str) == Some("not_generated") => {
+            Some(false)
+        }
+        _ => None,
     }
 }
 
@@ -250,28 +423,15 @@ mod tests {
 
     use super::{
         EVIDENCE_PRODUCER_CONTRACT_VERSION, EvidenceSource, EvidenceState,
-        MAX_CONTRACT_ENVELOPE_BYTES, MAX_RMCP_TRANSPORT_BYTES, evidence_receipt_template,
-        success_with_wire_guard,
+        MAX_CONTRACT_ENVELOPE_BYTES, MAX_RMCP_TRANSPORT_BYTES, dependency_evidence_state,
+        evidence_receipt_target_ids, evidence_receipt_template, exchange_evidence_state,
+        guarded_success, validated_receipt_binding,
     };
 
-    fn render_guard(data: serde_json::Value, compact: Option<serde_json::Value>) -> String {
-        let result = success_with_wire_guard(
-            data,
-            compact,
-            json!({"mutation_performed":false}),
-            Instant::now(),
-            "probe_result",
-        );
-        let serialized = serde_json::to_vec(&result).expect("serialize guarded result");
-        assert!(serialized.len() < MAX_RMCP_TRANSPORT_BYTES);
-        String::from_utf8(serialized).expect("UTF-8 result")
-    }
-
-    fn compact_projection(mut data: serde_json::Value, binds_receipt: bool) -> serde_json::Value {
-        data["result_projection"] = json!({
-            "truncated": true,
-            "receipt_binds_returned_projection": binds_receipt,
-        });
+    fn finalized_value(
+        mut data: serde_json::Value,
+        binds_receipt: bool,
+    ) -> serde_json::Value {
         let fingerprint = stable_fingerprint(&data.to_string());
         data["result_fingerprint"] = json!(fingerprint.clone());
         data["evidence_receipt_template"] = if binds_receipt {
@@ -330,6 +490,69 @@ mod tests {
     }
 
     #[test]
+    fn shared_receipt_scope_requires_exact_canonical_targets() {
+        let response = json!({
+            "ad_units": [
+                {
+                    "ad_unit_id": "200",
+                    "resource_name": "networks/1234567/adUnits/200",
+                    "proof_state": "resolved_exact"
+                },
+                {
+                    "ad_unit_id": "100",
+                    "resource_name": "networks/1234567/adUnits/100",
+                    "proof_state": "resolved_exact"
+                }
+            ],
+            "target_resolution_issues": []
+        });
+        assert_eq!(
+            evidence_receipt_target_ids(&response, "1234567"),
+            Some(vec!["100".to_string(), "200".to_string()])
+        );
+
+        let mut inexact = response.clone();
+        inexact["ad_units"][0]["resource_name"] = json!("networks/1234567/adUnits/0200");
+        assert!(evidence_receipt_target_ids(&inexact, "1234567").is_none());
+        assert!(evidence_receipt_target_ids(&response, "01234567").is_none());
+
+        let mut unresolved = response;
+        unresolved["target_resolution_issues"] = json!(["ambiguous target"]);
+        assert!(evidence_receipt_target_ids(&unresolved, "1234567").is_none());
+    }
+
+    #[test]
+    fn shared_evidence_state_preserves_block_and_completeness_policy() {
+        assert_eq!(
+            dependency_evidence_state("dependencies_found", &json!({})),
+            EvidenceState::CompleteBlocked
+        );
+        assert_eq!(
+            dependency_evidence_state(
+                "blocked",
+                &json!({"line_items":{"proof_state":"blocked","block_class":"permission"}})
+            ),
+            EvidenceState::BlockedPermission
+        );
+        assert_eq!(
+            exchange_evidence_state(&json!({
+                "ad_units": [],
+                "private_auctions": {"proof_state": "complete_empty"},
+                "private_auction_deals": {"proof_state": "complete_empty"},
+                "yield_groups": {"proof_state": "complete", "decision": "no_target_matches"},
+                "rest_discovery": {"proof_state": "metadata_read"},
+                "certainty": {
+                    "can_prove_requested_ad_unit_flags": true,
+                    "can_prove_private_auction_absence_or_presence": true,
+                    "can_prove_private_deal_absence_or_presence": true,
+                    "can_prove_yield_group_targeting": true
+                }
+            })),
+            EvidenceState::ManualUiProofRequired
+        );
+    }
+
+    #[test]
     fn wire_guard_rejects_oversized_results() {
         for (data, expected) in [
             (
@@ -341,61 +564,46 @@ mod tests {
                 "20 KiB RMCP transport cap",
             ),
         ] {
-            let rendered = render_guard(data, None);
-            assert!(rendered.contains("\"ok\":false"));
-            assert!(rendered.contains("result_contract_error"));
-            assert!(rendered.contains(expected));
+            let failure = guarded_success(
+                data,
+                json!({"mutation_performed":false}),
+                Instant::now(),
+            )
+            .expect_err("oversized result must fail its wire guard");
+            assert!(failure.contains(expected));
         }
     }
 
     #[test]
-    fn wire_guard_uses_bounded_compact_fallback() {
-        let bounded = render_guard(
+    fn wire_guard_accepts_bounded_results_and_validates_receipt_bindings() {
+        let bounded = guarded_success(
             json!({"network_code":"1234567","ad_units":[{"ad_unit_id":"200"}]}),
-            None,
+            json!({"mutation_performed":false}),
+            Instant::now(),
+        )
+        .expect("bounded result");
+        assert!(
+            serde_json::to_vec(&bounded)
+                .expect("serialize bounded result")
+                .len()
+                < MAX_RMCP_TRANSPORT_BYTES
         );
-        assert!(bounded.contains("\"ok\":true"));
 
-        let rendered = render_guard(
-            json!({"optional_raw_output":"x".repeat(MAX_CONTRACT_ENVELOPE_BYTES)}),
-            Some(compact_projection(json!({}), false)),
-        );
-        assert!(rendered.contains("\"ok\":true"));
-        assert!(rendered.contains("\"truncated\":true"));
+        let generated = finalized_value(json!({"decision":"clear"}), true);
+        assert_eq!(validated_receipt_binding(&generated), Some(true));
+        let not_generated = finalized_value(json!({"decision":"partial"}), false);
+        assert_eq!(validated_receipt_binding(&not_generated), Some(false));
 
-        let rejected = render_guard(
-            json!({"optional_raw_output":"x".repeat(MAX_CONTRACT_ENVELOPE_BYTES)}),
-            Some(json!({"result_projection":{"truncated":true}})),
-        );
-        assert!(rejected.contains("result_contract_error"));
-        assert!(rejected.contains("compact projection failed its required"));
-
-        let mut mismatched_receipt = compact_projection(json!({"decision":"clear"}), true);
+        let mut mismatched_receipt = generated.clone();
         mismatched_receipt["evidence_receipt_template"]["result_hash"] = json!("fedcba9876543210");
-        let rejected = render_guard(
-            json!({"optional_raw_output":"x".repeat(MAX_CONTRACT_ENVELOPE_BYTES)}),
-            Some(mismatched_receipt),
-        );
-        assert!(rejected.contains("result_contract_error"));
+        assert_eq!(validated_receipt_binding(&mismatched_receipt), None);
 
-        for forged in [
-            json!({
-                "result_fingerprint":"0123456789abcdef",
-                "evidence_receipt_template":{},
-                "result_projection":{
-                    "truncated":true,
-                    "receipt_binds_returned_projection":true
-                }
-            }),
-            compact_projection(json!({"decision":"clear"}), true),
-        ] {
-            let mut forged = forged;
-            forged["decision"] = json!("changed_after_fingerprinting");
-            let rejected = render_guard(
-                json!({"optional_raw_output":"x".repeat(MAX_CONTRACT_ENVELOPE_BYTES)}),
-                Some(forged),
-            );
-            assert!(rejected.contains("result_contract_error"));
-        }
+        let mut false_binding_without_state = not_generated;
+        false_binding_without_state["evidence_receipt_template"] = json!({});
+        assert_eq!(validated_receipt_binding(&false_binding_without_state), None);
+
+        let mut changed_after_fingerprinting = generated;
+        changed_after_fingerprinting["decision"] = json!("changed_after_fingerprinting");
+        assert_eq!(validated_receipt_binding(&changed_after_fingerprinting), None);
     }
 }
