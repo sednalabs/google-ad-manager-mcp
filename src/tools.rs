@@ -1118,15 +1118,8 @@ impl AdManagerServer {
                 Err(err) => return Ok(contract::error(err, started)),
             };
             let summary = summarize_dependency_ad_unit_code(&network_code, code, &payload);
-            if summary.get("proof_state").and_then(Value::as_str) != Some("resolved_exact") {
-                target_resolution_issues
-                    .push(format!("ad unit code {code} did not resolve exactly"));
-            } else if summary.get("ancestor_identity_complete").and_then(Value::as_bool)
-                == Some(false)
-            {
-                target_resolution_issues.push(format!(
-                    "ad unit code {code} returned malformed or foreign ancestor identities"
-                ));
+            if let Some(issue) = dependency_target_resolution_issue(code, &summary) {
+                target_resolution_issues.push(issue);
             }
             if let Some(target) = dependency_target_from_ad_unit_summary(&summary, &network_code) {
                 targets_by_id
@@ -2675,8 +2668,14 @@ fn dependency_target_from_ad_unit_summary(
         .filter_map(|value| exact_ad_unit_id_from_candidate(network_code, value))
         .collect::<BTreeSet<_>>();
     let mut proof_notes = Vec::new();
-    if summary.get("ancestor_identity_complete").and_then(Value::as_bool) == Some(false) {
-        proof_notes.push("ancestor identities were malformed or outside the requested network".to_string());
+    if summary
+        .get("ancestor_identity_complete")
+        .and_then(Value::as_bool)
+        == Some(false)
+    {
+        proof_notes.push(
+            "ancestor identities were malformed or outside the requested network".to_string(),
+        );
     }
     Some(DependencyProbeTarget {
         ad_unit_id: ad_unit_id.to_string(),
@@ -2689,6 +2688,22 @@ fn dependency_target_from_ad_unit_summary(
         proof_state: "resolved_exact",
         proof_notes,
     })
+}
+
+fn dependency_target_resolution_issue(code: &str, summary: &Value) -> Option<String> {
+    if summary.get("proof_state").and_then(Value::as_str) != Some("resolved_exact") {
+        Some(format!("ad unit code {code} did not resolve exactly"))
+    } else if summary
+        .get("ancestor_identity_complete")
+        .and_then(Value::as_bool)
+        == Some(false)
+    {
+        Some(format!(
+            "ad unit code {code} returned malformed or foreign ancestor identities"
+        ))
+    } else {
+        None
+    }
 }
 
 fn summarize_probe_ad_unit(network_code: &str, code: &str, payload: &Value) -> Value {
@@ -2806,25 +2821,24 @@ fn collect_network_bound_ad_unit_ids(
             complete
         }
         Value::Object(object) => {
+            let mut candidate_ids = BTreeSet::new();
             let mut complete = true;
             let mut recognized = false;
-            for key in ["adUnitId", "adUnit", "parentAdUnit"] {
+            for key in ["adUnitId", "adUnit", "name", "parentAdUnit", "id"] {
                 if let Some(value) = object.get(key) {
                     recognized = true;
-                    complete &= collect_network_bound_ad_unit_ids(value, network_code, ids);
+                    complete &= collect_network_bound_ad_unit_ids(
+                        value,
+                        network_code,
+                        &mut candidate_ids,
+                    );
                 }
             }
-            if !recognized {
-                for key in ["name", "id"] {
-                    if let Some(value) = object.get(key) {
-                        recognized = true;
-                        complete &=
-                            collect_network_bound_ad_unit_ids(value, network_code, ids);
-                        break;
-                    }
-                }
+            let valid = recognized && complete && candidate_ids.len() == 1;
+            if valid {
+                ids.extend(candidate_ids);
             }
-            recognized && complete
+            valid
         }
         _ => false,
     }
@@ -3004,10 +3018,7 @@ fn summarize_dependency_placements(
     })
 }
 
-fn placement_member_ad_unit_ids(
-    row: &Value,
-    network_code: &str,
-) -> (BTreeSet<String>, bool, bool) {
+fn placement_member_ad_unit_ids(row: &Value, network_code: &str) -> (BTreeSet<String>, bool, bool) {
     let mut ids = BTreeSet::new();
     let mut membership_shape_seen = false;
     let mut identity_complete = true;
@@ -7120,9 +7131,24 @@ mod tests {
         assert_eq!(exchange["proof_complete"], false);
         assert_eq!(exchange["decision"], "partial_api_proof");
         assert_eq!(exchange["ancestor_ad_unit_ids"], json!([]));
+        for parent in [
+            json!({"adUnitId":"999","name":"networks/1015422/adUnits/200"}),
+            json!({"adUnitId":"200","adUnit":"networks/7654321/adUnits/999"}),
+        ] {
+            let compound = json!({"adUnits":[{
+                "name":"networks/1015422/adUnits/200",
+                "adUnitCode":"Section_Page_LS",
+                "parentPath":[parent],
+                "appliedAdsenseEnabled":false,
+                "effectiveAdsenseEnabled":false
+            }]});
+            let summary = summarize_probe_ad_unit("1015422", "Section_Page_LS", &compound);
+            assert_eq!(summary["ancestor_identity_complete"], false);
+            assert_eq!(summary["ancestor_ad_unit_ids"], json!([]));
+            assert_eq!(summary["decision"], "partial_api_proof");
+        }
 
-        let dependency =
-            summarize_dependency_ad_unit_code("1015422", "Section_Page_LS", &ad_units);
+        let dependency = summarize_dependency_ad_unit_code("1015422", "Section_Page_LS", &ad_units);
         assert_eq!(dependency["proof_state"], "resolved_exact");
         assert_eq!(dependency["ancestor_identity_complete"], false);
         let target = dependency_target_from_ad_unit_summary(&dependency, "1015422")
@@ -7149,15 +7175,91 @@ mod tests {
                     {"adUnit":"networks/7654321/adUnits/999"},
                     {"adUnit":"networks/1015422/adUnits/200"}
                 ]
+            },
+            {
+                "name":"networks/1015422/placements/304",
+                "adUnitAssignments":[
+                    {"adUnitId":"999","name":"networks/1015422/adUnits/200"}
+                ]
+            },
+            {
+                "name":"networks/1015422/placements/305",
+                "adUnitAssignments":[
+                    {"adUnitId":"200","adUnit":"networks/7654321/adUnits/999"}
+                ]
             }
         ]});
         let summary = summarize_dependency_placements(&placements, "1015422", 100, &[target]);
         assert_eq!(summary["proof_state"], "sample_or_shape_incomplete");
-        assert_eq!(summary["membership_shape_unknown_count"], 4);
+        assert_eq!(summary["membership_shape_unknown_count"], 6);
         assert_eq!(summary["target_placement_match_count"], 1);
         assert_eq!(
             summary["target_placement_ids_by_ad_unit_id"]["200"],
             json!(["303"])
+        );
+
+        let issue = dependency_target_resolution_issue("Section_Page_LS", &dependency)
+            .expect("invalid ancestor identities must remain a resolution issue");
+        let response = finalize_dependency_probe_response(
+            dependency_probe_response_json(
+                "1015422",
+                vec![dependency],
+                summary,
+                json!({"proof_state":"complete","dependency_match_count":0}),
+                vec![issue],
+                json!({"target_resolution_incomplete":true}),
+                "dependencies_found",
+            ),
+            "1015422",
+            "dependencies_found",
+        )
+        .expect("partial dependency producer finalization");
+        assert_eq!(response["proof_flags"]["target_resolution_incomplete"], true);
+        assert_eq!(
+            response["evidence_receipt_template"]["state"],
+            "not_generated"
+        );
+        assert!(
+            response["evidence_receipt_template"]
+                .get("result_hash")
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn dependency_probe_handler_finalizes_a_provider_blocked_normal_path() {
+        let settings = crate::Settings {
+            service_account_json_path: Some(
+                "/definitely-missing/gam-mcp-test-service-account.json".to_string(),
+            ),
+            ..crate::Settings::default()
+        };
+        let server = AdManagerServer::new(settings).expect("server");
+        let result = server
+            .gam_ad_unit_dependency_probe(Parameters(AdUnitDependencyProbeArgs {
+                network_code: "001015422".to_string(),
+                ad_unit_codes: Vec::new(),
+                ad_unit_ids: vec!["200".to_string()],
+                api_version: None,
+                line_item_page_size: None,
+                max_line_items: None,
+                placement_page_size: None,
+                include_line_item_xml: false,
+            }))
+            .await
+            .expect("handler result");
+        let response = result.structured_content.expect("structured response");
+        assert_eq!(response["ok"], true);
+        assert_eq!(response["data"]["network_code"], "1015422");
+        assert_eq!(response["data"]["dependency_decision"], "blocked");
+        assert!(
+            response["data"]["result_fingerprint"]
+                .as_str()
+                .is_some_and(|value| value.len() == 16)
+        );
+        assert_eq!(
+            response["data"]["evidence_receipt_template"]["state"],
+            "not_generated"
         );
     }
 
@@ -7395,8 +7497,14 @@ mod tests {
                 .is_some_and(|value| value.len() == 16)
         );
         assert_eq!(response["mutation_performed"], false);
-        assert_eq!(response["evidence_receipt_template"]["source"], "dependency_probe");
-        assert_eq!(response["evidence_receipt_template"]["state"], "complete_blocked");
+        assert_eq!(
+            response["evidence_receipt_template"]["source"],
+            "dependency_probe"
+        );
+        assert_eq!(
+            response["evidence_receipt_template"]["state"],
+            "complete_blocked"
+        );
         assert_eq!(
             response["evidence_receipt_template"]["result_hash"],
             response["result_fingerprint"]
@@ -7477,6 +7585,37 @@ mod tests {
     }
 
     #[test]
+    fn evidence_receipt_target_scope_enforces_exact_one_to_ten_boundary() {
+        let exact_rows = |count: u64| {
+            (1..=count)
+                .map(|id| {
+                    json!({
+                        "ad_unit_id":id.to_string(),
+                        "resource_name":format!("networks/1234567/adUnits/{id}"),
+                        "proof_state":"resolved_exact"
+                    })
+                })
+                .collect::<Vec<_>>()
+        };
+        let ten = json!({"ad_units":exact_rows(10),"target_resolution_issues":[]});
+        assert_eq!(
+            evidence_receipt_target_ids(&ten, "1234567")
+                .expect("ten exact targets")
+                .len(),
+            10
+        );
+        for response in [
+            json!({"ad_units":[],"target_resolution_issues":[]}),
+            json!({"ad_units":exact_rows(11),"target_resolution_issues":[]}),
+            json!({"ad_units":[exact_rows(1)[0].clone(),exact_rows(1)[0].clone()],"target_resolution_issues":[]}),
+            json!({"ad_units":exact_rows(1),"target_resolution_issues":["incomplete"]}),
+            json!({"ad_units":[{"ad_unit_id":"1","proof_state":"id_only"}],"target_resolution_issues":[]}),
+        ] {
+            assert!(evidence_receipt_target_ids(&response, "1234567").is_none());
+        }
+    }
+
+    #[test]
     fn evidence_state_classification_preserves_blocked_and_manual_ui_states() {
         let complete_exchange = json!({
             "ad_units": [{"decision":"clear_on_exposed_flags"}],
@@ -7552,11 +7691,7 @@ mod tests {
             "permission"
         );
         assert_eq!(
-            soap_probe_block_class(
-                500,
-                Some("AuthenticationError.CONNECTION_ERROR"),
-                ""
-            ),
+            soap_probe_block_class(500, Some("AuthenticationError.CONNECTION_ERROR"), ""),
             "upstream"
         );
         assert_eq!(
