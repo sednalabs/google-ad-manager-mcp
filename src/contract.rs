@@ -19,16 +19,20 @@ pub fn success(data: Value, started: Instant) -> CallToolResult {
 }
 
 pub fn success_with_meta(data: Value, meta: Value, started: Instant) -> CallToolResult {
+    CallToolResult::structured(success_envelope_with_meta(data, meta, started))
+}
+
+pub(crate) fn success_envelope_with_meta(data: Value, meta: Value, started: Instant) -> Value {
     let mut meta_map = match meta {
         Value::Object(map) => map,
         _ => Map::new(),
     };
     meta_map.insert("elapsed_ms".to_string(), json!(elapsed_ms(started)));
-    CallToolResult::structured(json!({
+    json!({
         "ok": true,
         "data": data,
         "meta": meta_map,
-    }))
+    })
 }
 
 pub fn error(err: AdManagerError, started: Instant) -> CallToolResult {
@@ -40,6 +44,29 @@ pub fn error(err: AdManagerError, started: Instant) -> CallToolResult {
             "message": redact_secret_text(&err.to_string()),
             "category": err.category(),
             "hint": err.hint(),
+        },
+        "meta": {
+            "elapsed_ms": elapsed_ms(started),
+        }
+    }))
+}
+
+pub(crate) fn result_contract_error(
+    field: &'static str,
+    message: impl AsRef<str>,
+    started: Instant,
+) -> CallToolResult {
+    CallToolResult::structured(json!({
+        "ok": false,
+        "error": {
+            "code": "result_contract_error",
+            "reason": "result_contract_failed",
+            "message": redact_secret_text(&format!(
+                "result contract failed for {field}: {}",
+                message.as_ref()
+            )),
+            "category": "safety",
+            "hint": "Narrow the target or page limits and omit optional raw output; report an adapter defect if a bounded projection still fails.",
         },
         "meta": {
             "elapsed_ms": elapsed_ms(started),
