@@ -25,7 +25,9 @@ pub mod auth_ux;
 mod client;
 mod config;
 mod contract;
+mod evidence;
 mod error;
+mod fingerprint;
 mod tool_surface;
 mod tools;
 
