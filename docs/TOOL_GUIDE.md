@@ -91,7 +91,11 @@ surface. Its top-level decision returns one of:
 `protections`, `inventory_rules`, and `unified_pricing_rules` are reported as
 unsupported or unintegrated surfaces unless a future API/read implementation
 adds authoritative coverage. Do not interpret their absence from the probe as
-proof that those settings are clean in the GAM UI.
+proof that those settings are clean in the GAM UI. The response includes a
+stable `result_fingerprint`. For one to ten exact targets resolved to resource
+names in the requested network, it also includes a canonical receipt template
+with `source_version=gam-evidence-producer-v1`. Complete API proof remains
+`manual_ui_proof_required` until the unsupported GAM UI surfaces are reviewed.
 
 ## `gam_ad_unit_dependency_probe`
 
@@ -119,6 +123,16 @@ approval. Any capped line-item read, truncated SOAP response, id-only target,
 unknown placement membership shape, or blocked SOAP scope remains incomplete
 evidence. Do not archive, deactivate, or retarget inventory solely because this
 tool returns `no_dependencies_observed` or `incomplete_no_dependencies_observed`.
+The response includes a stable `result_fingerprint` and emits the same
+versioned receipt template only for one to ten fully resolved, exact,
+network-bound target rows. Unresolved, ambiguous, duplicate, id-only, or
+cross-network target scopes receive an explicit `not_generated` marker instead.
+
+Both proof tools enforce 8 KiB model-visible and 20 KiB full RMCP transport
+bounds. An oversized full proof drops known optional raw/sample detail,
+recomputes its fingerprint, and returns a canonical receipt bound to that exact
+projection. Decision qualifiers, counts, and completeness flags remain intact.
+If the projection still exceeds either bound, the tool fails closed.
 
 ## `gam_report_run`
 

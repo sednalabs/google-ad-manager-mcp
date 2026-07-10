@@ -26,10 +26,7 @@ mod client;
 mod config;
 mod contract;
 mod error;
-// Neutral producer contracts land before their existing-probe integrations.
-#[allow(dead_code)]
 mod evidence;
-#[allow(dead_code)]
 mod fingerprint;
 mod tool_surface;
 mod tools;

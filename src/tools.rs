@@ -24,6 +24,10 @@ use crate::config::{
     GCLOUD_ADC_REQUIRED_SCOPE, server_adc_credentials_path, server_cloudsdk_config_dir,
 };
 use crate::contract;
+use crate::evidence::{
+    EvidenceSource, EvidenceState, evidence_receipt_template, success_with_wire_guard,
+};
+use crate::fingerprint::stable_fingerprint;
 use crate::{AdManagerError, AdManagerServer, MANAGE_SCOPE, McpError};
 use mcp_toolkit_core::guarded_action::{
     GuardedActionApply, GuardedActionError, GuardedActionNoMutationProof, GuardedActionPlanSeed,
@@ -859,7 +863,7 @@ impl AdManagerServer {
                 Ok(value) => value,
                 Err(err) => return Ok(contract::error(err, started)),
             };
-            let summary = summarize_probe_ad_unit(code, &payload);
+            let summary = summarize_probe_ad_unit(&args.network_code, code, &payload);
             if summary
                 .get("decision")
                 .and_then(Value::as_str)
@@ -998,30 +1002,44 @@ impl AdManagerServer {
             "api_exposed_surfaces_clear"
         };
 
-        Ok(contract::success_with_meta(
-            json!({
-                "network_code": args.network_code,
-                "overall_decision": overall_decision,
-                "ad_units": ad_unit_summaries,
-                "private_auctions": private_auctions,
-                "private_auction_deals": private_auction_deals,
-                "yield_groups": yield_groups,
-                "rest_discovery": rest_discovery,
-                "unsupported_or_unintegrated_surfaces": unsupported_surfaces,
-                "attention_reasons": attention_reasons,
-                "partial_reasons": partial_reasons,
-                "certainty": {
-                    "can_prove_requested_ad_unit_flags": ad_unit_summaries.iter().all(|summary| summary.get("proof_complete").and_then(Value::as_bool).unwrap_or(false)),
-                    "can_prove_private_auction_absence_or_presence": private_auctions.get("proof_state").and_then(Value::as_str).is_some_and(|state| state == "complete_empty" || state == "complete_present"),
-                    "can_prove_private_deal_absence_or_presence": private_auction_deals.get("proof_state").and_then(Value::as_str).is_some_and(|state| state == "complete_empty" || state == "complete_present"),
-                    "can_prove_yield_group_targeting": yield_groups.get("proof_state").and_then(Value::as_str).is_some_and(|state| state == "complete"),
-                    "cannot_prove_via_current_api": [
-                        "protections",
-                        "inventory_rules",
-                        "unified_pricing_rules"
-                    ]
-                }
-            }),
+        let mut response = json!({
+            "network_code": args.network_code,
+            "overall_decision": overall_decision,
+            "ad_units": ad_unit_summaries,
+            "private_auctions": private_auctions,
+            "private_auction_deals": private_auction_deals,
+            "yield_groups": yield_groups,
+            "rest_discovery": rest_discovery,
+            "unsupported_or_unintegrated_surfaces": unsupported_surfaces,
+            "attention_reasons": attention_reasons,
+            "partial_reasons": partial_reasons,
+            "certainty": {
+                "can_prove_requested_ad_unit_flags": ad_unit_summaries.iter().all(|summary| summary.get("proof_complete").and_then(Value::as_bool).unwrap_or(false)),
+                "can_prove_private_auction_absence_or_presence": private_auctions.get("proof_state").and_then(Value::as_str).is_some_and(|state| state == "complete_empty" || state == "complete_present"),
+                "can_prove_private_deal_absence_or_presence": private_auction_deals.get("proof_state").and_then(Value::as_str).is_some_and(|state| state == "complete_empty" || state == "complete_present"),
+                "can_prove_yield_group_targeting": yield_groups.get("proof_state").and_then(Value::as_str).is_some_and(|state| state == "complete"),
+                "cannot_prove_via_current_api": [
+                    "protections",
+                    "inventory_rules",
+                    "unified_pricing_rules"
+                ]
+            }
+        });
+        attach_result_fingerprint(&mut response);
+        let receipt_state = exchange_evidence_state(&response);
+        if let Err(err) = attach_evidence_receipt_template(
+            &mut response,
+            &args.network_code,
+            EvidenceSource::ExchangeProtectionReview,
+            receipt_state,
+        ) {
+            return Ok(contract::error(err, started));
+        }
+        let compact_response = compact_probe_response(&response);
+
+        Ok(success_with_wire_guard(
+            response,
+            Some(compact_response),
             json!({
                 "mutation_performed": false,
                 "upstream_called": true,
@@ -1031,6 +1049,7 @@ impl AdManagerServer {
                 "policy": provider_safety_contract_json(),
             }),
             started,
+            "exchange_protection_result",
         ))
     }
 
@@ -1170,7 +1189,7 @@ impl AdManagerServer {
             &placement_summary,
             &line_item_summary,
         );
-        let response = dependency_probe_response_json(
+        let mut response = dependency_probe_response_json(
             &args.network_code,
             target_rows,
             placement_summary,
@@ -1179,9 +1198,20 @@ impl AdManagerServer {
             proof_flags,
             dependency_decision,
         );
+        let receipt_state = dependency_evidence_state(dependency_decision, &response);
+        if let Err(err) = attach_evidence_receipt_template(
+            &mut response,
+            &args.network_code,
+            EvidenceSource::DependencyProbe,
+            receipt_state,
+        ) {
+            return Ok(contract::error(err, started));
+        }
+        let compact_response = compact_probe_response(&response);
 
-        Ok(contract::success_with_meta(
+        Ok(success_with_wire_guard(
             response,
+            Some(compact_response),
             json!({
                 "mutation_performed": false,
                 "upstream_called": true,
@@ -1193,6 +1223,7 @@ impl AdManagerServer {
                 "policy": provider_safety_contract_json(),
             }),
             started,
+            "dependency_probe_result",
         ))
     }
 
@@ -2625,7 +2656,7 @@ fn dependency_target_from_ad_unit_summary(summary: &Value) -> Option<DependencyP
     })
 }
 
-fn summarize_probe_ad_unit(code: &str, payload: &Value) -> Value {
+fn summarize_probe_ad_unit(network_code: &str, code: &str, payload: &Value) -> Value {
     let rows = catalog_rows(payload, CatalogCollection::AdUnits);
     let matches = rows
         .into_iter()
@@ -2639,6 +2670,7 @@ fn summarize_probe_ad_unit(code: &str, payload: &Value) -> Value {
         return json!({
             "ad_unit_code": code,
             "decision": "attention_required",
+            "proof_state": "missing",
             "proof_complete": false,
             "reason": "exact ad-unit code was not returned by GAM",
             "matches": 0,
@@ -2648,6 +2680,7 @@ fn summarize_probe_ad_unit(code: &str, payload: &Value) -> Value {
         return json!({
             "ad_unit_code": code,
             "decision": "attention_required",
+            "proof_state": "ambiguous",
             "proof_complete": false,
             "reason": "GAM returned multiple rows for the exact ad-unit code",
             "matches": matches.len(),
@@ -2656,10 +2689,13 @@ fn summarize_probe_ad_unit(code: &str, payload: &Value) -> Value {
     let row = matches[0];
     let resource_name = row.get("name").and_then(Value::as_str).unwrap_or_default();
     let ad_unit_id = resource_id_from_name(resource_name);
+    let expected_resource_name = format!("networks/{network_code}/adUnits/{ad_unit_id}");
+    let target_resolved_exact = !ad_unit_id.is_empty() && resource_name == expected_resource_name;
     let ancestor_ad_unit_ids = ad_unit_ancestor_ids(row);
     let applied_adsense = row.get("appliedAdsenseEnabled").and_then(Value::as_bool);
     let effective_adsense = row.get("effectiveAdsenseEnabled").and_then(Value::as_bool);
-    let proof_complete = applied_adsense.is_some() && effective_adsense.is_some();
+    let proof_complete =
+        target_resolved_exact && applied_adsense.is_some() && effective_adsense.is_some();
     let decision = if applied_adsense == Some(true) || effective_adsense == Some(true) {
         "attention_required"
     } else if proof_complete {
@@ -2670,6 +2706,7 @@ fn summarize_probe_ad_unit(code: &str, payload: &Value) -> Value {
     json!({
         "ad_unit_code": code,
         "ad_unit_id": if ad_unit_id.is_empty() { Value::Null } else { Value::String(ad_unit_id) },
+        "proof_state": if target_resolved_exact { "resolved_exact" } else { "invalid_resource_name" },
         "ancestor_ad_unit_ids": ancestor_ad_unit_ids,
         "resource_name": resource_name,
         "display_name": row.get("displayName").cloned().unwrap_or(Value::Null),
@@ -2916,9 +2953,18 @@ fn apply_probe_collection_decision(
 }
 
 fn blocked_probe_surface(surface: &str, err: AdManagerError) -> Value {
+    let block_class = match &err {
+        AdManagerError::AuthBootstrap(_)
+        | AdManagerError::UpstreamApi {
+            status: 401 | 403, ..
+        }
+        | AdManagerError::WriteScopeRequired { .. } => "permission",
+        _ => "upstream",
+    };
     json!({
         "surface": surface,
         "proof_state": "blocked",
+        "block_class": block_class,
         "error": contract::redact_secret_text(&err.to_string()),
         "hint": err.hint(),
     })
@@ -2946,6 +2992,7 @@ async fn probe_yield_groups(
             "surface": "yield_groups",
             "decision": "blocked",
             "proof_state": "blocked",
+            "block_class": "permission",
             "reason": "YieldGroupService SOAP reads require the Google Ad Manager manage scope",
             "required_scope": MANAGE_SCOPE,
             "current_scope": server.client().scope(),
@@ -2965,6 +3012,7 @@ async fn probe_yield_groups(
             "surface": "yield_groups",
             "decision": "blocked",
             "proof_state": "blocked",
+            "block_class": soap_probe_block_class(applied.upstream_status),
             "upstream_status": applied.upstream_status,
             "request_id": applied.request_id,
             "response_time": applied.response_time,
@@ -3172,6 +3220,7 @@ async fn probe_ad_unit_line_item_dependencies(
             "surface": "line_items",
             "decision": "blocked",
             "proof_state": "blocked",
+            "block_class": "permission",
             "reason": "LineItemService SOAP reads require the Google Ad Manager manage scope",
             "required_scope": MANAGE_SCOPE,
             "current_scope": server.client().scope(),
@@ -3208,6 +3257,7 @@ async fn probe_ad_unit_line_item_dependencies(
                 "surface": "line_items",
                 "decision": "blocked",
                 "proof_state": "blocked",
+                "block_class": soap_probe_block_class(applied.upstream_status),
                 "upstream_status": applied.upstream_status,
                 "request_id": applied.request_id,
                 "response_time": applied.response_time,
@@ -3507,17 +3557,6 @@ fn dependency_probe_decision(
     placement_summary: &Value,
     line_item_summary: &Value,
 ) -> &'static str {
-    if line_item_summary
-        .get("proof_state")
-        .and_then(Value::as_str)
-        .is_some_and(|state| state == "blocked")
-        || placement_summary
-            .get("proof_state")
-            .and_then(Value::as_str)
-            .is_some_and(|state| state == "blocked")
-    {
-        return "blocked";
-    }
     let placement_dependencies = placement_summary
         .get("target_placement_match_count")
         .and_then(Value::as_u64)
@@ -3530,6 +3569,16 @@ fn dependency_probe_decision(
         > 0;
     if placement_dependencies || line_item_dependencies {
         "dependencies_found"
+    } else if line_item_summary
+        .get("proof_state")
+        .and_then(Value::as_str)
+        .is_some_and(|state| state == "blocked")
+        || placement_summary
+            .get("proof_state")
+            .and_then(Value::as_str)
+            .is_some_and(|state| state == "blocked")
+    {
+        "blocked"
     } else if !target_resolution_issues.is_empty() {
         "missing_or_ambiguous_targets"
     } else if dependency_proof_incomplete(placement_summary, line_item_summary) {
@@ -3548,7 +3597,7 @@ fn dependency_probe_response_json(
     proof_flags: Value,
     dependency_decision: &str,
 ) -> Value {
-    json!({
+    let mut response = json!({
         "network_code": network_code,
         "dependency_decision": dependency_decision,
         "ad_units": target_rows,
@@ -3561,7 +3610,225 @@ fn dependency_probe_response_json(
             "safe_to_archive_or_retire": false,
             "reason": "This read-only helper reports dependencies and proof gaps; archive, deactivate, or retarget decisions require a separate reviewed workflow."
         }
-    })
+    });
+    attach_result_fingerprint(&mut response);
+    response
+}
+
+fn attach_result_fingerprint(response: &mut Value) {
+    let fingerprint = stable_fingerprint(&response.to_string());
+    response
+        .as_object_mut()
+        .expect("probe response is an object")
+        .insert("result_fingerprint".to_string(), Value::String(fingerprint));
+}
+
+fn compact_probe_response(response: &Value) -> Value {
+    let mut compact = response.clone();
+    let object = compact.as_object_mut().expect("probe response is an object");
+    object.remove("result_fingerprint");
+    let original_receipt = object
+        .remove("evidence_receipt_template")
+        .unwrap_or(Value::Null);
+    let receipt_generated = original_receipt.get("result_hash").is_some();
+    let mut detail_omitted = false;
+    compact_probe_value(&mut compact, &mut detail_omitted);
+    compact["result_projection"] = json!({
+        "truncated": detail_omitted,
+        "omitted_detail_classes": ["optional_raw_output", "bounded_samples"],
+        "receipt_binds_returned_projection": receipt_generated,
+    });
+    attach_result_fingerprint(&mut compact);
+    let mut receipt = original_receipt;
+    if receipt_generated {
+        receipt["result_hash"] = compact["result_fingerprint"].clone();
+    }
+    compact["evidence_receipt_template"] = receipt;
+    compact
+}
+
+fn compact_probe_value(value: &mut Value, detail_omitted: &mut bool) {
+    match value {
+        Value::Object(object) => {
+            for field in [
+                "upstream_response_xml",
+                "dependency_matches_sample",
+                "target_placement_matches_sample",
+            ] {
+                *detail_omitted |= object.remove(field).is_some();
+            }
+            for value in object.values_mut() {
+                compact_probe_value(value, detail_omitted);
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                compact_probe_value(value, detail_omitted);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn attach_evidence_receipt_template(
+    response: &mut Value,
+    network_code: &str,
+    source: EvidenceSource,
+    state: EvidenceState,
+) -> Result<(), AdManagerError> {
+    let template = match evidence_receipt_target_ids(response, network_code) {
+        Some(target_ids) => {
+            let result_fingerprint = response
+                .get("result_fingerprint")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    AdManagerError::invalid(
+                        "result_hash",
+                        "probe response did not contain its producer fingerprint",
+                    )
+                })?;
+            evidence_receipt_template(network_code, source, state, result_fingerprint, target_ids)?
+        }
+        None => {
+            json!({
+                "state": "not_generated",
+                "reason": "evidence receipts require a canonical network, result fingerprint, and one to ten fully resolved exact ad-unit ids"
+            })
+        }
+    };
+    response
+        .as_object_mut()
+        .expect("probe response is an object")
+        .insert("evidence_receipt_template".to_string(), template);
+    Ok(())
+}
+
+fn evidence_receipt_target_ids(response: &Value, network_code: &str) -> Option<Vec<String>> {
+    if response
+        .get("target_resolution_issues")
+        .and_then(Value::as_array)
+        .is_some_and(|issues| !issues.is_empty())
+    {
+        return None;
+    }
+    let rows = response.get("ad_units")?.as_array()?;
+    if rows.is_empty()
+        || rows.len() > 10
+        || rows.iter().any(|row| !exact_target_row(row, network_code))
+    {
+        return None;
+    }
+    let target_ids = rows
+        .iter()
+        .filter_map(|row| row.get("ad_unit_id").and_then(Value::as_str))
+        .map(str::to_string)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    (target_ids.len() == rows.len()).then_some(target_ids)
+}
+
+fn exact_target_row(row: &Value, network_code: &str) -> bool {
+    let Some(ad_unit_id) = row.get("ad_unit_id").and_then(Value::as_str) else {
+        return false;
+    };
+    let expected_resource_name = format!("networks/{network_code}/adUnits/{ad_unit_id}");
+    row.get("proof_state").and_then(Value::as_str) == Some("resolved_exact")
+        && row.get("resource_name").and_then(Value::as_str) == Some(expected_resource_name.as_str())
+}
+
+fn dependency_evidence_state(decision: &str, response: &Value) -> EvidenceState {
+    match decision {
+        "dependencies_found" => EvidenceState::CompleteBlocked,
+        "no_dependencies_observed" => EvidenceState::CompleteClear,
+        "incomplete_no_dependencies_observed" | "missing_or_ambiguous_targets" => {
+            EvidenceState::PartialCapped
+        }
+        "blocked" => blocked_evidence_state(response),
+        _ => EvidenceState::NotRun,
+    }
+}
+
+fn exchange_evidence_state(response: &Value) -> EvidenceState {
+    let target_exposed = response
+        .get("ad_units")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .any(|row| row.get("decision").and_then(Value::as_str) == Some("attention_required"))
+        || response
+            .get("yield_groups")
+            .and_then(|value| value.get("decision"))
+            .and_then(Value::as_str)
+            == Some("targeted_exposed");
+    if target_exposed {
+        return EvidenceState::CompleteBlocked;
+    }
+
+    let blocked = [
+        "private_auctions",
+        "private_auction_deals",
+        "yield_groups",
+        "rest_discovery",
+    ]
+    .into_iter()
+    .any(|surface| {
+        response
+            .get(surface)
+            .and_then(|value| value.get("proof_state"))
+            .and_then(Value::as_str)
+            == Some("blocked")
+    });
+    if blocked {
+        return blocked_evidence_state(response);
+    }
+
+    let api_complete = response
+        .get("certainty")
+        .and_then(Value::as_object)
+        .is_some_and(|certainty| {
+            [
+                "can_prove_requested_ad_unit_flags",
+                "can_prove_private_auction_absence_or_presence",
+                "can_prove_private_deal_absence_or_presence",
+                "can_prove_yield_group_targeting",
+            ]
+            .into_iter()
+            .all(|field| certainty.get(field).and_then(Value::as_bool) == Some(true))
+        });
+    if api_complete {
+        EvidenceState::ManualUiProofRequired
+    } else {
+        EvidenceState::PartialCapped
+    }
+}
+
+fn blocked_evidence_state(response: &Value) -> EvidenceState {
+    if contains_permission_block(response) {
+        EvidenceState::BlockedPermission
+    } else {
+        EvidenceState::BlockedRead
+    }
+}
+
+fn contains_permission_block(value: &Value) -> bool {
+    match value {
+        Value::Object(object) => {
+            (object.get("proof_state").and_then(Value::as_str) == Some("blocked")
+                && object.get("block_class").and_then(Value::as_str) == Some("permission"))
+                || object.values().any(contains_permission_block)
+        }
+        Value::Array(values) => values.iter().any(contains_permission_block),
+        _ => false,
+    }
+}
+
+fn soap_probe_block_class(status: u16) -> &'static str {
+    if matches!(status, 401 | 403) {
+        "permission"
+    } else {
+        "upstream"
+    }
 }
 
 fn dependency_proof_incomplete(placement_summary: &Value, line_item_summary: &Value) -> bool {
@@ -5149,15 +5416,6 @@ fn guarded_soap_identifiers(
     Ok((plan_id, confirmation_token, fingerprint))
 }
 
-fn stable_fingerprint(input: &str) -> String {
-    let mut hash: u64 = 0xcbf29ce484222325;
-    for byte in input.as_bytes() {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    format!("{hash:016x}")
-}
-
 fn rest_write_plan_to_json(plan: &RestWritePlan) -> Value {
     json!({
         "resource": plan.resource.as_str(),
@@ -6690,7 +6948,7 @@ mod tests {
     #[test]
     fn dependency_probe_classifies_line_item_inventory_matches() {
         let target = dependency_target("200", &["100"], &["Section_Page_LS"]);
-        let placement_summary = json!({
+        let mut placement_summary = json!({
             "target_placement_ids_by_ad_unit_id": {
                 "200": ["300"]
             }
@@ -6824,6 +7082,11 @@ mod tests {
             dependency_probe_decision(&[], &placement_summary, &line_item_summary),
             "blocked"
         );
+        placement_summary["target_placement_match_count"] = json!(1);
+        assert_eq!(
+            dependency_probe_decision(&[], &placement_summary, &line_item_summary),
+            "dependencies_found"
+        );
     }
 
     #[test]
@@ -6872,6 +7135,11 @@ mod tests {
 
         assert_eq!(response["network_code"], "1015422");
         assert_eq!(response["dependency_decision"], "dependencies_found");
+        assert!(
+            response["result_fingerprint"]
+                .as_str()
+                .is_some_and(|value| value.len() == 16)
+        );
         assert_eq!(response["mutation_performed"], false);
         assert_eq!(
             response["cleanup_decision"]["safe_to_archive_or_retire"],
@@ -6883,6 +7151,154 @@ mod tests {
                 .get("target_placement_matches")
                 .is_none()
         );
+        let compact = compact_probe_response(&response);
+        assert_eq!(compact["dependency_decision"], "dependencies_found");
+        assert_eq!(compact["cleanup_decision"]["safe_to_archive_or_retire"], false);
+        assert_eq!(compact["proof_flags"], response["proof_flags"]);
+    }
+
+    #[test]
+    fn evidence_receipt_attachment_binds_exact_target_and_source() {
+        let mut response = json!({
+            "overall_decision": "partial_api_proof",
+            "attention_reasons": ["exposed_flag_requires_attention"],
+            "partial_reasons": ["manual_ui_review_required"],
+            "unsupported_or_unintegrated_surfaces": ["protections"],
+            "certainty": {"can_prove_requested_ad_unit_flags": false},
+            "result_fingerprint": "0123456789abcdef",
+            "ad_units": [{
+                "ad_unit_id": "200",
+                "resource_name": "networks/1234567/adUnits/200",
+                "proof_state": "resolved_exact",
+                "proof_complete": false
+            }]
+        });
+        attach_evidence_receipt_template(
+            &mut response,
+            "1234567",
+            EvidenceSource::ExchangeProtectionReview,
+            EvidenceState::PartialCapped,
+        )
+        .expect("receipt attachment");
+
+        let receipt = response["evidence_receipt_template"].clone();
+        assert_eq!(receipt["network_code"], "1234567");
+        assert_eq!(receipt["source"], "exchange_protection_review");
+        assert_eq!(receipt["state"], "partial_capped");
+        assert_eq!(receipt["target_ad_unit_ids"], json!(["200"]));
+        assert_eq!(receipt["result_hash"], "0123456789abcdef");
+        let full_fingerprint = response["result_fingerprint"].clone();
+        response["upstream_response_xml"] = json!("x".repeat(9_000));
+        let compact = compact_probe_response(&response);
+        assert_ne!(compact["result_fingerprint"], full_fingerprint);
+        assert!(compact.get("upstream_response_xml").is_none());
+        assert_eq!(compact["attention_reasons"], response["attention_reasons"]);
+        assert_eq!(
+            compact["unsupported_or_unintegrated_surfaces"],
+            response["unsupported_or_unintegrated_surfaces"]
+        );
+        assert_eq!(
+            compact["evidence_receipt_template"]["result_hash"],
+            compact["result_fingerprint"]
+        );
+        assert_eq!(
+            compact["evidence_receipt_template"]["target_ad_unit_ids"],
+            receipt["target_ad_unit_ids"]
+        );
+        assert_eq!(compact["result_projection"]["truncated"], true);
+        assert_eq!(
+            compact["result_projection"]["receipt_binds_returned_projection"],
+            true
+        );
+        let guarded = success_with_wire_guard(
+            response,
+            Some(compact.clone()),
+            json!({"mutation_performed":false}),
+            Instant::now(),
+            "probe_result",
+        );
+        let encoded = serde_json::to_string(&guarded).expect("serialize compact fallback");
+        assert!(encoded.contains(compact["result_fingerprint"].as_str().unwrap()));
+        assert!(!encoded.contains(&"x".repeat(9_000)));
+    }
+
+    #[test]
+    fn evidence_receipt_is_suppressed_for_unresolved_or_cross_network_targets() {
+        for ad_unit in [
+            json!({
+                "ad_unit_id": "200",
+                "resource_name": "networks/1234567/adUnits/200",
+                "proof_state": "ambiguous"
+            }),
+            json!({
+                "ad_unit_id": "200",
+                "resource_name": "networks/7654321/adUnits/200",
+                "proof_state": "resolved_exact"
+            }),
+        ] {
+            let mut response = json!({
+                "result_fingerprint": "0123456789abcdef",
+                "ad_units": [ad_unit]
+            });
+            attach_evidence_receipt_template(
+                &mut response,
+                "1234567",
+                EvidenceSource::DependencyProbe,
+                EvidenceState::PartialCapped,
+            )
+            .expect("suppression is not an internal error");
+            assert_eq!(
+                response["evidence_receipt_template"]["state"],
+                "not_generated"
+            );
+        }
+    }
+
+    #[test]
+    fn evidence_state_classification_preserves_blocked_and_manual_ui_states() {
+        let complete_exchange = json!({
+            "ad_units": [{"decision":"clear_on_exposed_flags"}],
+            "private_auctions": {"proof_state":"complete_empty"},
+            "private_auction_deals": {"proof_state":"complete_empty"},
+            "yield_groups": {"proof_state":"complete","decision":"targeted_clear"},
+            "rest_discovery": {"proof_state":"complete"},
+            "certainty": {
+                "can_prove_requested_ad_unit_flags": true,
+                "can_prove_private_auction_absence_or_presence": true,
+                "can_prove_private_deal_absence_or_presence": true,
+                "can_prove_yield_group_targeting": true
+            }
+        });
+        assert_eq!(
+            exchange_evidence_state(&complete_exchange),
+            EvidenceState::ManualUiProofRequired
+        );
+
+        let mut permission_blocked = complete_exchange.clone();
+        permission_blocked["yield_groups"] =
+            json!({"proof_state":"blocked","block_class":"permission"});
+        assert_eq!(
+            exchange_evidence_state(&permission_blocked),
+            EvidenceState::BlockedPermission
+        );
+
+        let read_blocked = json!({
+            "line_items": {"proof_state":"blocked","block_class":"upstream"}
+        });
+        assert_eq!(
+            dependency_evidence_state("blocked", &read_blocked),
+            EvidenceState::BlockedRead
+        );
+        assert_eq!(
+            dependency_evidence_state(
+                "blocked",
+                &json!({"line_items":{"proof_state":"blocked","block_class":"permission"}}),
+            ),
+            EvidenceState::BlockedPermission
+        );
+        assert_eq!(soap_probe_block_class(401), "permission");
+        assert_eq!(soap_probe_block_class(403), "permission");
+        assert_eq!(soap_probe_block_class(500), "upstream");
     }
 
     #[test]
