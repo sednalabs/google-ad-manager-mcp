@@ -39,16 +39,10 @@ struct RetirementAdUnitIdSchema(
 #[derive(Debug, Deserialize, JsonSchema)]
 pub(crate) struct AdUnitRetirementAssessmentArgs {
     /// Raw positive numeric Ad Manager network code, for example 1234567.
-    #[schemars(
-        length(min = 1, max = 20),
-        regex(pattern = r"^[1-9][0-9]{0,19}$")
-    )]
+    #[schemars(length(min = 1, max = 20), regex(pattern = r"^[1-9][0-9]{0,19}$"))]
     pub network_code: String,
     /// Exact positive numeric ad-unit ids to assess.
-    #[schemars(
-        with = "Vec<RetirementAdUnitIdSchema>",
-        length(min = 1, max = 10)
-    )]
+    #[schemars(with = "Vec<RetirementAdUnitIdSchema>", length(min = 1, max = 10))]
     pub ad_unit_ids: Vec<String>,
     /// Freshness-bound external proof receipts. Raw reports and telemetry are not accepted.
     #[serde(default)]

@@ -340,9 +340,11 @@ fn evidence_is_network_source_target_and_freshness_bound() {
     )
     .expect("mismatched evidence");
     assert_eq!(mismatch["state"], "invalid_binding");
-    assert!(mismatch["binding_errors"].as_array().is_some_and(|errors| {
-        errors.iter().any(|error| error.as_str() == Some("source"))
-    }));
+    assert!(
+        mismatch["binding_errors"]
+            .as_array()
+            .is_some_and(|errors| { errors.iter().any(|error| error.as_str() == Some("source")) })
+    );
 
     evidence.source = RetirementEvidenceSource::DeliveryReport;
     evidence.window_start_unix_seconds = None;
@@ -450,11 +452,15 @@ fn evidence_rejects_stale_or_noncanonical_bounded_fields() {
     )
     .expect("noncanonical hash");
     assert_eq!(untrusted["state"], "invalid_binding");
-    assert!(untrusted["binding_errors"].as_array().is_some_and(|errors| {
-        errors
-            .iter()
-            .any(|error| error.as_str() == Some("result_hash"))
-    }));
+    assert!(
+        untrusted["binding_errors"]
+            .as_array()
+            .is_some_and(|errors| {
+                errors
+                    .iter()
+                    .any(|error| error.as_str() == Some("result_hash"))
+            })
+    );
     assert!(response_bytes(&untrusted) < 4_096);
 }
 
@@ -664,11 +670,15 @@ fn observed_active_descendant_blocks_even_when_scan_is_partial() {
     );
     assert_eq!(result["decision"], "blocked_by_dependencies_or_activity");
     assert_eq!(result["evidence_summary_complete"], false);
-    assert!(result["blocking_surfaces"].as_array().is_some_and(|surfaces| {
-        surfaces
-            .iter()
-            .any(|surface| surface.as_str() == Some("descendants_observed_active"))
-    }));
+    assert!(
+        result["blocking_surfaces"]
+            .as_array()
+            .is_some_and(|surfaces| {
+                surfaces
+                    .iter()
+                    .any(|surface| surface.as_str() == Some("descendants_observed_active"))
+            })
+    );
 }
 
 #[test]
@@ -744,15 +754,31 @@ fn positive_recommendation_uses_real_evidence_grader() {
         result["recommendation"]["decision"],
         "evidence_complete_operator_review_required"
     );
-    assert_eq!(
-        result["recommendation"]["evidence_summary_complete"],
-        true
-    );
+    assert_eq!(result["recommendation"]["evidence_summary_complete"], true);
     assert_eq!(
         result["recommendation"]["automated_retirement_eligible"],
         false
     );
     assert!(response_bytes(&result) <= MAX_INNER_DATA_BYTES);
+    let wire_result = crate::contract::success_with_meta(
+        result.clone(),
+        json!({
+            "mutation_performed":false,
+            "upstream_called":true,
+            "ad_unit_page_size":100,
+            "max_ad_units":100,
+            "serialized_response_bytes":response_bytes(&result),
+            "max_wire_result_bytes":MAX_WIRE_RESULT_BYTES,
+            "policy":crate::tools::provider_safety_contract_json(),
+        }),
+        std::time::Instant::now(),
+    );
+    assert!(
+        serde_json::to_vec(&wire_result)
+            .expect("representative all-clear wire result must serialize")
+            .len()
+            <= MAX_WIRE_RESULT_BYTES
+    );
 }
 
 #[test]

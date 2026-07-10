@@ -5547,7 +5547,7 @@ fn soap_trafficking_plan_warnings(
     warnings
 }
 
-fn provider_safety_contract_json() -> Value {
+pub(crate) fn provider_safety_contract_json() -> Value {
     json!({
         "defaults": {
             "read_tools": "enabled",

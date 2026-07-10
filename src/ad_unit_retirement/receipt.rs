@@ -8,8 +8,8 @@ use serde_json::{Value, json};
 use crate::AdManagerError;
 use crate::fingerprint::stable_fingerprint;
 
-use super::{MAX_RETIREMENT_TARGETS, RetirementAdUnitIdSchema};
 use super::inventory::{validate_network_code, validate_numeric_ids};
+use super::{MAX_RETIREMENT_TARGETS, RetirementAdUnitIdSchema};
 
 const EVIDENCE_MAX_TTL_SECONDS: u64 = 31 * 24 * 60 * 60;
 const EVIDENCE_FUTURE_SKEW_SECONDS: u64 = 5 * 60;
@@ -18,11 +18,7 @@ pub(super) const MIN_ACTIVITY_WINDOW_SECONDS: u64 = 30 * 24 * 60 * 60;
 #[allow(dead_code)]
 #[derive(JsonSchema)]
 struct RetirementEvidenceHashSchema(
-    #[schemars(
-        length(min = 16, max = 128),
-        regex(pattern = r"^[A-Za-z0-9:_.-]+$")
-    )]
-    String,
+    #[schemars(length(min = 16, max = 128), regex(pattern = r"^[A-Za-z0-9:_.-]+$"))] String,
 );
 
 #[allow(dead_code)]
@@ -121,18 +117,12 @@ impl RetirementEvidenceSource {
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub(crate) struct RetirementEvidenceReceipt {
     /// Network code covered by this evidence receipt.
-    #[schemars(
-        length(min = 1, max = 20),
-        regex(pattern = r"^[1-9][0-9]{0,19}$")
-    )]
+    #[schemars(length(min = 1, max = 20), regex(pattern = r"^[1-9][0-9]{0,19}$"))]
     pub network_code: String,
     /// Expected evidence source for this proof surface.
     pub source: RetirementEvidenceSource,
     /// Source tool, schema, or contract version that produced the result hash.
-    #[schemars(
-        length(min = 1, max = 64),
-        regex(pattern = r"^[A-Za-z0-9._+-]+$")
-    )]
+    #[schemars(length(min = 1, max = 64), regex(pattern = r"^[A-Za-z0-9._+-]+$"))]
     pub source_version: String,
     /// Evidence conclusion before freshness, target binding, and provenance grading.
     pub state: RetirementEvidenceState,
@@ -145,10 +135,7 @@ pub(crate) struct RetirementEvidenceReceipt {
     pub ttl_seconds: Option<u64>,
     /// Exact canonical ad-unit ids covered by the source proof.
     #[serde(default)]
-    #[schemars(
-        with = "Vec<RetirementAdUnitIdSchema>",
-        length(min = 1, max = 10)
-    )]
+    #[schemars(with = "Vec<RetirementAdUnitIdSchema>", length(min = 1, max = 10))]
     pub target_ad_unit_ids: Vec<String>,
     /// Optional evidence-window start. Required for delivery-report and telemetry receipts.
     pub window_start_unix_seconds: Option<u64>,
@@ -446,9 +433,7 @@ fn valid_source_version(value: &str) -> bool {
 fn supported_source_version(source: RetirementEvidenceSource, value: &str) -> bool {
     match source {
         RetirementEvidenceSource::DependencyProbe
-        | RetirementEvidenceSource::ExchangeProtectionReview => {
-            value == env!("CARGO_PKG_VERSION")
-        }
+        | RetirementEvidenceSource::ExchangeProtectionReview => value == env!("CARGO_PKG_VERSION"),
         RetirementEvidenceSource::DeliveryReport => value == "gam-report-v1",
         RetirementEvidenceSource::SiteContract => value == "site-contract-v1",
         RetirementEvidenceSource::Telemetry => value == "telemetry-v1",

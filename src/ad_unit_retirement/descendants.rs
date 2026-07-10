@@ -128,14 +128,13 @@ impl DescendantScan {
         if row.get("parentAdUnit").is_some() && parent_id.is_none() {
             self.invalid_network_resource = true;
         }
-        let reported_ancestors =
-            match ancestor_ids(row, &self.network_code, parent_id.as_deref()) {
-                Ok(ancestors) => ancestors,
-                Err(()) => {
-                    self.invalid_parent_path = true;
-                    Vec::new()
-                }
-            };
+        let reported_ancestors = match ancestor_ids(row, &self.network_code, parent_id.as_deref()) {
+            Ok(ancestors) => ancestors,
+            Err(()) => {
+                self.invalid_parent_path = true;
+                Vec::new()
+            }
+        };
         if row.get("parentAdUnit").is_some() || row.get("parentPath").is_some() {
             self.hierarchy_shape_observed = true;
         }
