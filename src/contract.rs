@@ -258,6 +258,7 @@ fn credential_key_starts_value(lower: &str, key: &str, following: &[&str]) -> bo
         || inline_value_after_key(lower, key)
         || following.first().is_some_and(|value| {
             key != "authorization"
+                || lower != "authorization"
                 || redaction_separator_token(value)
                 || !benign_authorization_diagnostic_phrase(following)
         })
@@ -486,6 +487,18 @@ mod tests {
             ),
             (
                 "Authorization [failed]",
+                "[redacted] [redacted]",
+            ),
+            (
+                "opaque_authorization failed",
+                "[redacted] [redacted]",
+            ),
+            (
+                "opaque-secret_authorization failed",
+                "[redacted] [redacted]",
+            ),
+            (
+                "\u{79d8}\u{5bc6}authorization failed",
                 "[redacted] [redacted]",
             ),
         ] {
