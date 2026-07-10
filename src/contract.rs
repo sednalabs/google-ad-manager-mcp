@@ -132,37 +132,33 @@ pub fn redact_secret_text(input: &str) -> String {
 }
 
 fn secret_value_extends_past_token(lower: &str) -> bool {
-    let markers = [
+    if lower.contains("-----begin") {
+        return true;
+    }
+    for key in [
         "private_key",
         "authorization",
         "access_token",
         "refresh_token",
         "client_secret",
-        "bearer",
-        "basic",
-        "ya29.",
-    ];
-    let marker_count = markers
-        .into_iter()
-        .map(|marker| lower.match_indices(marker).count())
-        .sum::<usize>();
-    if marker_count > 1 {
-        return true;
+    ] {
+        if lower.match_indices(key).any(|(start, _)| {
+            credential_occurrence_needs_following_value(lower, start, key)
+        }) {
+            return true;
+        }
     }
-    if lower.contains("-----begin") {
-        true
-    } else if lower.contains("private_key") {
-        assigned_value_after_key(lower, "private_key").is_none_or(str::is_empty)
-    } else if lower.contains("authorization") {
-        authorization_needs_following_value(lower)
-    } else {
-        ["access_token", "refresh_token", "client_secret"]
-            .into_iter()
-            .find(|key| lower.contains(key))
-            .is_some_and(|key| assigned_value_after_key(lower, key).is_none_or(str::is_empty))
-            || contains_scheme_marker(lower)
-            || lower.contains("ya29.")
+    for scheme in ["bearer", "basic"] {
+        if lower
+            .match_indices(scheme)
+            .any(|(start, _)| !marker_has_inline_material(lower, start, scheme.len()))
+        {
+            return true;
+        }
     }
+    lower
+        .match_indices("ya29.")
+        .any(|(start, _)| !marker_has_inline_material(lower, start, "ya29.".len()))
 }
 
 fn compound_secret_key_start(lower: &str, key: &str) -> Option<usize> {
@@ -201,12 +197,43 @@ fn benign_secret_status_suffix(tail: &str) -> bool {
 }
 
 fn assigned_value_after_key<'a>(lower: &'a str, key: &str) -> Option<&'a str> {
-    let start = compound_secret_key_start(lower, key)? + key.len();
-    let tail = &lower[start..];
+    let start = compound_secret_key_start(lower, key)?;
+    assigned_value_after_occurrence(lower, start, key)
+}
+
+fn assigned_value_after_occurrence<'a>(
+    lower: &'a str,
+    start: usize,
+    key: &str,
+) -> Option<&'a str> {
+    let tail = &lower[start + key.len()..];
     let separator = tail.find([':', '='])?;
-    Some(tail[separator + 1..].trim_matches(|ch: char| {
-        !(ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-'))
-    }))
+    if tail[..separator]
+        .chars()
+        .any(|ch| !(ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-')))
+    {
+        return None;
+    }
+    Some(tail[separator + 1..].trim_matches(|ch| !credential_value_char(ch)))
+}
+
+fn credential_occurrence_needs_following_value(lower: &str, start: usize, key: &str) -> bool {
+    match assigned_value_after_occurrence(lower, start, key) {
+        None | Some("") => true,
+        Some("bearer" | "basic") if key == "authorization" => true,
+        Some(_) => false,
+    }
+}
+
+fn marker_has_inline_material(lower: &str, start: usize, marker_len: usize) -> bool {
+    lower[..start]
+        .chars()
+        .chain(lower[start + marker_len..].chars())
+        .any(char::is_alphanumeric)
+}
+
+fn credential_value_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-')
 }
 
 fn inline_value_after_key(lower: &str, key: &str) -> bool {
@@ -490,6 +517,16 @@ mod tests {
                 "[redacted] [redacted]",
             ),
             ("ya29. opaque-secret", "[redacted] [redacted]"),
+            ("opaqueya29.synthetic ok", "[redacted] ok"),
+            ("Bearer=opaque ok", "[redacted] ok"),
+            (
+                "access_token=masked;client_secret=masked ok",
+                "[redacted] ok",
+            ),
+            (
+                "access_token;reason=missing opaque-secret",
+                "[redacted] [redacted]",
+            ),
         ] {
             assert_eq!(redact_secret_text(source), expected);
         }
