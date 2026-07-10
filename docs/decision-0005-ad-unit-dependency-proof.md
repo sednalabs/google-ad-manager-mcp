@@ -55,4 +55,11 @@ before an upstream read. Caller-actionable permission and authentication faults
 remain explicit permission blocks; authentication-service connection failures
 remain upstream read blocks.
 
+Paginated line-item proof is monotonic for positive evidence. When a later SOAP
+plan, transport call, HTTP response, or SOAP fault blocks the scan, the result
+retains all dependencies and progress confirmed on earlier pages. The surface
+still reports `proof_state=blocked`; its decision is `dependencies_found` only
+when an earlier page proved at least one dependency, and otherwise remains
+`blocked`.
+
 The helper is read-only and always reports `mutation_performed=false`.

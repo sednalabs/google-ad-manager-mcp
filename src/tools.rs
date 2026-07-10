@@ -3056,14 +3056,7 @@ fn apply_probe_collection_decision(
 }
 
 fn blocked_probe_surface(surface: &str, err: AdManagerError) -> Value {
-    let block_class = match &err {
-        AdManagerError::AuthBootstrap(_)
-        | AdManagerError::UpstreamApi {
-            status: 401 | 403, ..
-        }
-        | AdManagerError::WriteScopeRequired { .. } => "permission",
-        _ => "upstream",
-    };
+    let block_class = probe_error_block_class(&err);
     json!({
         "surface": surface,
         "proof_state": "blocked",
@@ -3071,6 +3064,17 @@ fn blocked_probe_surface(surface: &str, err: AdManagerError) -> Value {
         "error": contract::redact_secret_text(&err.to_string()),
         "hint": err.hint(),
     })
+}
+
+fn probe_error_block_class(err: &AdManagerError) -> &'static str {
+    match err {
+        AdManagerError::AuthBootstrap(_)
+        | AdManagerError::UpstreamApi {
+            status: 401 | 403, ..
+        }
+        | AdManagerError::WriteScopeRequired { .. } => "permission",
+        _ => "upstream",
+    }
 }
 
 async fn probe_yield_groups(
@@ -3308,6 +3312,199 @@ struct LineItemDependencyProbeOptions<'a> {
     include_line_item_xml: bool,
 }
 
+#[derive(Default)]
+struct LineItemDependencyScanState {
+    offset: u32,
+    inspected_results: u32,
+    total_result_set_size: Option<u64>,
+    response_truncated: bool,
+    request_ids: Vec<String>,
+    response_times: Vec<String>,
+    dependency_matches_sample: Vec<Value>,
+    dependency_match_count: usize,
+    dependency_matches_truncated: bool,
+    status_counts: BTreeMap<String, u64>,
+    missing_total_result_set_size: bool,
+}
+
+struct SuccessfulLineItemPage<'a> {
+    upstream_response_xml: &'a str,
+    response_truncated: bool,
+    request_id: Option<String>,
+    response_time: Option<String>,
+}
+
+enum LineItemProbeBlock {
+    Error {
+        block_class: &'static str,
+        error: String,
+        hint: &'static str,
+    },
+    Soap {
+        block_class: &'static str,
+        upstream_status: u16,
+        request_id: Option<String>,
+        response_time: Option<String>,
+        soap_fault: Option<String>,
+        message: String,
+    },
+}
+
+impl LineItemProbeBlock {
+    fn from_error(err: &AdManagerError) -> Self {
+        Self::Error {
+            block_class: probe_error_block_class(err),
+            error: contract::redact_secret_text(&err.to_string()),
+            hint: err.hint(),
+        }
+    }
+
+    fn insert_into(self, response: &mut Map<String, Value>) {
+        match self {
+            Self::Error {
+                block_class,
+                error,
+                hint,
+            } => {
+                response.insert("block_class".to_string(), json!(block_class));
+                response.insert("error".to_string(), json!(error));
+                response.insert("hint".to_string(), json!(hint));
+            }
+            Self::Soap {
+                block_class,
+                upstream_status,
+                request_id,
+                response_time,
+                soap_fault,
+                message,
+            } => {
+                response.insert("block_class".to_string(), json!(block_class));
+                response.insert("upstream_status".to_string(), json!(upstream_status));
+                response.insert("request_id".to_string(), json!(request_id));
+                response.insert("response_time".to_string(), json!(response_time));
+                response.insert("soap_fault".to_string(), json!(soap_fault));
+                response.insert("message".to_string(), json!(message));
+            }
+        }
+    }
+}
+
+impl LineItemDependencyScanState {
+    fn record_successful_page(
+        &mut self,
+        page: SuccessfulLineItemPage<'_>,
+        targets: &[DependencyProbeTarget],
+        placement_summary: &Value,
+        include_line_item_xml: bool,
+    ) -> u32 {
+        if let Some(request_id) = page.request_id {
+            self.request_ids.push(request_id);
+        }
+        if let Some(response_time) = page.response_time {
+            self.response_times.push(response_time);
+        }
+        self.response_truncated |= page.response_truncated;
+        let page_total = extract_xml_tag_text(page.upstream_response_xml, "totalResultSetSize")
+            .and_then(|value| value.parse::<u64>().ok());
+        if self.total_result_set_size.is_none() {
+            self.total_result_set_size = page_total;
+        }
+        if page_total.is_none() {
+            self.missing_total_result_set_size = true;
+        }
+
+        let results = extract_xml_blocks(page.upstream_response_xml, "results");
+        for result in &results {
+            let status = extract_xml_tag_text(result, "status").unwrap_or_else(|| "UNKNOWN".into());
+            *self.status_counts.entry(status).or_insert(0) += 1;
+            if let Some(entry) = line_item_dependency_entry(
+                result,
+                targets,
+                placement_summary,
+                include_line_item_xml,
+            ) {
+                self.dependency_match_count += 1;
+                if self.dependency_matches_sample.len()
+                    < DEPENDENCY_LINE_ITEM_MATCH_SAMPLE_LIMIT
+                {
+                    self.dependency_matches_sample.push(entry);
+                } else {
+                    self.dependency_matches_truncated = true;
+                }
+            }
+        }
+
+        let result_count = results.len() as u32;
+        self.inspected_results = self.inspected_results.saturating_add(result_count);
+        self.offset = self.offset.saturating_add(result_count);
+        result_count
+    }
+
+    fn into_response(
+        self,
+        options: &LineItemDependencyProbeOptions<'_>,
+        decision: &'static str,
+        proof_state: &'static str,
+    ) -> Value {
+        json!({
+            "surface": "line_items",
+            "decision": decision,
+            "proof_state": proof_state,
+            "total_result_set_size": self.total_result_set_size,
+            "inspected_results": self.inspected_results,
+            "max_line_items": options.max_line_items,
+            "line_item_page_size": options.line_item_page_size,
+            "response_truncated": self.response_truncated,
+            "missing_total_result_set_size": self.missing_total_result_set_size,
+            "request_ids": self.request_ids,
+            "response_times": self.response_times,
+            "status_counts": self.status_counts,
+            "dependency_match_count": self.dependency_match_count,
+            "dependency_matches_sample": self.dependency_matches_sample,
+            "dependency_matches_truncated": self.dependency_matches_truncated,
+            "dependency_match_sample_limit": DEPENDENCY_LINE_ITEM_MATCH_SAMPLE_LIMIT,
+            "mutation_performed": false,
+        })
+    }
+
+    fn into_blocked_response(
+        self,
+        options: &LineItemDependencyProbeOptions<'_>,
+        block: LineItemProbeBlock,
+    ) -> Value {
+        let decision = if self.dependency_match_count > 0 {
+            "dependencies_found"
+        } else {
+            "blocked"
+        };
+        let mut response = self.into_response(options, decision, "blocked");
+        block.insert_into(
+            response
+                .as_object_mut()
+                .expect("line-item scan response is an object"),
+        );
+        response
+    }
+
+    fn into_completed_response(self, options: &LineItemDependencyProbeOptions<'_>) -> Value {
+        let capped = self.response_truncated
+            || self.missing_total_result_set_size
+            || self
+                .total_result_set_size
+                .map(|total| total > u64::from(self.inspected_results))
+                .unwrap_or(self.inspected_results >= options.max_line_items);
+        let proof_state = if capped { "sample_only" } else { "complete" };
+        let decision = if self.dependency_match_count > 0 {
+            "dependencies_found"
+        } else if capped {
+            "no_dependencies_in_sample"
+        } else {
+            "no_dependencies_observed"
+        };
+        self.into_response(options, decision, proof_state)
+    }
+}
+
 async fn probe_ad_unit_line_item_dependencies(
     server: &AdManagerServer,
     options: LineItemDependencyProbeOptions<'_>,
@@ -3336,132 +3533,82 @@ async fn probe_ad_unit_line_item_dependencies(
         }));
     }
 
-    let mut offset = 0_u32;
-    let mut inspected_results = 0_u32;
-    let mut total_result_set_size: Option<u64> = None;
-    let mut response_truncated = false;
-    let mut request_ids = Vec::new();
-    let mut response_times = Vec::new();
-    let mut dependency_matches_sample = Vec::new();
-    let mut dependency_match_count = 0_usize;
-    let mut dependency_matches_truncated = false;
-    let mut status_counts: BTreeMap<String, u64> = BTreeMap::new();
-    let mut missing_total_size = false;
+    let mut state = LineItemDependencyScanState::default();
 
-    while inspected_results < options.max_line_items {
-        let remaining = options.max_line_items.saturating_sub(inspected_results);
+    while state.inspected_results < options.max_line_items {
+        let remaining = options
+            .max_line_items
+            .saturating_sub(state.inspected_results);
         let page_limit = options.line_item_page_size.min(remaining).max(1);
-        let query = format!("ORDER BY id ASC LIMIT {page_limit} OFFSET {offset}");
+        let query = format!("ORDER BY id ASC LIMIT {page_limit} OFFSET {}", state.offset);
         let payload_xml = pql_payload(&query);
-        let plan = server.client().build_soap_trafficking_plan(
+        let plan = match server.client().build_soap_trafficking_plan(
             options.network_code,
             options.api_version,
             SoapTraffickingOperation::GetLineItemsByStatement,
             &payload_xml,
-        )?;
-        let applied = server.client().execute_soap_trafficking_plan(&plan).await?;
+        ) {
+            Ok(plan) => plan,
+            Err(err) => {
+                return Ok(state.into_blocked_response(
+                    &options,
+                    LineItemProbeBlock::from_error(&err),
+                ));
+            }
+        };
+        let applied = match server.client().execute_soap_trafficking_plan(&plan).await {
+            Ok(applied) => applied,
+            Err(err) => {
+                return Ok(state.into_blocked_response(
+                    &options,
+                    LineItemProbeBlock::from_error(&err),
+                ));
+            }
+        };
         if applied.upstream_status >= 400 || applied.soap_fault.is_some() {
             let block_class = soap_probe_block_class(
                 applied.upstream_status,
                 applied.soap_fault.as_deref(),
                 &applied.upstream_response_xml,
             );
-            return Ok(json!({
-                "surface": "line_items",
-                "decision": "blocked",
-                "proof_state": "blocked",
-                "block_class": block_class,
-                "upstream_status": applied.upstream_status,
-                "request_id": applied.request_id,
-                "response_time": applied.response_time,
-                "soap_fault": applied.soap_fault,
-                "message": contract::redact_secret_text(&soap_error_message(&applied)),
-                "mutation_performed": false,
-            }));
+            let message = contract::redact_secret_text(&soap_error_message(&applied));
+            return Ok(state.into_blocked_response(
+                &options,
+                LineItemProbeBlock::Soap {
+                    block_class,
+                    upstream_status: applied.upstream_status,
+                    request_id: applied.request_id,
+                    response_time: applied.response_time,
+                    soap_fault: applied.soap_fault,
+                    message,
+                },
+            ));
         }
 
-        if let Some(request_id) = applied.request_id {
-            request_ids.push(request_id);
-        }
-        if let Some(response_time) = applied.response_time {
-            response_times.push(response_time);
-        }
-        response_truncated |= applied.response_truncated;
-        let page_total = extract_xml_tag_text(&applied.upstream_response_xml, "totalResultSetSize")
-            .and_then(|value| value.parse::<u64>().ok());
-        if total_result_set_size.is_none() {
-            total_result_set_size = page_total;
-        }
-        if page_total.is_none() {
-            missing_total_size = true;
-        }
-
-        let results = extract_xml_blocks(&applied.upstream_response_xml, "results");
-        for result in &results {
-            let status = extract_xml_tag_text(result, "status").unwrap_or_else(|| "UNKNOWN".into());
-            *status_counts.entry(status).or_insert(0) += 1;
-            if let Some(entry) = line_item_dependency_entry(
-                result,
-                targets,
-                placement_summary,
-                options.include_line_item_xml,
-            ) {
-                dependency_match_count += 1;
-                if dependency_matches_sample.len() < DEPENDENCY_LINE_ITEM_MATCH_SAMPLE_LIMIT {
-                    dependency_matches_sample.push(entry);
-                } else {
-                    dependency_matches_truncated = true;
-                }
-            }
-        }
-
-        let result_count = results.len() as u32;
-        inspected_results = inspected_results.saturating_add(result_count);
+        let result_count = state.record_successful_page(
+            SuccessfulLineItemPage {
+                upstream_response_xml: &applied.upstream_response_xml,
+                response_truncated: applied.response_truncated,
+                request_id: applied.request_id,
+                response_time: applied.response_time,
+            },
+            targets,
+            placement_summary,
+            options.include_line_item_xml,
+        );
         if result_count == 0 {
             break;
         }
-        offset = offset.saturating_add(result_count);
-        if total_result_set_size
-            .map(|total| u64::from(offset) >= total)
+        if state
+            .total_result_set_size
+            .map(|total| u64::from(state.offset) >= total)
             .unwrap_or(false)
         {
             break;
         }
     }
 
-    let capped = response_truncated
-        || missing_total_size
-        || total_result_set_size
-            .map(|total| total > u64::from(inspected_results))
-            .unwrap_or(inspected_results >= options.max_line_items);
-    let proof_state = if capped { "sample_only" } else { "complete" };
-    let decision = if dependency_match_count > 0 {
-        "dependencies_found"
-    } else if capped {
-        "no_dependencies_in_sample"
-    } else {
-        "no_dependencies_observed"
-    };
-
-    Ok(json!({
-        "surface": "line_items",
-        "decision": decision,
-        "proof_state": proof_state,
-        "total_result_set_size": total_result_set_size,
-        "inspected_results": inspected_results,
-        "max_line_items": options.max_line_items,
-        "line_item_page_size": options.line_item_page_size,
-        "response_truncated": response_truncated,
-        "missing_total_result_set_size": missing_total_size,
-        "request_ids": request_ids,
-        "response_times": response_times,
-        "status_counts": status_counts,
-        "dependency_match_count": dependency_match_count,
-        "dependency_matches_sample": dependency_matches_sample,
-        "dependency_matches_truncated": dependency_matches_truncated,
-        "dependency_match_sample_limit": DEPENDENCY_LINE_ITEM_MATCH_SAMPLE_LIMIT,
-        "mutation_performed": false,
-    }))
+    Ok(state.into_completed_response(&options))
 }
 
 fn line_item_dependency_entry(
@@ -7305,6 +7452,299 @@ mod tests {
             "300"
         );
         assert_eq!(entry["custom_targeting_key_ids"][0], "20229275");
+    }
+
+    #[test]
+    fn dependency_scan_preserves_positive_evidence_when_a_later_page_blocks() {
+        let options = LineItemDependencyProbeOptions {
+            network_code: "1015422",
+            api_version: Some("v202605"),
+            line_item_page_size: 1,
+            max_line_items: 100,
+            include_line_item_xml: false,
+        };
+        let target = dependency_target("200", &[], &["Section_Page_LS"]);
+        let placement_summary = json!({
+            "proof_state":"complete_for_page",
+            "target_placement_match_count":0,
+            "target_placement_ids_by_ad_unit_id":{"200":[]}
+        });
+        let first_page = r#"
+        <rval>
+          <totalResultSetSize>2</totalResultSetSize>
+          <results>
+            <id>1</id>
+            <name>Observed dependency</name>
+            <status>DELIVERING</status>
+            <isArchived>false</isArchived>
+            <targeting><inventoryTargeting>
+              <targetedAdUnits><adUnitId>200</adUnitId><includeDescendants>false</includeDescendants></targetedAdUnits>
+            </inventoryTargeting></targeting>
+          </results>
+        </rval>
+        "#;
+        let mut state = LineItemDependencyScanState::default();
+        assert_eq!(
+            state.record_successful_page(
+                SuccessfulLineItemPage {
+                    upstream_response_xml: first_page,
+                    response_truncated: false,
+                    request_id: Some("request-1".to_string()),
+                    response_time: Some("42".to_string()),
+                },
+                std::slice::from_ref(&target),
+                &placement_summary,
+                false,
+            ),
+            1
+        );
+        let blocked = state.into_blocked_response(
+            &options,
+            LineItemProbeBlock::Soap {
+                block_class: "upstream",
+                upstream_status: 503,
+                request_id: Some("request-2".to_string()),
+                response_time: Some("44".to_string()),
+                soap_fault: Some("ServerError.SERVER_ERROR".to_string()),
+                message: "later page unavailable".to_string(),
+            },
+        );
+
+        assert_eq!(blocked["decision"], "dependencies_found");
+        assert_eq!(blocked["proof_state"], "blocked");
+        assert_eq!(blocked["block_class"], "upstream");
+        assert_eq!(blocked["upstream_status"], 503);
+        assert_eq!(blocked["request_id"], "request-2");
+        assert_eq!(blocked["response_time"], "44");
+        assert_eq!(blocked["soap_fault"], "ServerError.SERVER_ERROR");
+        assert_eq!(blocked["total_result_set_size"], 2);
+        assert_eq!(blocked["inspected_results"], 1);
+        assert_eq!(blocked["request_ids"], json!(["request-1"]));
+        assert_eq!(blocked["response_times"], json!(["42"]));
+        assert_eq!(blocked["status_counts"]["DELIVERING"], 1);
+        assert_eq!(blocked["dependency_match_count"], 1);
+        assert_eq!(blocked["dependency_matches_sample"][0]["line_item_id"], "1");
+        let flags = dependency_proof_flags(
+            std::slice::from_ref(&target),
+            &placement_summary,
+            &blocked,
+            false,
+        );
+        assert_eq!(flags["line_items_blocked"], true);
+        assert_eq!(
+            dependency_probe_decision(&[], &placement_summary, &blocked),
+            "dependencies_found"
+        );
+        assert_eq!(
+            dependency_evidence_state(
+                "dependencies_found",
+                &json!({"line_items": blocked.clone()})
+            ),
+            EvidenceState::CompleteBlocked
+        );
+    }
+
+    #[test]
+    fn dependency_scan_without_prior_matches_stays_blocked_and_normal_completion_is_unchanged() {
+        let options = LineItemDependencyProbeOptions {
+            network_code: "1015422",
+            api_version: Some("v202605"),
+            line_item_page_size: 1,
+            max_line_items: 100,
+            include_line_item_xml: false,
+        };
+        let target = dependency_target("200", &[], &["Section_Page_LS"]);
+        let placement_summary = json!({
+            "proof_state":"complete_for_page",
+            "target_placement_match_count":0,
+            "target_placement_ids_by_ad_unit_id":{"200":[]}
+        });
+        let unrelated_page = r#"
+        <rval>
+          <totalResultSetSize>1</totalResultSetSize>
+          <results>
+            <id>2</id>
+            <status>PAUSED</status>
+            <isArchived>false</isArchived>
+            <targeting><inventoryTargeting>
+              <targetedAdUnits><adUnitId>999</adUnitId><includeDescendants>false</includeDescendants></targetedAdUnits>
+            </inventoryTargeting></targeting>
+          </results>
+        </rval>
+        "#;
+        let record_page = |state: &mut LineItemDependencyScanState| {
+            state.record_successful_page(
+                SuccessfulLineItemPage {
+                    upstream_response_xml: unrelated_page,
+                    response_truncated: false,
+                    request_id: Some("request-2".to_string()),
+                    response_time: Some("43".to_string()),
+                },
+                std::slice::from_ref(&target),
+                &placement_summary,
+                false,
+            )
+        };
+
+        let mut blocked_state = LineItemDependencyScanState::default();
+        assert_eq!(record_page(&mut blocked_state), 1);
+        let auth_error = AdManagerError::AuthBootstrap("credential unavailable".to_string());
+        let blocked = blocked_state.into_blocked_response(
+            &options,
+            LineItemProbeBlock::from_error(&auth_error),
+        );
+        assert_eq!(blocked["decision"], "blocked");
+        assert_eq!(blocked["proof_state"], "blocked");
+        assert_eq!(blocked["block_class"], "permission");
+        assert_eq!(blocked["dependency_match_count"], 0);
+        assert_eq!(blocked["inspected_results"], 1);
+        assert_eq!(
+            dependency_evidence_state(
+                "blocked",
+                &json!({"line_items": blocked.clone()})
+            ),
+            EvidenceState::BlockedPermission
+        );
+
+        let mut complete_state = LineItemDependencyScanState::default();
+        assert_eq!(record_page(&mut complete_state), 1);
+        let complete = complete_state.into_completed_response(&options);
+        assert_eq!(
+            complete,
+            json!({
+                "surface": "line_items",
+                "decision": "no_dependencies_observed",
+                "proof_state": "complete",
+                "total_result_set_size": 1,
+                "inspected_results": 1,
+                "max_line_items": 100,
+                "line_item_page_size": 1,
+                "response_truncated": false,
+                "missing_total_result_set_size": false,
+                "request_ids": ["request-2"],
+                "response_times": ["43"],
+                "status_counts": {"PAUSED": 1},
+                "dependency_match_count": 0,
+                "dependency_matches_sample": [],
+                "dependency_matches_truncated": false,
+                "dependency_match_sample_limit": DEPENDENCY_LINE_ITEM_MATCH_SAMPLE_LIMIT,
+                "mutation_performed": false,
+            })
+        );
+    }
+
+    #[test]
+    fn dependency_scan_preserves_full_count_while_bounding_late_block_samples() {
+        let options = LineItemDependencyProbeOptions {
+            network_code: "1015422",
+            api_version: Some("v202605"),
+            line_item_page_size: 100,
+            max_line_items: 100,
+            include_line_item_xml: false,
+        };
+        let target = dependency_target("200", &[], &["Section_Page_LS"]);
+        let placement_summary = json!({
+            "proof_state":"complete_for_page",
+            "target_placement_match_count":0,
+            "target_placement_ids_by_ad_unit_id":{"200":[]}
+        });
+        let results = (1..=51)
+            .map(|id| {
+                format!(
+                    "<results><id>{id}</id><status>READY</status><isArchived>false</isArchived><targeting><inventoryTargeting><targetedAdUnits><adUnitId>200</adUnitId><includeDescendants>false</includeDescendants></targetedAdUnits></inventoryTargeting></targeting></results>"
+                )
+            })
+            .collect::<String>();
+        let page = format!(
+            "<rval><totalResultSetSize>52</totalResultSetSize>{results}</rval>"
+        );
+        let mut state = LineItemDependencyScanState::default();
+        assert_eq!(
+            state.record_successful_page(
+                SuccessfulLineItemPage {
+                    upstream_response_xml: &page,
+                    response_truncated: false,
+                    request_id: Some("request-1".to_string()),
+                    response_time: Some("42".to_string()),
+                },
+                std::slice::from_ref(&target),
+                &placement_summary,
+                false,
+            ),
+            51
+        );
+
+        let blocked = state.into_blocked_response(
+            &options,
+            LineItemProbeBlock::from_error(&AdManagerError::UpstreamApi {
+                status: 503,
+                message: "later page unavailable".to_string(),
+            }),
+        );
+
+        assert_eq!(blocked["decision"], "dependencies_found");
+        assert_eq!(blocked["proof_state"], "blocked");
+        assert_eq!(blocked["dependency_match_count"], 51);
+        assert_eq!(
+            blocked["dependency_matches_sample"]
+                .as_array()
+                .map(Vec::len),
+            Some(DEPENDENCY_LINE_ITEM_MATCH_SAMPLE_LIMIT)
+        );
+        assert_eq!(blocked["dependency_matches_truncated"], true);
+    }
+
+    #[test]
+    fn dependency_scan_keeps_sample_only_completion_semantics() {
+        let options = LineItemDependencyProbeOptions {
+            network_code: "1015422",
+            api_version: Some("v202605"),
+            line_item_page_size: 1,
+            max_line_items: 100,
+            include_line_item_xml: false,
+        };
+        let target = dependency_target("200", &[], &["Section_Page_LS"]);
+        let placement_summary = json!({
+            "proof_state":"complete_for_page",
+            "target_placement_match_count":0,
+            "target_placement_ids_by_ad_unit_id":{"200":[]}
+        });
+        let page = r#"
+        <rval>
+          <totalResultSetSize>2</totalResultSetSize>
+          <results>
+            <id>1</id>
+            <status>PAUSED</status>
+            <isArchived>false</isArchived>
+            <targeting><inventoryTargeting>
+              <targetedAdUnits><adUnitId>999</adUnitId><includeDescendants>false</includeDescendants></targetedAdUnits>
+            </inventoryTargeting></targeting>
+          </results>
+        </rval>
+        "#;
+        let mut state = LineItemDependencyScanState::default();
+        assert_eq!(
+            state.record_successful_page(
+                SuccessfulLineItemPage {
+                    upstream_response_xml: page,
+                    response_truncated: false,
+                    request_id: Some("request-1".to_string()),
+                    response_time: Some("42".to_string()),
+                },
+                std::slice::from_ref(&target),
+                &placement_summary,
+                false,
+            ),
+            1
+        );
+
+        let completed = state.into_completed_response(&options);
+        assert_eq!(completed["decision"], "no_dependencies_in_sample");
+        assert_eq!(completed["proof_state"], "sample_only");
+        assert_eq!(completed["total_result_set_size"], 2);
+        assert_eq!(completed["inspected_results"], 1);
+        assert_eq!(completed["dependency_match_count"], 0);
+        assert_eq!(completed["status_counts"]["PAUSED"], 1);
     }
 
     #[test]
