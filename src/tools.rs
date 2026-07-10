@@ -3853,7 +3853,10 @@ fn bounded_text_sample(value: &str, max_bytes: usize) -> (String, bool) {
 
 fn bounded_redacted_probe_text(value: &str) -> (String, bool) {
     let redacted = contract::redact_secret_text(value);
-    bounded_text_sample(&redacted, PROBE_DIAGNOSTIC_SAMPLE_BYTES)
+    let source_exceeded_cap = value.len() > PROBE_DIAGNOSTIC_SAMPLE_BYTES;
+    let (sample, redacted_output_clipped) =
+        bounded_text_sample(&redacted, PROBE_DIAGNOSTIC_SAMPLE_BYTES);
+    (sample, source_exceeded_cap || redacted_output_clipped)
 }
 
 fn bounded_redacted_probe_text_option(value: Option<String>) -> (Option<String>, bool) {
