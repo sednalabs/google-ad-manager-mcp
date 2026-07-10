@@ -118,6 +118,212 @@
       "name": "gam_ad_unit_dependency_probe"
     },
     {
+      "description": "Read-only evidence-graded retirement assessment for exact Ad Manager ad-unit ids, with current identity and descendant proof.",
+      "inputSchema": {
+        "$defs": {
+          "RetirementAdUnitIdSchema": {
+            "maxLength": 20,
+            "minLength": 1,
+            "pattern": "^[0-9]+$",
+            "type": "string"
+          },
+          "RetirementEvidenceHashSchema": {
+            "maxLength": 128,
+            "minLength": 16,
+            "pattern": "^[A-Za-z0-9:_.-]+$",
+            "type": "string"
+          },
+          "RetirementEvidenceNoteSchema": {
+            "maxLength": 500,
+            "type": "string"
+          },
+          "RetirementEvidenceReceipt": {
+            "properties": {
+              "manual_ui_proof_included": {
+                "default": false,
+                "description": "Required for exchange/protection complete-clear proof while GAM UI-only surfaces remain unsupported by API.",
+                "type": "boolean"
+              },
+              "network_code": {
+                "description": "Network code covered by this evidence receipt.",
+                "maxLength": 20,
+                "minLength": 1,
+                "pattern": "^[1-9][0-9]{0,19}$",
+                "type": "string"
+              },
+              "note": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/RetirementEvidenceNoteSchema"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Optional bounded, non-sensitive operator note. The note is not echoed."
+              },
+              "observed_at_unix_seconds": {
+                "description": "Unix epoch seconds when the source proof completed.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "result_hash": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/RetirementEvidenceHashSchema"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Opaque result hash from the source proof. Raw payloads are not accepted."
+              },
+              "source": {
+                "$ref": "#/$defs/RetirementEvidenceSource",
+                "description": "Expected evidence source for this proof surface."
+              },
+              "source_version": {
+                "description": "Source tool, schema, or contract version that produced the result hash.",
+                "maxLength": 64,
+                "minLength": 1,
+                "pattern": "^[A-Za-z0-9._+-]+$",
+                "type": "string"
+              },
+              "state": {
+                "$ref": "#/$defs/RetirementEvidenceState",
+                "description": "Evidence conclusion before freshness, target binding, and provenance grading."
+              },
+              "target_ad_unit_ids": {
+                "default": [],
+                "description": "Exact canonical ad-unit ids covered by the source proof.",
+                "items": {
+                  "$ref": "#/$defs/RetirementAdUnitIdSchema"
+                },
+                "maxItems": 10,
+                "minItems": 1,
+                "type": "array"
+              },
+              "ttl_seconds": {
+                "description": "Maximum age accepted for this proof. Maximum 31 days.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "window_end_unix_seconds": {
+                "description": "Optional evidence-window end. Required for delivery-report and telemetry receipts.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "window_start_unix_seconds": {
+                "description": "Optional evidence-window start. Required for delivery-report and telemetry receipts.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "network_code",
+              "source",
+              "source_version",
+              "state"
+            ],
+            "type": "object"
+          },
+          "RetirementEvidenceSource": {
+            "enum": [
+              "dependency_probe",
+              "delivery_report",
+              "exchange_protection_review",
+              "site_contract",
+              "telemetry"
+            ],
+            "type": "string"
+          },
+          "RetirementEvidenceState": {
+            "enum": [
+              "complete_clear",
+              "complete_blocked",
+              "partial_capped",
+              "blocked_permission",
+              "blocked_read",
+              "unsupported_surface",
+              "manual_ui_proof_required",
+              "not_run"
+            ],
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "ad_unit_ids": {
+            "description": "Exact positive numeric ad-unit ids to assess.",
+            "items": {
+              "$ref": "#/$defs/RetirementAdUnitIdSchema"
+            },
+            "maxItems": 10,
+            "minItems": 1,
+            "type": "array"
+          },
+          "ad_unit_page_size": {
+            "description": "Number of ad-unit rows to fetch per descendant-scan page. Defaults to 1000, max 1000.",
+            "format": "uint32",
+            "maximum": 1000,
+            "minimum": 1,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "evidence": {
+            "default": [],
+            "description": "Freshness-bound external proof receipts. Raw reports and telemetry are not accepted.",
+            "items": {
+              "$ref": "#/$defs/RetirementEvidenceReceipt"
+            },
+            "maxItems": 5,
+            "type": "array"
+          },
+          "max_ad_units": {
+            "description": "Maximum ad-unit rows to inspect before the descendant proof becomes partial. Defaults to 5000, max 10000.",
+            "format": "uint32",
+            "maximum": 10000,
+            "minimum": 1,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "network_code": {
+            "description": "Raw positive numeric Ad Manager network code, for example 1234567.",
+            "maxLength": 20,
+            "minLength": 1,
+            "pattern": "^[1-9][0-9]{0,19}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "network_code",
+          "ad_unit_ids"
+        ],
+        "type": "object"
+      },
+      "name": "gam_ad_unit_retirement_assessment"
+    },
+    {
       "description": "Build a copyable gcloud Application Default Credentials login command for Google Ad Manager without running it.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",

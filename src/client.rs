@@ -706,6 +706,21 @@ impl AdManagerClient {
         .await
     }
 
+    pub async fn get_ad_unit(
+        &self,
+        network_code: &str,
+        resource_name: &str,
+    ) -> Result<Value, AdManagerError> {
+        let network_code = validate_network_code(network_code)?;
+        let resource_name = validate_resource_name(
+            "ad_unit_resource_names",
+            Some(resource_name),
+            &network_code,
+            "adUnits",
+        )?;
+        self.get_json(&resource_name, &[]).await
+    }
+
     pub async fn get_rest_discovery_document(&self) -> Result<Value, AdManagerError> {
         let request = self.http.request(
             Method::GET,

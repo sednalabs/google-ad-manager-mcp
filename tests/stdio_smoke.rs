@@ -1,4 +1,5 @@
 use mcp_toolkit_testing::stdio_contract::StdioMcpProcess;
+use serde_json::json;
 
 #[test]
 fn stdio_initializes_and_lists_tools() {
@@ -14,6 +15,7 @@ fn stdio_initializes_and_lists_tools() {
         "gam_network_catalog_list",
         "gam_exchange_protection_probe",
         "gam_ad_unit_dependency_probe",
+        "gam_ad_unit_retirement_assessment",
         "gam_report_run",
         "gam_report_result_rows",
         "gam_trafficking_tool_matrix",
@@ -38,4 +40,18 @@ fn stdio_initializes_and_lists_tools() {
     expected.sort();
     let expected = expected.into_iter().map(str::to_string).collect::<Vec<_>>();
     assert_eq!(names, expected);
+}
+
+#[test]
+fn retirement_assessment_rejects_targetless_calls_at_stdio_boundary() {
+    let mut process = StdioMcpProcess::start(env!("CARGO_BIN_EXE_google-ad-manager-mcp"));
+    let response = process.call_tool(
+        3,
+        "gam_ad_unit_retirement_assessment",
+        json!({"network_code":"1234567","ad_unit_ids":[]}),
+    );
+    let structured = &response["result"]["structuredContent"];
+    assert_eq!(structured["ok"], false);
+    assert_eq!(structured["error"]["code"], "invalid_input");
+    assert_eq!(structured["meta"]["upstream_called"], json!(null));
 }

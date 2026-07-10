@@ -90,26 +90,29 @@ The initial first-class tool set is:
 3. `gam_auth_login_command`
 4. `gam_networks_list`
 5. `gam_network_catalog_list`
-6. `gam_report_run`
-7. `gam_report_result_rows`
-8. `gam_trafficking_tool_matrix`
-9. `gam_rest_write_plan`
-10. `gam_rest_write_apply`
-11. `gam_soap_payload_build`
-12. `gam_soap_trafficking_plan`
-13. `gam_soap_trafficking_apply`
-14. `gam_yield_group_exclusions_preview`
-15. `gam_yield_group_exclusions_apply`
-16. `gam_scratchpad_open_session`
-17. `gam_scratchpad_close_session`
-18. `gam_scratchpad_list_sessions`
-19. `gam_scratchpad_list_tables`
-20. `gam_scratchpad_drop_table`
-21. `gam_scratchpad_query`
-22. `gam_scratchpad_ingest_network_catalog`
-23. `gam_scratchpad_ingest_report_result_rows`
-24. `gam_scratchpad_ingest_soap_line_items`
-25. `gam_scratchpad_export_evidence_bundle`
+6. `gam_exchange_protection_probe`
+7. `gam_ad_unit_dependency_probe`
+8. `gam_ad_unit_retirement_assessment`
+9. `gam_report_run`
+10. `gam_report_result_rows`
+11. `gam_trafficking_tool_matrix`
+12. `gam_rest_write_plan`
+13. `gam_rest_write_apply`
+14. `gam_soap_payload_build`
+15. `gam_soap_trafficking_plan`
+16. `gam_soap_trafficking_apply`
+17. `gam_yield_group_exclusions_preview`
+18. `gam_yield_group_exclusions_apply`
+19. `gam_scratchpad_open_session`
+20. `gam_scratchpad_close_session`
+21. `gam_scratchpad_list_sessions`
+22. `gam_scratchpad_list_tables`
+23. `gam_scratchpad_drop_table`
+24. `gam_scratchpad_query`
+25. `gam_scratchpad_ingest_network_catalog`
+26. `gam_scratchpad_ingest_report_result_rows`
+27. `gam_scratchpad_ingest_soap_line_items`
+28. `gam_scratchpad_export_evidence_bundle`
 
 `find_tools` is also exposed for deferred-loading and `tool_search` clients.
 
@@ -139,6 +142,13 @@ ad-unit and placement rows plus SOAP LineItemService reads. It classifies exact,
 ancestor-descendant, placement, root/network, and excluded targeting evidence,
 and returns capped or incomplete proof flags rather than an archive/deactivate
 decision.
+
+`gam_ad_unit_retirement_assessment` is a separate decisioning layer. It accepts
+only exact ad-unit ids, fingerprints current REST identities, reconciles the
+current ad-unit hierarchy and descendants, and grades freshness-bound
+dependency, delivery, protection, site-contract, and telemetry receipts. Its
+strongest result still requires separate operator review; it never verifies
+operator identity, authorizes, or applies a GAM mutation.
 
 `gam_yield_group_exclusions_preview` and
 `gam_yield_group_exclusions_apply` are the typed mutation path for descendant-safe
