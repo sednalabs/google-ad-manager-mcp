@@ -142,9 +142,10 @@ fn secret_value_extends_past_token(lower: &str) -> bool {
         "refresh_token",
         "client_secret",
     ] {
-        if lower.match_indices(key).any(|(start, _)| {
-            credential_occurrence_needs_following_value(lower, start, key)
-        }) {
+        if lower
+            .match_indices(key)
+            .any(|(start, _)| credential_occurrence_needs_following_value(lower, start, key))
+        {
             return true;
         }
     }
@@ -201,11 +202,7 @@ fn assigned_value_after_key<'a>(lower: &'a str, key: &str) -> Option<&'a str> {
     assigned_value_after_occurrence(lower, start, key)
 }
 
-fn assigned_value_after_occurrence<'a>(
-    lower: &'a str,
-    start: usize,
-    key: &str,
-) -> Option<&'a str> {
+fn assigned_value_after_occurrence<'a>(lower: &'a str, start: usize, key: &str) -> Option<&'a str> {
     let tail = &lower[start + key.len()..];
     let separator = tail.find([':', '='])?;
     if tail[..separator]
