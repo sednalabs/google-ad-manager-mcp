@@ -206,13 +206,19 @@ fn assigned_value_after_occurrence<'a>(lower: &'a str, start: usize, key: &str) 
     let marker_end = start + key.len();
     let tail = &lower[marker_end..next_secret_marker_start(lower, marker_end)];
     let separator = tail.find([':', '='])?;
-    if tail[..separator]
-        .chars()
-        .any(|ch| !(ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-')))
-    {
+    if !allowed_credential_key_extension(key, &tail[..separator]) {
         return None;
     }
-    Some(tail[separator + 1..].trim_matches(|ch| !credential_value_char(ch)))
+    Some(
+        attached_value_segment(&tail[separator + 1..])
+            .trim_matches(|ch| !credential_value_char(ch)),
+    )
+}
+
+fn allowed_credential_key_extension(key: &str, extension: &str) -> bool {
+    extension.is_empty()
+        || key == "access_token" && extension == "_value"
+        || key == "private_key" && extension == "_material"
 }
 
 fn credential_occurrence_needs_following_value(lower: &str, start: usize, key: &str) -> bool {
@@ -225,9 +231,20 @@ fn credential_occurrence_needs_following_value(lower: &str, start: usize, key: &
 
 fn marker_has_inline_material(lower: &str, start: usize, marker_len: usize) -> bool {
     let marker_end = start + marker_len;
-    lower[marker_end..next_secret_marker_start(lower, marker_end)]
+    attached_value_segment(&lower[marker_end..next_secret_marker_start(lower, marker_end)])
         .chars()
         .any(char::is_alphanumeric)
+}
+
+fn attached_value_segment(value: &str) -> &str {
+    let value = value
+        .strip_prefix(':')
+        .or_else(|| value.strip_prefix('='))
+        .unwrap_or(value);
+    let end = value
+        .find(|ch| matches!(ch, ';' | ',' | '&' | '?' | '|' | '"' | '\'' | ')' | ']' | '}' | '>'))
+        .unwrap_or(value.len());
+    &value[..end]
 }
 
 fn next_secret_marker_start(lower: &str, after: usize) -> usize {
@@ -279,13 +296,6 @@ fn exact_ascii_phrase(actual: &[&str], expected: &[&str]) -> bool {
             .iter()
             .zip(expected)
             .all(|(actual, expected)| actual.eq_ignore_ascii_case(expected))
-}
-
-fn authorization_needs_following_value(lower: &str) -> bool {
-    match assigned_value_after_key(lower, "authorization") {
-        None | Some("") | Some("bearer" | "basic") => true,
-        Some(_) => false,
-    }
 }
 
 fn contains_scheme_marker(lower: &str) -> bool {
@@ -561,6 +571,20 @@ mod tests {
                 "[redacted] [redacted]",
             ),
             ("BearerBasic opaque-secret", "[redacted] [redacted]"),
+            (
+                "access_token=;reason=missing opaque-secret",
+                "[redacted] [redacted]",
+            ),
+            (
+                "access_token-reason=missing opaque-secret",
+                "[redacted] [redacted]",
+            ),
+            (
+                "access_token_reason=missing opaque-secret",
+                "[redacted] [redacted]",
+            ),
+            ("Bearer;reason=missing opaque-secret", "[redacted] [redacted]"),
+            ("ya29.;reason=missing opaque-secret", "[redacted] [redacted]"),
         ] {
             assert_eq!(redact_secret_text(source), expected);
         }
