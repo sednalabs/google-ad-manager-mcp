@@ -152,14 +152,20 @@ fn secret_value_extends_past_token(lower: &str) -> bool {
     for scheme in ["bearer", "basic"] {
         if lower
             .match_indices(scheme)
-            .any(|(start, _)| !marker_has_inline_material(lower, start, scheme.len()))
+            .any(|(start, _)| {
+                !marker_assignment_delegates_to_next_marker(lower, start, scheme.len())
+                    && !marker_has_inline_material(lower, start, scheme.len())
+            })
         {
             return true;
         }
     }
     lower
         .match_indices("ya29.")
-        .any(|(start, _)| !marker_has_inline_material(lower, start, "ya29.".len()))
+        .any(|(start, _)| {
+            !marker_assignment_delegates_to_next_marker(lower, start, "ya29.".len())
+                && !marker_has_inline_material(lower, start, "ya29.".len())
+        })
 }
 
 fn compound_secret_key_start(lower: &str, key: &str) -> Option<usize> {
@@ -222,10 +228,8 @@ fn credential_occurrence_needs_following_value(lower: &str, start: usize, key: &
     if assignment_delegates_to_next_marker(lower, start, key) {
         return false;
     }
-    match assigned_value_after_occurrence(lower, start, key) {
-        Some(value) if value.chars().any(|ch| ch.is_ascii_alphanumeric()) => false,
-        _ => true,
-    }
+    !assigned_value_after_occurrence(lower, start, key)
+        .is_some_and(|value| value.chars().any(|ch| ch.is_ascii_alphanumeric()))
 }
 
 fn assignment_delegates_to_next_marker(lower: &str, start: usize, key: &str) -> bool {
@@ -246,6 +250,16 @@ fn marker_has_inline_material(lower: &str, start: usize, marker_len: usize) -> b
     attached_marker_value(&lower[marker_end..next_secret_marker_start(lower, marker_end)])
         .chars()
         .any(char::is_alphanumeric)
+}
+
+fn marker_assignment_delegates_to_next_marker(
+    lower: &str,
+    start: usize,
+    marker_len: usize,
+) -> bool {
+    let marker_end = start + marker_len;
+    let next_marker = next_secret_marker_start(lower, marker_end);
+    next_marker != lower.len() && matches!(&lower[marker_end..next_marker], ":" | "=")
 }
 
 fn attached_marker_value(value: &str) -> &str {
@@ -622,10 +636,14 @@ mod tests {
             ("access_token=ya29.synthetic ok", "[redacted] ok"),
             ("Authorization=Bearer:opaque ok", "[redacted] ok"),
             ("access_token=client_secret=masked ok", "[redacted] ok"),
+            ("Bearer=ya29.synthetic ok", "[redacted] ok"),
+            ("ya29.=access_token=masked ok", "[redacted] ok"),
             (
                 "authorization=Bearer opaque-secret",
                 "[redacted] [redacted]",
             ),
+            ("Bearer=ya29. opaque-secret", "[redacted] [redacted]"),
+            ("ya29.=access_token opaque-secret", "[redacted] [redacted]"),
             ("access_token=--- opaque-secret", "[redacted] [redacted]"),
             ("access_token=... opaque-secret", "[redacted] [redacted]"),
             (
