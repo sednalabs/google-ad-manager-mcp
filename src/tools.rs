@@ -15,8 +15,9 @@ use serde_json::{Map, Value, json};
 use tokio::process::Command;
 
 use crate::ad_unit_retirement::{
-    AdUnitRetirementAssessmentArgs, MAX_WIRE_RESULT_BYTES, RetirementEvidenceSource,
-    RetirementEvidenceState, assess_ad_unit_retirement, evidence_receipt_template, response_bytes,
+    AdUnitRetirementAssessmentArgs, MAX_MODEL_VISIBLE_RESULT_BYTES, MAX_WIRE_RESULT_BYTES,
+    RetirementEvidenceSource, RetirementEvidenceState, assess_ad_unit_retirement,
+    evidence_receipt_template, response_bytes,
 };
 use crate::auth_ux::{gcloud_adc_login_command, shell_join_with_cloudsdk_config};
 use crate::client::{
@@ -1262,6 +1263,7 @@ impl AdManagerServer {
                 "ad_unit_page_size": ad_unit_page_size,
                 "max_ad_units": max_ad_units,
                 "serialized_response_bytes": serialized_response_bytes,
+                "max_model_visible_result_bytes": MAX_MODEL_VISIBLE_RESULT_BYTES,
                 "max_wire_result_bytes": MAX_WIRE_RESULT_BYTES,
                 "policy": provider_safety_contract_json(),
             }),
@@ -3700,16 +3702,26 @@ fn success_with_wire_guard(
 ) -> CallToolResult {
     let error_started = started;
     let result = contract::success_with_meta(data, meta, started);
-    match serde_json::to_vec(&result) {
-        Ok(serialized) if serialized.len() <= MAX_WIRE_RESULT_BYTES => result,
-        Ok(_) => contract::error(
+    let structured_bytes = result
+        .structured_content
+        .as_ref()
+        .and_then(|value| serde_json::to_vec(value).ok())
+        .map(|bytes| bytes.len());
+    let wire_bytes = serde_json::to_vec(&result).ok().map(|bytes| bytes.len());
+    match (structured_bytes, wire_bytes) {
+        (Some(structured), Some(wire))
+            if structured <= MAX_MODEL_VISIBLE_RESULT_BYTES && wire <= MAX_WIRE_RESULT_BYTES =>
+        {
+            result
+        }
+        (Some(_), Some(_)) => contract::error(
             AdManagerError::invalid(
                 field,
-                "tool result exceeded its model-visible wire cap; narrow the target set, reduce page limits, omit raw XML, or ingest the evidence into the scratchpad",
+                "tool result exceeded its model-visible item or wire cap; narrow the target set, reduce page limits, omit raw XML, or ingest the evidence into the scratchpad",
             ),
             error_started,
         ),
-        Err(_) => contract::error(
+        _ => contract::error(
             AdManagerError::invalid(
                 field,
                 "tool result could not be serialized for its model-visible wire-size guard",
@@ -7229,7 +7241,7 @@ mod tests {
     #[test]
     fn proof_tool_wire_guard_replaces_oversized_results() {
         let result = success_with_wire_guard(
-            json!({"value":"x".repeat(MAX_WIRE_RESULT_BYTES)}),
+            json!({"value":"x".repeat(MAX_MODEL_VISIBLE_RESULT_BYTES)}),
             json!({"mutation_performed":false}),
             Instant::now(),
             "dependency_probe_result",

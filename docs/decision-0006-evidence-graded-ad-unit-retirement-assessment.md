@@ -44,8 +44,10 @@ automatically eligible retirement decision. Explicit operator approval and any
 guarded write remain separate workflows.
 
 Parent and child targets may be assessed together, but the response records a
-required child-first order. Inner assessment data is capped at 5 KiB and the
-final serialized tool result at 8 KiB. The dependency and exchange/protection
-proof tools use the same final wire cap. Over-limit results fail closed and ask
-the operator to narrow targets or page limits, omit optional raw XML, or ingest
-the underlying evidence into the scratchpad.
+required child-first order. Inner assessment data is capped at 5 KiB, each
+model-visible structured result at 8 KiB, and the final serialized RMCP result
+at 20 KiB to account for the protocol's duplicate text representation. The
+dependency and exchange/protection proof tools use the same item and wire caps.
+Over-limit results fail closed and ask the operator to narrow targets or page
+limits, omit optional raw XML, or ingest the underlying evidence into the
+scratchpad.

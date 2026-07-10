@@ -768,10 +768,22 @@ fn positive_recommendation_uses_real_evidence_grader() {
             "ad_unit_page_size":100,
             "max_ad_units":100,
             "serialized_response_bytes":response_bytes(&result),
+            "max_model_visible_result_bytes":MAX_MODEL_VISIBLE_RESULT_BYTES,
             "max_wire_result_bytes":MAX_WIRE_RESULT_BYTES,
             "policy":crate::tools::provider_safety_contract_json(),
         }),
         std::time::Instant::now(),
+    );
+    assert!(
+        serde_json::to_vec(
+            wire_result
+                .structured_content
+                .as_ref()
+                .expect("representative result must include structured content")
+        )
+        .expect("representative structured result must serialize")
+        .len()
+            <= MAX_MODEL_VISIBLE_RESULT_BYTES
     );
     assert!(
         serde_json::to_vec(&wire_result)

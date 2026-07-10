@@ -28,7 +28,8 @@ pub(crate) use receipt::{
 
 const MAX_RETIREMENT_TARGETS: usize = 10;
 const MAX_INNER_DATA_BYTES: usize = 5 * 1024;
-pub(crate) const MAX_WIRE_RESULT_BYTES: usize = 8 * 1024;
+pub(crate) const MAX_MODEL_VISIBLE_RESULT_BYTES: usize = 8 * 1024;
+pub(crate) const MAX_WIRE_RESULT_BYTES: usize = 20 * 1024;
 
 #[allow(dead_code)]
 #[derive(JsonSchema)]
@@ -133,6 +134,7 @@ fn build_assessment_response(
         "response_contract": {
             "compact": true,
             "max_inner_data_bytes": MAX_INNER_DATA_BYTES,
+            "max_model_visible_result_bytes": MAX_MODEL_VISIBLE_RESULT_BYTES,
             "max_wire_result_bytes": MAX_WIRE_RESULT_BYTES,
         }
     });

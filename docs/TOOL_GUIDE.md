@@ -169,11 +169,12 @@ the identity of a person who supplied or edited one. The strongest decision is
 therefore `evidence_complete_operator_review_required`, never automatic
 retirement eligibility. The response always reports `mutation_performed=false`.
 Identity and descendant details are compact, ancestry mismatches fail closed,
-and the response is capped at 5 KiB for inner data and 8 KiB on the final wire.
-The dependency and exchange/protection probes also fail closed above the 8 KiB
-wire cap. Narrow targets or page limits, omit optional raw XML, or preserve the
-full evidence in the scratchpad when a proof is too large for the model-visible
-result.
+and the response is capped at 5 KiB for inner data, 8 KiB for each model-visible
+structured result, and 20 KiB for the final serialized RMCP result after its
+duplicate text representation. The dependency and exchange/protection probes
+use the same item and wire caps. Narrow targets or page limits, omit optional
+raw XML, or preserve the full evidence in the scratchpad when a proof is too
+large for the model-visible result.
 
 ## `gam_report_run`
 
