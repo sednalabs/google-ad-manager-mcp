@@ -209,10 +209,7 @@ fn assigned_value_after_occurrence<'a>(lower: &'a str, start: usize, key: &str) 
     if !allowed_credential_key_extension(key, &tail[..separator]) {
         return None;
     }
-    Some(
-        attached_value_segment(&tail[separator + 1..])
-            .trim_matches(|ch| !credential_value_char(ch)),
-    )
+    Some(credential_value_prefix(&tail[separator + 1..]))
 }
 
 fn allowed_credential_key_extension(key: &str, extension: &str) -> bool {
@@ -231,23 +228,22 @@ fn credential_occurrence_needs_following_value(lower: &str, start: usize, key: &
 
 fn marker_has_inline_material(lower: &str, start: usize, marker_len: usize) -> bool {
     let marker_end = start + marker_len;
-    attached_value_segment(&lower[marker_end..next_secret_marker_start(lower, marker_end)])
+    attached_marker_value(&lower[marker_end..next_secret_marker_start(lower, marker_end)])
         .chars()
         .any(char::is_alphanumeric)
 }
 
-fn attached_value_segment(value: &str) -> &str {
+fn attached_marker_value(value: &str) -> &str {
     let value = value
         .strip_prefix(':')
         .or_else(|| value.strip_prefix('='))
         .unwrap_or(value);
+    credential_value_prefix(value)
+}
+
+fn credential_value_prefix(value: &str) -> &str {
     let end = value
-        .find(|ch| {
-            matches!(
-                ch,
-                ';' | ',' | '&' | '?' | '|' | '"' | '\'' | ')' | ']' | '}' | '>'
-            )
-        })
+        .find(|ch| !credential_value_char(ch))
         .unwrap_or(value.len());
     &value[..end]
 }
@@ -596,6 +592,24 @@ mod tests {
                 "ya29.;reason=missing opaque-secret",
                 "[redacted] [redacted]",
             ),
+            (
+                "access_token=#reason=missing opaque-secret",
+                "[redacted] [redacted]",
+            ),
+            (
+                "access_token=/reason=missing opaque-secret",
+                "[redacted] [redacted]",
+            ),
+            (
+                "access_token==reason=missing opaque-secret",
+                "[redacted] [redacted]",
+            ),
+            ("Bearer#reason=missing opaque-secret", "[redacted] [redacted]"),
+            ("Bearer/reason=missing opaque-secret", "[redacted] [redacted]"),
+            ("Bearer=:reason=missing opaque-secret", "[redacted] [redacted]"),
+            ("ya29.#reason=missing opaque-secret", "[redacted] [redacted]"),
+            ("ya29./reason=missing opaque-secret", "[redacted] [redacted]"),
+            ("ya29.==reason=missing opaque-secret", "[redacted] [redacted]"),
         ] {
             assert_eq!(redact_secret_text(source), expected);
         }
