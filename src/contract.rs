@@ -228,7 +228,8 @@ fn credential_key_starts_value(lower: &str, key: &str, next: Option<&str>) -> bo
     }
     assigned_value_after_key(lower, key).is_some()
         || next.is_some_and(|value| {
-            redaction_separator_token(value)
+            key != "authorization"
+                || redaction_separator_token(value)
                 || !benign_diagnostic_qualifier(&value.to_ascii_lowercase())
         })
 }
@@ -240,7 +241,7 @@ fn scheme_starts_credential(lower: &str, next: Option<&str>) -> bool {
     let Some(next) = next else {
         return false;
     };
-    !benign_diagnostic_qualifier(&next.to_ascii_lowercase())
+    !next.is_empty()
 }
 
 fn benign_diagnostic_qualifier(value: &str) -> bool {
@@ -401,7 +402,14 @@ mod tests {
             ("access_token=opaque-secret ok", "[redacted] ok"),
             ("ya29.synthetic ok", "[redacted] ok"),
             ("authorization failed safely", "authorization failed safely"),
-            ("basic validation failed", "basic validation failed"),
+            (
+                "basic validation failed",
+                "[redacted] [redacted] [redacted]",
+            ),
+            (
+                "access_token missing opaque-secret",
+                "[redacted] [redacted] [redacted]",
+            ),
             (
                 "private_key_rotation_failed please retry",
                 "private_key_rotation_failed please retry",
