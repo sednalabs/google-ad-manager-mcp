@@ -1706,7 +1706,11 @@ fn clip_message(message: String) -> String {
     if trimmed.len() <= 800 {
         trimmed.to_string()
     } else {
-        format!("{}...", &trimmed[..800])
+        let mut end = 800;
+        while !trimmed.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}...", &trimmed[..end])
     }
 }
 
@@ -1715,8 +1719,8 @@ mod tests {
     use super::{
         AdManagerClient, CatalogCollection, MAX_SOAP_RESPONSE_XML_BYTES, RestWriteOperation,
         RestWriteResource, SOAP_ENVELOPE_NAMESPACE, SoapTraffickingOperation, classify_soap_impact,
-        clip_xml_response, extract_xml_tag, validate_operation_name, validate_report_result_name,
-        validate_rest_write_body, validate_soap_payload_xml,
+        clip_message, clip_xml_response, extract_xml_tag, validate_operation_name,
+        validate_report_result_name, validate_rest_write_body, validate_soap_payload_xml,
     };
     use crate::Settings;
     use serde_json::json;
@@ -1993,6 +1997,13 @@ mod tests {
         let (clipped, truncated) = clip_xml_response(oversized);
         assert!(truncated);
         assert!(clipped.ends_with("..."));
+        assert!(clipped.is_char_boundary(clipped.len()));
+    }
+
+    #[test]
+    fn clip_message_respects_utf8_boundaries() {
+        let clipped = clip_message("A".repeat(799) + "€tail");
+        assert_eq!(clipped, format!("{}...", "A".repeat(799)));
         assert!(clipped.is_char_boundary(clipped.len()));
     }
 

@@ -42,6 +42,7 @@ const DEPENDENCY_PLACEMENT_MEMBER_SAMPLE_LIMIT: usize = 50;
 const DEPENDENCY_TARGET_PLACEMENT_ID_LIMIT: usize = 200;
 const DEPENDENCY_LINE_ITEM_MATCH_SAMPLE_LIMIT: usize = 50;
 const DEPENDENCY_LINE_ITEM_XML_SAMPLE_BYTES: usize = 4096;
+const PROBE_DIAGNOSTIC_SAMPLE_BYTES: usize = 800;
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct GetStartedArgs {}
@@ -3062,7 +3063,7 @@ fn blocked_probe_surface(surface: &str, err: AdManagerError) -> Value {
         "surface": surface,
         "proof_state": "blocked",
         "block_class": block_class,
-        "error": contract::redact_secret_text(&err.to_string()),
+        "error": bounded_redacted_probe_text(&err.to_string()),
         "hint": err.hint(),
     })
 }
@@ -3121,16 +3122,20 @@ async fn probe_yield_groups(
             applied.soap_fault.as_deref(),
             &applied.upstream_response_xml,
         );
+        let message = bounded_redacted_probe_text(&soap_error_message(&applied));
+        let request_id = bounded_redacted_probe_text_option(applied.request_id);
+        let response_time = bounded_redacted_probe_text_option(applied.response_time);
+        let soap_fault = bounded_redacted_probe_text_option(applied.soap_fault);
         return Ok(json!({
             "surface": "yield_groups",
             "decision": "blocked",
             "proof_state": "blocked",
             "block_class": block_class,
             "upstream_status": applied.upstream_status,
-            "request_id": applied.request_id,
-            "response_time": applied.response_time,
-            "soap_fault": applied.soap_fault,
-            "message": contract::redact_secret_text(&soap_error_message(&applied)),
+            "request_id": request_id,
+            "response_time": response_time,
+            "soap_fault": soap_fault,
+            "message": message,
             "mutation_performed": false,
         }));
     }
@@ -3355,7 +3360,7 @@ impl LineItemProbeBlock {
     fn from_error(err: &AdManagerError) -> Self {
         Self::Error {
             block_class: probe_error_block_class(err),
-            error: contract::redact_secret_text(&err.to_string()),
+            error: bounded_redacted_probe_text(&err.to_string()),
             hint: err.hint(),
         }
     }
@@ -3504,15 +3509,18 @@ impl LineItemDependencyScanState {
             applied.soap_fault.as_deref(),
             &applied.upstream_response_xml,
         );
-        let message = contract::redact_secret_text(&soap_error_message(&applied));
+        let message = bounded_redacted_probe_text(&soap_error_message(&applied));
+        let request_id = bounded_redacted_probe_text_option(applied.request_id);
+        let response_time = bounded_redacted_probe_text_option(applied.response_time);
+        let soap_fault = bounded_redacted_probe_text_option(applied.soap_fault);
         self.into_blocked_response(
             options,
             LineItemProbeBlock::Soap {
                 block_class,
                 upstream_status: applied.upstream_status,
-                request_id: applied.request_id,
-                response_time: applied.response_time,
-                soap_fault: applied.soap_fault,
+                request_id,
+                response_time,
+                soap_fault,
                 message,
             },
         )
@@ -3752,6 +3760,15 @@ fn bounded_text_sample(value: &str, max_bytes: usize) -> (String, bool) {
         end = end.saturating_sub(1);
     }
     (value[..end].to_string(), true)
+}
+
+fn bounded_redacted_probe_text(value: &str) -> String {
+    let redacted = contract::redact_secret_text(value);
+    bounded_text_sample(&redacted, PROBE_DIAGNOSTIC_SAMPLE_BYTES).0
+}
+
+fn bounded_redacted_probe_text_option(value: Option<String>) -> Option<String> {
+    value.map(|value| bounded_redacted_probe_text(&value))
 }
 
 fn unique_xml_texts(value: &str, tag: &str) -> Vec<String> {
@@ -7546,7 +7563,10 @@ mod tests {
                 response_truncated: true,
                 request_id: Some("request-2".to_string()),
                 response_time: Some("44".to_string()),
-                soap_fault: Some("ServerError.SERVER_ERROR".to_string()),
+                soap_fault: Some(format!(
+                    "ServerError.SERVER_ERROR Authorization: Bearer opaque-secret {}",
+                    "€".repeat(400)
+                )),
             }),
         ]);
         let mut expected_offset = 0;
@@ -7569,7 +7589,17 @@ mod tests {
         assert_eq!(blocked["upstream_status"], 503);
         assert_eq!(blocked["request_id"], "request-2");
         assert_eq!(blocked["response_time"], "44");
-        assert_eq!(blocked["soap_fault"], "ServerError.SERVER_ERROR");
+        assert!(
+            blocked["soap_fault"]
+                .as_str()
+                .is_some_and(|fault| fault.starts_with("ServerError.SERVER_ERROR"))
+        );
+        assert!(
+            blocked["soap_fault"]
+                .as_str()
+                .is_some_and(|fault| fault.len() <= PROBE_DIAGNOSTIC_SAMPLE_BYTES)
+        );
+        assert!(!blocked["soap_fault"].to_string().contains("opaque-secret"));
         assert_eq!(blocked["total_result_set_size"], 2);
         assert_eq!(blocked["inspected_results"], 1);
         assert_eq!(blocked["request_ids"], json!(["request-1"]));

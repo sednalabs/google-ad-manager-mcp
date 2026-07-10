@@ -110,17 +110,41 @@ pub fn scratchpad_error(err: ScratchpadError, started: Instant) -> CallToolResul
 
 pub fn redact_secret_text(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
+    let mut redact_following = 0_usize;
+    let mut redact_rest = false;
     for token in input.split_whitespace() {
         if !out.is_empty() {
             out.push(' ');
         }
-        if looks_secret_bearing(token) {
+        let lower = token.to_ascii_lowercase();
+        if redact_rest {
             out.push_str("[redacted]");
+        } else if redact_following > 0 {
+            out.push_str("[redacted]");
+            redact_following = redact_following.saturating_sub(1);
+            extend_secret_redaction(&lower, &mut redact_following, &mut redact_rest);
+        } else if looks_secret_bearing(token) {
+            out.push_str("[redacted]");
+            extend_secret_redaction(&lower, &mut redact_following, &mut redact_rest);
         } else {
             out.push_str(token);
         }
     }
     out
+}
+
+fn extend_secret_redaction(lower: &str, following: &mut usize, rest: &mut bool) {
+    if lower.contains("private_key") || lower.contains("-----begin") {
+        *rest = true;
+    } else if lower.contains("authorization:") || lower == "authorization" {
+        *following = (*following).max(3);
+    } else if matches!(lower, "bearer" | "basic")
+        || lower.contains("access_token")
+        || lower.contains("refresh_token")
+        || lower.contains("client_secret")
+    {
+        *following = (*following).max(1);
+    }
 }
 
 pub fn redact_secret_value(value: Value) -> Value {
@@ -157,6 +181,8 @@ fn looks_secret_bearing(token: &str) -> bool {
         || lower.contains("client_secret")
         || lower.contains("private_key")
         || lower.contains("authorization:")
+        || matches!(lower.as_str(), "authorization" | "bearer" | "basic")
+        || lower.contains("-----begin")
         || lower.starts_with("ya29.")
 }
 
@@ -167,11 +193,17 @@ mod tests {
     #[test]
     fn redacts_secret_bearing_tokens() {
         let redacted = redact_secret_text(
-            "authorization: Bearer ya29.secret private_key=xyz access_token=abc ok",
+            "authorization: Bearer opaque-secret access_token next-secret ok",
         );
-        assert!(!redacted.contains("ya29.secret"));
-        assert!(!redacted.contains("xyz"));
-        assert!(!redacted.contains("abc"));
+        assert!(!redacted.contains("opaque-secret"));
+        assert!(!redacted.contains("next-secret"));
         assert!(redacted.contains("ok"));
+
+        let spaced = redact_secret_text("Authorization : Bearer another-opaque-secret ok");
+        assert!(!spaced.contains("another-opaque-secret"));
+
+        let private_key = redact_secret_text("private_key: -----BEGIN PRIVATE KEY----- secret");
+        assert!(!private_key.contains("BEGIN"));
+        assert!(!private_key.contains("secret"));
     }
 }

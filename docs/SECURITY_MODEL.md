@@ -143,3 +143,8 @@ This server bounds that surface by:
 Errors are redacted before being returned through Contract V1 envelopes.
 Secret-bearing tokens such as `access_token`, `private_key`, and bearer headers
 are replaced with `[redacted]`.
+
+Probe blocked-success diagnostics use the same redaction boundary and a
+UTF-8-safe byte cap before fingerprinting. SOAP faults, request metadata, and
+provider error text are returned only as bounded diagnostic samples; a
+multibyte character at the cap cannot panic or split invalid UTF-8.
