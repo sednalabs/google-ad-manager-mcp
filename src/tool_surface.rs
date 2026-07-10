@@ -38,7 +38,7 @@ pub(crate) fn build_tool_inventory() -> Result<ToolInventory, ToolInventoryError
         cap(
             "gam_network_catalog_list",
             "catalog",
-            "List a curated Google Ad Manager network collection such as ad units, orders, line items, private auctions, private auction deals, or reports.",
+            "List a curated Google Ad Manager network collection such as ad units, orders, line items, placements, private auctions, private auction deals, or reports.",
             [
                 "google",
                 "ad-manager",
@@ -63,6 +63,21 @@ pub(crate) fn build_tool_inventory() -> Result<ToolInventory, ToolInventoryError
                 "private-auctions",
                 "adsense",
                 "ad-units",
+            ],
+        ),
+        cap(
+            "gam_ad_unit_dependency_probe",
+            "catalog",
+            "Read-only dependency proof for exact ad units across placements and SOAP line-item inventory targeting.",
+            [
+                "google",
+                "ad-manager",
+                "ad-units",
+                "dependencies",
+                "placements",
+                "line-items",
+                "targeting",
+                "cleanup",
             ],
         ),
         cap(
@@ -427,6 +442,26 @@ mod tests {
             results
                 .iter()
                 .any(|result| result.name == "gam_exchange_protection_probe")
+        );
+    }
+
+    #[test]
+    fn inventory_search_finds_ad_unit_dependency_probe() {
+        let inventory = build_tool_inventory().expect("inventory");
+        let results = inventory.search(
+            &ToolSearchFilter {
+                query: Some("ad unit dependencies placement line item targeting".to_string()),
+                group: Some("catalog".to_string()),
+                read_only: Some(true),
+                limit: Some(10),
+            },
+            ToolOperation::List,
+            &ToolInventoryPolicy::strict(),
+        );
+        assert!(
+            results
+                .iter()
+                .any(|result| result.name == "gam_ad_unit_dependency_probe")
         );
     }
 }

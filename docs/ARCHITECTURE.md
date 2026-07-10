@@ -120,14 +120,25 @@ matter most for a first useful release and the exchange-proof workflow:
 - ad units
 - orders
 - line items
+- placements
 - private auctions
 - private auction deals
 - saved reports
+
+The public `CatalogCollection` enum is non-exhaustive. New curated collections
+may be added while the crate remains alpha, and downstream callers should keep a
+fallback arm for exhaustive matches.
 
 `gam_exchange_protection_probe` layers a product-neutral proof workflow over
 those catalog reads and SOAP YieldGroupService reads. It reports partial proof
 states for capped, blocked, or unsupported protection surfaces instead of
 turning missing API coverage into a clean result.
+
+`gam_ad_unit_dependency_probe` layers a read-only dependency workflow over REST
+ad-unit and placement rows plus SOAP LineItemService reads. It classifies exact,
+ancestor-descendant, placement, root/network, and excluded targeting evidence,
+and returns capped or incomplete proof flags rather than an archive/deactivate
+decision.
 
 `gam_yield_group_exclusions_preview` and
 `gam_yield_group_exclusions_apply` are the typed mutation path for descendant-safe
