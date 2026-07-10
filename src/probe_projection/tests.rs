@@ -344,9 +344,8 @@ fn completed_dependency(sample_only: bool) -> Value {
 fn ancestor_incomplete_dependency() -> Value {
     let mut full = completed_dependency(false);
     full["ad_units"][0]["ancestor_identity_complete"] = json!(false);
-    full["target_resolution_issues"] = json!([
-        "ad unit code unit-1 returned malformed or foreign ancestor identities"
-    ]);
+    full["target_resolution_issues"] =
+        json!(["ad unit code unit-1 returned malformed or foreign ancestor identities"]);
     full["proof_flags"]["target_resolution_incomplete"] = json!(true);
     full["dependency_decision"] = json!("missing_or_ambiguous_targets");
     reseal(full, ProbeKind::AdUnitDependency, false)
@@ -449,8 +448,7 @@ fn maximal_exchange_and_dependency_are_bounded_and_keep_receipt_state() {
                 .unwrap()
                 .iter()
                 .find(|row| {
-                    row["path"]
-                        == "/line_items/dependency_matches_sample/*/upstream_xml_sample"
+                    row["path"] == "/line_items/dependency_matches_sample/*/upstream_xml_sample"
                 })
                 .expect("XML omission");
             let omitted_samples = json!(["x".repeat(4_096)]);
@@ -534,9 +532,8 @@ fn dependency_ad_unit_variants_and_ancestor_eligibility_match_the_producer() {
     incomplete_without_issue["ad_units"][0]["ancestor_identity_complete"] = json!(false);
 
     let mut complete_with_issue = dependency(true, 9_000);
-    complete_with_issue["target_resolution_issues"] = json!([
-        "ad unit code unit-1 returned malformed or foreign ancestor identities"
-    ]);
+    complete_with_issue["target_resolution_issues"] =
+        json!(["ad unit code unit-1 returned malformed or foreign ancestor identities"]);
     complete_with_issue["proof_flags"]["target_resolution_incomplete"] = json!(true);
 
     let mut missing_with_match = unresolved_code_variant_dependency();
@@ -585,7 +582,11 @@ fn placement_state_and_variant_shape_match_the_producer() {
     capped["proof_flags"]["placements_capped_or_shape_unknown"] = json!(true);
     capped = reseal(capped, ProbeKind::AdUnitDependency, true);
 
-    for full in [dependency(true, 9_000), capped, blocked_placement_dependency()] {
+    for full in [
+        dependency(true, 9_000),
+        capped,
+        blocked_placement_dependency(),
+    ] {
         assert!(
             compact_success(
                 ProbeKind::AdUnitDependency,
@@ -602,8 +603,7 @@ fn placement_state_and_variant_shape_match_the_producer() {
 
     let mut next_page_without_cap = dependency(true, 9_000);
     next_page_without_cap["placements"]["next_page_token_present"] = json!(true);
-    next_page_without_cap["placements"]["proof_state"] =
-        json!("sample_or_shape_incomplete");
+    next_page_without_cap["placements"]["proof_state"] = json!("sample_or_shape_incomplete");
     next_page_without_cap["proof_flags"]["placements_capped_or_shape_unknown"] = json!(true);
 
     let mut unknown_but_complete = dependency(true, 9_000);
@@ -748,8 +748,7 @@ fn contradictory_dependency_source_semantics_fail_closed() {
     incomplete_xml = reseal(incomplete_xml, ProbeKind::AdUnitDependency, true);
 
     let mut impossible_xml = dependency(true, 9_000);
-    impossible_xml["line_items"]["dependency_matches_sample"][0]["upstream_xml_bytes"] =
-        json!(100);
+    impossible_xml["line_items"]["dependency_matches_sample"][0]["upstream_xml_bytes"] = json!(100);
     impossible_xml = reseal(impossible_xml, ProbeKind::AdUnitDependency, true);
 
     for full in [proof_flags, cleanup, incomplete_xml, impossible_xml] {
@@ -802,39 +801,37 @@ fn line_item_variant_hybrids_fail_closed() {
         json!("PermissionError.PERMISSION_DENIED");
 
     let mut classification_drift = dependency(true, 9_000);
-    classification_drift["line_items"]["dependency_matches_sample"][0]["target_matches"][0]
-        ["classification"] = json!("placement_target");
+    classification_drift["line_items"]["dependency_matches_sample"][0]["target_matches"][0]["classification"] =
+        json!("placement_target");
 
     let mut exclusion_drift = dependency(true, 9_000);
-    exclusion_drift["line_items"]["dependency_matches_sample"][0]["target_matches"][0]
-        ["dependency_excluded"] = json!(true);
+    exclusion_drift["line_items"]["dependency_matches_sample"][0]["target_matches"][0]["dependency_excluded"] =
+        json!(true);
 
     let mut duplicate_target = dependency(true, 9_000);
-    let repeated = duplicate_target["line_items"]["dependency_matches_sample"][0]
-        ["target_matches"][0]
-        .clone();
+    let repeated =
+        duplicate_target["line_items"]["dependency_matches_sample"][0]["target_matches"][0].clone();
     duplicate_target["line_items"]["dependency_matches_sample"][0]["target_matches"] =
         json!([repeated.clone(), repeated]);
 
     let mut exact_coverage_drift = dependency(true, 9_000);
-    exact_coverage_drift["line_items"]["dependency_matches_sample"][0]["target_matches"][0]
-        ["targeting_match"]["ad_unit_id"] = json!("999");
+    exact_coverage_drift["line_items"]["dependency_matches_sample"][0]["target_matches"][0]["targeting_match"]
+        ["ad_unit_id"] = json!("999");
 
     let mut ancestor_coverage_drift = dependency(true, 9_000);
-    ancestor_coverage_drift["line_items"]["dependency_matches_sample"][0]["target_matches"][0]
-        ["targeting_match"] = json!({
-            "ad_unit_id":"10","include_descendants":true,"match_type":"ancestor_descendant"
-        });
-    ancestor_coverage_drift["line_items"]["dependency_matches_sample"][0]["target_matches"][0]
-        ["classification"] = json!("ancestor_descendant_target");
+    ancestor_coverage_drift["line_items"]["dependency_matches_sample"][0]["target_matches"][0]["targeting_match"] = json!({
+        "ad_unit_id":"10","include_descendants":true,"match_type":"ancestor_descendant"
+    });
+    ancestor_coverage_drift["line_items"]["dependency_matches_sample"][0]["target_matches"][0]["classification"] =
+        json!("ancestor_descendant_target");
 
     let mut placement_coverage_drift = dependency(true, 9_000);
-    placement_coverage_drift["line_items"]["dependency_matches_sample"][0]["target_matches"][0]
-        ["targeting_match"] = Value::Null;
-    placement_coverage_drift["line_items"]["dependency_matches_sample"][0]["target_matches"][0]
-        ["matched_placement_ids"] = json!(["11"]);
-    placement_coverage_drift["line_items"]["dependency_matches_sample"][0]["target_matches"][0]
-        ["classification"] = json!("placement_target");
+    placement_coverage_drift["line_items"]["dependency_matches_sample"][0]["target_matches"][0]["targeting_match"] =
+        Value::Null;
+    placement_coverage_drift["line_items"]["dependency_matches_sample"][0]["target_matches"][0]["matched_placement_ids"] =
+        json!(["11"]);
+    placement_coverage_drift["line_items"]["dependency_matches_sample"][0]["target_matches"][0]["classification"] =
+        json!("placement_target");
 
     for (full, generated) in [
         (completed_with_error, true),
@@ -1036,13 +1033,9 @@ fn nested_evidence_cannot_escape_the_receipt_target_scope() {
     );
 
     let mut dependency_line_item = dependency(true, 9_000);
-    dependency_line_item["line_items"]["dependency_matches_sample"][0]["target_matches"][0]
-        ["ad_unit_id"] = json!("999");
-    dependency_line_item = reseal(
-        dependency_line_item,
-        ProbeKind::AdUnitDependency,
-        true,
-    );
+    dependency_line_item["line_items"]["dependency_matches_sample"][0]["target_matches"][0]["ad_unit_id"] =
+        json!("999");
+    dependency_line_item = reseal(dependency_line_item, ProbeKind::AdUnitDependency, true);
     assert!(
         compact_success(
             ProbeKind::AdUnitDependency,
@@ -1259,12 +1252,7 @@ fn compact_oversize_fails_closed() {
     let mut full = completed_dependency(false);
     full["line_items"]["status_counts"] = Value::Object(
         (0..200)
-            .map(|index| {
-                (
-                    format!("STATUS_{index:03}_{}", "x".repeat(45)),
-                    json!(1),
-                )
-            })
+            .map(|index| (format!("STATUS_{index:03}_{}", "x".repeat(45)), json!(1)))
             .collect(),
     );
     full["line_items"]["inspected_results"] = json!(200);

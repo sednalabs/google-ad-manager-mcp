@@ -65,8 +65,7 @@ pub(super) fn project_exchange(full: &Value) -> Result<(Value, Vec<Value>), Stri
     let yield_group_source = get(root, "yield_groups", "exchange probe")?;
     let rest_discovery = get(root, "rest_discovery", "exchange probe")?;
     let ad_unit_semantics = validate_exchange_ad_units(network_code, ad_units)?;
-    let auction_semantics =
-        validate_exchange_collection(private_auctions, "private_auctions")?;
+    let auction_semantics = validate_exchange_collection(private_auctions, "private_auctions")?;
     let deal_semantics =
         validate_exchange_collection(private_auction_deals, "private_auction_deals")?;
     let rest_semantics = validate_rest_discovery(rest_discovery)?;
@@ -134,17 +133,8 @@ pub(super) fn project_exchange(full: &Value) -> Result<(Value, Vec<Value>), Stri
         "/private_auction_deals",
         &mut ledger,
     )?;
-    let yield_groups = exchange_yield(
-        yield_group_source,
-        "/yield_groups",
-        &targets,
-        &mut ledger,
-    )?;
-    let discovery = exchange_discovery(
-        rest_discovery,
-        "/rest_discovery",
-        &mut ledger,
-    )?;
+    let yield_groups = exchange_yield(yield_group_source, "/yield_groups", &targets, &mut ledger)?;
+    let discovery = exchange_discovery(rest_discovery, "/rest_discovery", &mut ledger)?;
     Ok((
         json!({
             "network_code": root["network_code"],
@@ -348,7 +338,9 @@ fn validate_exchange_ad_unit(
             if flag(source, "proof_complete", "exchange ad unit")? != proof_complete
                 || text(source, "decision", "exchange ad unit")? != decision
             {
-                return Err("exchange ad-unit decision contradicted retained producer evidence".into());
+                return Err(
+                    "exchange ad-unit decision contradicted retained producer evidence".into(),
+                );
             }
             Ok(ExchangeAdUnitSemantics {
                 proof_state: expected_state,
@@ -387,9 +379,7 @@ fn exchange_ad_unit_string_counts(
     counts
 }
 
-fn exchange_ad_unit_bool_counts(
-    rows: &[ExchangeAdUnitSemantics],
-) -> BTreeMap<&'static str, usize> {
+fn exchange_ad_unit_bool_counts(rows: &[ExchangeAdUnitSemantics]) -> BTreeMap<&'static str, usize> {
     let mut counts = BTreeMap::from([("false", 0_usize), ("true", 0), ("unknown", 0)]);
     for row in rows {
         let key = if row.proof_complete { "true" } else { "false" };
@@ -423,10 +413,7 @@ fn exchange_surface_severity(
     let partial = !unsupported.is_empty()
         || ad_units.iter().any(|row| !row.proof_complete)
         || matches!(private_auctions.proof_state, "sample_only" | "blocked")
-        || matches!(
-            private_auction_deals.proof_state,
-            "sample_only" | "blocked"
-        )
+        || matches!(private_auction_deals.proof_state, "sample_only" | "blocked")
         || matches!(yield_state, "sample_only" | "blocked" | "skipped")
         || yield_decision == Some("targeted_activity_unknown")
         || rest_state == "blocked";
@@ -519,9 +506,7 @@ fn validate_exchange_collection(
         )?;
         let resource_name = text(row, "resource_name", "exchange collection sample")?;
         let expected_resource_id = resource_name.rsplit('/').next().unwrap_or_default();
-        if text(row, "resource_id", "exchange collection sample")?
-            != expected_resource_id
-        {
+        if text(row, "resource_id", "exchange collection sample")? != expected_resource_id {
             return Err("exchange collection sample resource id was not producer-derived".into());
         }
     }
@@ -788,7 +773,11 @@ fn exchange_yield(
             return Err("yield total was unavailable without an incomplete-response signal".into());
         }
         let sample_only = response_truncated || total.is_some_and(|total| total > inspected);
-        let expected_proof_state = if sample_only { "sample_only" } else { "complete" };
+        let expected_proof_state = if sample_only {
+            "sample_only"
+        } else {
+            "complete"
+        };
         let expected_decision = if counts["targeted_exposed"] > 0 {
             "targeted_exposed"
         } else if counts["targeted_and_excluded"] > 0 {
@@ -807,10 +796,7 @@ fn exchange_yield(
         {
             return Err("yield decision contradicted the retained targeting evidence".into());
         }
-        result.insert(
-            "target_ad_unit_count".into(),
-            json!(targets.len()),
-        );
+        result.insert("target_ad_unit_count".into(), json!(targets.len()));
         result.insert(
             "target_ad_unit_match_count".into(),
             json!(target_matches.len()),
@@ -921,17 +907,12 @@ fn derive_yield_classifications(
         if matched_ids.is_empty() {
             return Err("yield target-match row had no producer-derived target match".into());
         }
-        if get(source, "matched_ad_unit_ids", "yield target match")?
-            != &Value::Array(matched_ids)
-        {
+        if get(source, "matched_ad_unit_ids", "yield target match")? != &Value::Array(matched_ids) {
             return Err("yield matched targets contradicted raw producer evidence".into());
         }
         for (field, classification) in [
             ("targeted_exposed_ad_unit_ids", "targeted_exposed"),
-            (
-                "targeted_and_excluded_ad_unit_ids",
-                "targeted_and_excluded",
-            ),
+            ("targeted_and_excluded_ad_unit_ids", "targeted_and_excluded"),
             ("targeted_inactive_ad_unit_ids", "targeted_inactive"),
             (
                 "targeted_activity_unknown_ad_unit_ids",
@@ -1054,9 +1035,7 @@ fn yield_coverage_json(coverage: &YieldCoverage) -> Value {
     })
 }
 
-fn validate_exchange_yield_shape(
-    source: &serde_json::Map<String, Value>,
-) -> Result<bool, String> {
+fn validate_exchange_yield_shape(source: &serde_json::Map<String, Value>) -> Result<bool, String> {
     if text(source, "surface", "yield groups")? != "yield_groups" {
         return Err("yield surface identity changed".into());
     }
@@ -1159,9 +1138,7 @@ fn validate_exchange_yield_shape(
             )?;
             let message = text(source, "message", "yield groups")?;
             if upstream_status < 400 && soap_fault.is_none() {
-                return Err(
-                    "blocked SOAP yield result lacked an HTTP error or SOAP fault".into(),
-                );
+                return Err("blocked SOAP yield result lacked an HTTP error or SOAP fault".into());
             }
             let permission_proven = matches!(upstream_status, 401 | 403)
                 || retained_soap_permission_evidence(soap_fault, message);
@@ -1338,10 +1315,7 @@ fn validate_unsupported_exchange_surfaces(
     ]
     .into_iter()
     .map(|(surface, needle, note)| {
-        let api_exposure = if resources
-            .iter()
-            .any(|resource| resource.contains(needle))
-        {
+        let api_exposure = if resources.iter().any(|resource| resource.contains(needle)) {
             "resource_seen_but_not_integrated"
         } else {
             "not_seen_in_rest_discovery"
@@ -1356,8 +1330,7 @@ fn validate_unsupported_exchange_surfaces(
     .collect::<Vec<_>>();
     if surfaces != expected.as_slice() {
         return Err(
-            "unsupported exchange surfaces contradicted fixed producer discovery derivation"
-                .into(),
+            "unsupported exchange surfaces contradicted fixed producer discovery derivation".into(),
         );
     }
     Ok(())

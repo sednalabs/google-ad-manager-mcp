@@ -279,11 +279,7 @@ fn early_exchange_variant(variant: &str) -> Value {
     reseal(full, ProbeKind::ExchangeProtection, false)
 }
 
-fn blocked_soap_exchange(
-    upstream_status: usize,
-    block_class: &str,
-    soap_fault: Value,
-) -> Value {
+fn blocked_soap_exchange(upstream_status: usize, block_class: &str, soap_fault: Value) -> Value {
     let mut full = early_exchange_variant("upstream");
     let message = soap_fault
         .as_str()
@@ -370,8 +366,7 @@ fn exchange_ad_unit_projection_derives_decisions_from_identity_and_exposure() {
     proof_drift = reseal(proof_drift, ProbeKind::ExchangeProtection, true);
 
     let mut identity_drift = producer_exchange(true, 9_000);
-    identity_drift["ad_units"][0]["resource_name"] =
-        json!("networks/7654321/adUnits/1");
+    identity_drift["ad_units"][0]["resource_name"] = json!("networks/7654321/adUnits/1");
     identity_drift["ad_units"][0]["ad_unit_id"] = Value::Null;
     identity_drift["ad_units"][0]["proof_state"] = json!("invalid_resource_name");
     identity_drift["ad_units"][0]["proof_complete"] = json!(false);
@@ -416,17 +411,14 @@ fn exchange_ad_unit_resolution_variants_enforce_producer_cardinality() {
     );
 
     let mut too_many = early_exchange_variant("skipped");
-    too_many["ad_units"]
-        .as_array_mut()
-        .unwrap()
-        .push(json!({
-            "ad_unit_code":"missing-50",
-            "decision":"attention_required",
-            "proof_state":"missing",
-            "proof_complete":false,
-            "reason":"exact ad-unit code was not returned",
-            "matches":0
-        }));
+    too_many["ad_units"].as_array_mut().unwrap().push(json!({
+        "ad_unit_code":"missing-50",
+        "decision":"attention_required",
+        "proof_state":"missing",
+        "proof_complete":false,
+        "reason":"exact ad-unit code was not returned",
+        "matches":0
+    }));
     too_many = reseal(too_many, ProbeKind::ExchangeProtection, false);
     assert!(
         compact_success(
@@ -471,8 +463,8 @@ fn exchange_yield_classifications_preserve_counts_and_fail_closed_on_drift() {
     invalid_scope = reseal(invalid_scope, ProbeKind::ExchangeProtection, true);
 
     let mut invalid_counts = exchange_with_yield_classification("targeted_exposed");
-    invalid_counts["yield_groups"]["target_ad_unit_matches"][0]
-        ["targeted_exposed_ad_unit_ids"] = json!([]);
+    invalid_counts["yield_groups"]["target_ad_unit_matches"][0]["targeted_exposed_ad_unit_ids"] =
+        json!([]);
     invalid_counts = reseal(invalid_counts, ProbeKind::ExchangeProtection, true);
 
     let mut invalid_decision = exchange_with_yield_classification("targeted_exposed");
@@ -488,33 +480,21 @@ fn exchange_yield_classifications_preserve_counts_and_fail_closed_on_drift() {
 
     let mut contradictory_skipped = early_exchange_variant("skipped");
     contradictory_skipped["yield_groups"]["decision"] = json!("targeted_exposed");
-    contradictory_skipped = reseal(
-        contradictory_skipped,
-        ProbeKind::ExchangeProtection,
-        false,
-    );
+    contradictory_skipped = reseal(contradictory_skipped, ProbeKind::ExchangeProtection, false);
 
     let mut activity_drift = exchange_with_yield_classification("targeted_inactive");
-    activity_drift["yield_groups"]["target_ad_unit_matches"][0]["status"] =
-        json!("ACTIVE");
-    activity_drift["yield_groups"]["target_ad_unit_matches"][0]["activity_state"] =
-        json!("active");
-    activity_drift["yield_groups"]["targeted_inactive"][0]["status"] =
-        json!("ACTIVE");
-    activity_drift["yield_groups"]["targeted_inactive"][0]["activity_state"] =
-        json!("active");
+    activity_drift["yield_groups"]["target_ad_unit_matches"][0]["status"] = json!("ACTIVE");
+    activity_drift["yield_groups"]["target_ad_unit_matches"][0]["activity_state"] = json!("active");
+    activity_drift["yield_groups"]["targeted_inactive"][0]["status"] = json!("ACTIVE");
+    activity_drift["yield_groups"]["targeted_inactive"][0]["activity_state"] = json!("active");
     activity_drift = reseal(activity_drift, ProbeKind::ExchangeProtection, true);
 
-    let mut exclusion_drift =
-        exchange_with_yield_classification("targeted_and_excluded");
-    exclusion_drift["yield_groups"]["target_ad_unit_matches"][0]["excluded_ad_units"] =
-        json!([]);
-    exclusion_drift["yield_groups"]["targeted_and_excluded"][0]["exclusion_match"] =
-        Value::Null;
+    let mut exclusion_drift = exchange_with_yield_classification("targeted_and_excluded");
+    exclusion_drift["yield_groups"]["target_ad_unit_matches"][0]["excluded_ad_units"] = json!([]);
+    exclusion_drift["yield_groups"]["targeted_and_excluded"][0]["exclusion_match"] = Value::Null;
     exclusion_drift = reseal(exclusion_drift, ProbeKind::ExchangeProtection, true);
 
-    let mut impossible_match_cardinality =
-        exchange_with_yield_classification("targeted_exposed");
+    let mut impossible_match_cardinality = exchange_with_yield_classification("targeted_exposed");
     impossible_match_cardinality["yield_groups"]["inspected_results"] = json!(0);
     impossible_match_cardinality["yield_groups"]["total_result_set_size"] = json!(0);
     impossible_match_cardinality = reseal(
@@ -557,20 +537,12 @@ fn exchange_projection_rejects_ambiguous_or_impossible_yield_progress() {
 
     let mut impossible_progress = producer_exchange(true, 9_000);
     impossible_progress["yield_groups"]["inspected_results"] = json!(1);
-    impossible_progress = reseal(
-        impossible_progress,
-        ProbeKind::ExchangeProtection,
-        true,
-    );
+    impossible_progress = reseal(impossible_progress, ProbeKind::ExchangeProtection, true);
 
     let mut impossible_request_id = producer_exchange(true, 9_000);
     impossible_request_id["yield_groups"]["request_id"] = Value::Null;
     impossible_request_id["yield_groups"]["request_id_truncated"] = json!(true);
-    impossible_request_id = reseal(
-        impossible_request_id,
-        ProbeKind::ExchangeProtection,
-        true,
-    );
+    impossible_request_id = reseal(impossible_request_id, ProbeKind::ExchangeProtection, true);
 
     let mut empty_targets = producer_exchange(true, 9_000);
     empty_targets["ad_units"] = json!([]);
@@ -664,11 +636,7 @@ fn exchange_private_market_proof_state_is_derived_from_page_evidence() {
             "can_prove_private_deal_absence_or_presence"
         };
         empty_page_with_next["certainty"][certainty_field] = json!(false);
-        empty_page_with_next = reseal(
-            empty_page_with_next,
-            ProbeKind::ExchangeProtection,
-            true,
-        );
+        empty_page_with_next = reseal(empty_page_with_next, ProbeKind::ExchangeProtection, true);
         compact_success(
             ProbeKind::ExchangeProtection,
             &empty_page_with_next,
@@ -678,11 +646,7 @@ fn exchange_private_market_proof_state_is_derived_from_page_evidence() {
 
         let mut proof_state_drift = present.clone();
         proof_state_drift[field]["proof_state"] = json!("complete_empty");
-        proof_state_drift = reseal(
-            proof_state_drift,
-            ProbeKind::ExchangeProtection,
-            true,
-        );
+        proof_state_drift = reseal(proof_state_drift, ProbeKind::ExchangeProtection, true);
 
         let mut cap_drift = empty_page_with_next;
         cap_drift[field]["capped_or_possibly_more"] = json!(false);
@@ -760,8 +724,7 @@ fn unsupported_exchange_surfaces_follow_fixed_rest_discovery_derivation() {
     );
 
     let mut discovery_drift = producer_exchange(true, 9_000);
-    discovery_drift["rest_discovery"]["interesting_resources"] =
-        json!(["networks/protections"]);
+    discovery_drift["rest_discovery"]["interesting_resources"] = json!(["networks/protections"]);
     discovery_drift = reseal(discovery_drift, ProbeKind::ExchangeProtection, true);
 
     let mut schema_drift = producer_exchange(true, 9_000);
@@ -813,11 +776,7 @@ fn blocked_soap_yield_matches_status_fault_and_permission_derivation() {
     nullable_transport["yield_groups"]["request_id_truncated"] = json!(false);
     nullable_transport["yield_groups"]["response_time"] = Value::Null;
     nullable_transport["yield_groups"]["response_time_truncated"] = json!(false);
-    nullable_transport = reseal(
-        nullable_transport,
-        ProbeKind::ExchangeProtection,
-        false,
-    );
+    nullable_transport = reseal(nullable_transport, ProbeKind::ExchangeProtection, false);
 
     for full in [
         nullable_transport,
@@ -840,13 +799,9 @@ fn blocked_soap_yield_matches_status_fault_and_permission_derivation() {
 
     let no_error_or_fault = blocked_soap_exchange(200, "upstream", Value::Null);
     let wrong_http_permission_class = blocked_soap_exchange(401, "upstream", Value::Null);
-    let wrong_fault_permission_class = blocked_soap_exchange(
-        500,
-        "upstream",
-        json!("PermissionError.PERMISSION_DENIED"),
-    );
-    let mut wrong_message_permission_class =
-        blocked_soap_exchange(500, "upstream", Value::Null);
+    let wrong_fault_permission_class =
+        blocked_soap_exchange(500, "upstream", json!("PermissionError.PERMISSION_DENIED"));
+    let mut wrong_message_permission_class = blocked_soap_exchange(500, "upstream", Value::Null);
     wrong_message_permission_class["yield_groups"]["message"] =
         json!("AuthenticationError.NETWORK_API_ACCESS_DISABLED");
     wrong_message_permission_class = reseal(
@@ -866,8 +821,7 @@ fn blocked_soap_yield_matches_status_fault_and_permission_derivation() {
         ("response_time", "response_time_truncated"),
         ("soap_fault", "soap_fault_truncated"),
     ] {
-        let mut null_marked_truncated =
-            blocked_soap_exchange(500, "upstream", Value::Null);
+        let mut null_marked_truncated = blocked_soap_exchange(500, "upstream", Value::Null);
         null_marked_truncated["yield_groups"][field] = Value::Null;
         null_marked_truncated["yield_groups"][truncated_field] = json!(true);
         invalid.push(reseal(
@@ -906,7 +860,10 @@ fn oversized_early_exchange_variants_keep_their_block_state() {
             "probe",
         ));
         assert_eq!(envelope["ok"], true);
-        assert_eq!(envelope["data"]["yield_groups"]["proof_state"], expected_state);
+        assert_eq!(
+            envelope["data"]["yield_groups"]["proof_state"],
+            expected_state
+        );
         assert_eq!(
             envelope["data"]["evidence_receipt_template"]["state"],
             "not_generated"

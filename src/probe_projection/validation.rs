@@ -57,10 +57,7 @@ pub(super) fn bool_counts(
     Ok(counts)
 }
 
-pub(super) fn retained_soap_permission_evidence(
-    soap_fault: Option<&str>,
-    message: &str,
-) -> bool {
+pub(super) fn retained_soap_permission_evidence(soap_fault: Option<&str>, message: &str) -> bool {
     soap_fault
         .into_iter()
         .chain(std::iter::once(message))

@@ -173,11 +173,7 @@ fn validate_dependency_ad_units(
                     return Err("resolved dependency ad unit identity was not exact".into());
                 }
                 canonical_id_set(
-                    array(
-                        row,
-                        "ancestor_ad_unit_ids",
-                        "resolved dependency ad unit",
-                    )?,
+                    array(row, "ancestor_ad_unit_ids", "resolved dependency ad unit")?,
                     "resolved dependency ancestors",
                 )?;
                 if !flag(
@@ -211,17 +207,16 @@ fn validate_dependency_ad_units(
                 if row.get("ad_unit_id") != Some(&Value::Null) {
                     return Err("invalid-resource dependency ad unit retained an id".into());
                 }
-                let resource_name = text(
-                    row,
-                    "resource_name",
-                    "invalid-resource dependency ad unit",
-                )?;
+                let resource_name =
+                    text(row, "resource_name", "invalid-resource dependency ad unit")?;
                 let canonical_prefix = format!("networks/{network_code}/adUnits/");
                 if resource_name
                     .strip_prefix(canonical_prefix.as_str())
                     .is_some_and(canonical_id)
                 {
-                    return Err("invalid-resource dependency ad unit had a canonical resource".into());
+                    return Err(
+                        "invalid-resource dependency ad unit had a canonical resource".into(),
+                    );
                 }
                 canonical_id_set(
                     array(
@@ -239,7 +234,9 @@ fn validate_dependency_ad_units(
                 if text(row, "reason", "invalid-resource dependency ad unit")?
                     != "exact ad-unit code resolved outside the requested canonical network/resource scope"
                 {
-                    return Err("invalid-resource dependency reason was not producer-defined".into());
+                    return Err(
+                        "invalid-resource dependency reason was not producer-defined".into(),
+                    );
                 }
                 expected_issues.push(format!("ad unit code {code} did not resolve exactly"));
             }
@@ -282,12 +279,7 @@ fn validate_dependency_ad_units(
                 let ad_unit_id = text(row, "ad_unit_id", "id-only dependency ad unit")?;
                 if !canonical_id(ad_unit_id)
                     || !array(row, "ad_unit_codes", "id-only dependency ad unit")?.is_empty()
-                    || !array(
-                        row,
-                        "ancestor_ad_unit_ids",
-                        "id-only dependency ad unit",
-                    )?
-                    .is_empty()
+                    || !array(row, "ancestor_ad_unit_ids", "id-only dependency ad unit")?.is_empty()
                     || ["resource_name", "display_name", "status", "ad_unit_sizes"]
                         .iter()
                         .any(|field| row.get(*field) != Some(&Value::Null))
@@ -373,37 +365,29 @@ fn validate_dependency_proof_flags(
         "line_items_blocked",
     ];
     exact_keys(flags, KEYS, "proof flags")?;
-    let id_only_targets_have_unknown_ancestors = ad_units.iter().try_fold(
-        false,
-        |found, row| -> Result<bool, String> {
-            let row = object(row, "dependency ad unit")?;
-            if row.get("proof_state").and_then(Value::as_str) != Some("id_only") {
-                return Ok(found);
-            }
-            let codes = array(row, "ad_unit_codes", "id-only dependency ad unit")?;
-            let ancestors = array(
-                row,
-                "ancestor_ad_unit_ids",
-                "id-only dependency ad unit",
-            )?;
-            if !codes.is_empty() || !ancestors.is_empty() {
-                return Err(
-                    "id-only dependency target had resolved code or ancestor evidence".into(),
-                );
-            }
-            Ok(true)
-        },
-    )?;
+    let id_only_targets_have_unknown_ancestors =
+        ad_units
+            .iter()
+            .try_fold(false, |found, row| -> Result<bool, String> {
+                let row = object(row, "dependency ad unit")?;
+                if row.get("proof_state").and_then(Value::as_str) != Some("id_only") {
+                    return Ok(found);
+                }
+                let codes = array(row, "ad_unit_codes", "id-only dependency ad unit")?;
+                let ancestors = array(row, "ancestor_ad_unit_ids", "id-only dependency ad unit")?;
+                if !codes.is_empty() || !ancestors.is_empty() {
+                    return Err(
+                        "id-only dependency target had resolved code or ancestor evidence".into(),
+                    );
+                }
+                Ok(true)
+            })?;
     let placements = object(placements, "placements")?;
     let line_items = object(line_items, "line items")?;
     let placement_state = text(placements, "proof_state", "placements")?;
     let line_item_state = text(line_items, "proof_state", "line items")?;
     let response_truncated = optional_bool(line_items, "response_truncated", "line items")?;
-    let missing_total = optional_bool(
-        line_items,
-        "missing_total_result_set_size",
-        "line items",
-    )?;
+    let missing_total = optional_bool(line_items, "missing_total_result_set_size", "line items")?;
     let total = optional_count(line_items, "total_result_set_size", "line items")?;
     let inspected = optional_count(line_items, "inspected_results", "line items")?;
     let progress_incomplete =
@@ -439,11 +423,7 @@ fn validate_dependency_proof_flags(
     Ok(())
 }
 
-fn optional_bool(
-    source: &Map<String, Value>,
-    field: &str,
-    name: &str,
-) -> Result<bool, String> {
+fn optional_bool(source: &Map<String, Value>, field: &str, name: &str) -> Result<bool, String> {
     match source.get(field) {
         None => Ok(false),
         Some(Value::Bool(value)) => Ok(*value),
@@ -599,9 +579,7 @@ fn dependency_placements(
         "placements",
     )?;
     if source.get("target_placement_matches_sample").is_some()
-        != source
-            .get("target_placement_ids_by_ad_unit_id")
-            .is_some()
+        != source.get("target_placement_ids_by_ad_unit_id").is_some()
     {
         return Err("placement match sample and target map shape were incomplete".into());
     }
@@ -704,11 +682,8 @@ fn dependency_placements(
             if !sample_references.is_subset(&map_references) {
                 return Err("placement target map contradicted the retained match sample".into());
             }
-            let sample_truncated = flag(
-                source,
-                "target_placement_matches_truncated",
-                "placements",
-            )?;
+            let sample_truncated =
+                flag(source, "target_placement_matches_truncated", "placements")?;
             let map_truncated = flag(source, "target_placement_ids_truncated", "placements")?;
             if map_truncated && !target_list_reached_limit {
                 return Err("placement target-id truncation lacked a full producer list".into());
@@ -762,8 +737,7 @@ fn exact_line_item_scan_fields(
 ) -> Result<(), String> {
     if source.len() != LINE_ITEM_SCAN_FIELDS.len() + diagnostics.len()
         || source.keys().any(|key| {
-            !LINE_ITEM_SCAN_FIELDS.contains(&key.as_str())
-                && !diagnostics.contains(&key.as_str())
+            !LINE_ITEM_SCAN_FIELDS.contains(&key.as_str()) && !diagnostics.contains(&key.as_str())
         })
     {
         return Err(format!("{name} fields did not match a producer variant"));
@@ -781,9 +755,7 @@ fn optional_text_present(
     match get(source, field, name)? {
         Value::Null if !truncated => Ok(false),
         Value::String(_) => Ok(true),
-        Value::Null => Err(format!(
-            "{name}.{field} was absent but marked truncated"
-        )),
+        Value::Null => Err(format!("{name}.{field} was absent but marked truncated")),
         _ => Err(format!("{name}.{field} was not nullable text")),
     }
 }
@@ -982,9 +954,8 @@ fn validate_line_item_outcome(source: &Map<String, Value>) -> Result<(), String>
         return Err("completed line-item proof had impossible scan progress".into());
     }
 
-    let capped = response_truncated
-        || missing_total
-        || total.is_some_and(|total| total > inspected);
+    let capped =
+        response_truncated || missing_total || total.is_some_and(|total| total > inspected);
     let expected_state = if capped { "sample_only" } else { "complete" };
     let expected_decision = if matches > 0 {
         "dependencies_found"
@@ -1042,7 +1013,11 @@ fn dependency_coverage<'a>(
     }
     match value.get("include_descendants") {
         Some(Value::Bool(_)) | Some(Value::Null) => {}
-        _ => return Err(format!("{name}.include_descendants was not boolean or null")),
+        _ => {
+            return Err(format!(
+                "{name}.include_descendants was not boolean or null"
+            ));
+        }
     }
     let match_type = text(value, "match_type", name)?;
     if !matches!(match_type, "exact" | "ancestor_descendant") {
@@ -1130,9 +1105,7 @@ fn validate_dependency_target_matches(
                 "exact" => coverage.ad_unit_id == ad_unit_id,
                 "ancestor_descendant" => {
                     coverage.include_descendants == Some(true)
-                        && context
-                            .ancestor_ad_unit_ids
-                            .contains(coverage.ad_unit_id)
+                        && context.ancestor_ad_unit_ids.contains(coverage.ad_unit_id)
                 }
                 _ => false,
             };
@@ -1142,9 +1115,7 @@ fn validate_dependency_target_matches(
         }
         let root = flag(target, "root_or_network_targeting", "dependency target")?;
         let excluded = flag(target, "dependency_excluded", "dependency target")?;
-        if excluded != exclusion.is_some()
-            || (targeting.is_none() && !placement_match && !root)
-        {
+        if excluded != exclusion.is_some() || (targeting.is_none() && !placement_match && !root) {
             return Err("dependency target evidence contradicted its producer shape".into());
         }
         let expected = if exclusion.is_some() {
