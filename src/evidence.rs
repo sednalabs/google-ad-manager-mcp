@@ -94,14 +94,14 @@ pub(crate) fn success_with_wire_guard(
     started: Instant,
     field: &'static str,
 ) -> CallToolResult {
-    let guarded = match guarded_success(data, meta.clone(), started) {
-        Ok(result) => Ok(result),
-        Err(primary_failure) => match compact_data {
-            None => Err(primary_failure.to_string()),
-            Some(compact) if !valid_compact_projection(&compact) => Err(format!(
+    let guarded = match compact_data {
+        None => guarded_success(data, meta, started).map_err(str::to_string),
+        Some(compact) => match guarded_success(data, meta.clone(), started) {
+            Ok(result) => Ok(result),
+            Err(primary_failure) if !valid_compact_projection(&compact) => Err(format!(
                 "primary result: {primary_failure}; compact projection failed its required truncated, fingerprint, and receipt-binding validation"
             )),
-            Some(compact) => guarded_success(compact, meta, started).map_err(|failure| {
+            Err(primary_failure) => guarded_success(compact, meta, started).map_err(|failure| {
                 format!("primary result: {primary_failure}; compact projection: {failure}")
             }),
         },
@@ -198,31 +198,37 @@ fn validate_target_ids(ids: &[String]) -> Result<Vec<String>, AdManagerError> {
     let mut canonical = BTreeSet::new();
     for id in ids {
         let id = validate_canonical_numeric_id("target_ad_unit_ids", id)?;
-        if !canonical.insert(id.clone()) {
+        if !canonical.insert(id) {
             return Err(AdManagerError::invalid(
                 "target_ad_unit_ids",
                 format!("contains duplicate exact ad-unit id `{id}`"),
             ));
         }
     }
-    Ok(canonical.into_iter().collect())
+    Ok(canonical.into_iter().map(ToOwned::to_owned).collect())
 }
 
-fn validate_canonical_numeric_id(
+fn validate_canonical_numeric_id<'a>(
     field: &'static str,
-    value: &str,
-) -> Result<String, AdManagerError> {
+    value: &'a str,
+) -> Result<&'a str, AdManagerError> {
     if value.is_empty() || value.len() > 20 || !value.chars().all(|ch| ch.is_ascii_digit()) {
         return Err(AdManagerError::invalid(
             field,
             "must use a canonical positive numeric identifier of at most 20 digits",
         ));
     }
-    match value.parse::<u64>() {
-        Ok(parsed) if parsed > 0 && parsed.to_string() == value => Ok(value.to_string()),
-        _ => Err(AdManagerError::invalid(
+    if value.starts_with('0') {
+        return Err(AdManagerError::invalid(
             field,
             "must use canonical positive numeric form without whitespace or leading zeroes",
+        ));
+    }
+    match value.parse::<u64>() {
+        Ok(parsed) if parsed > 0 => Ok(value),
+        _ => Err(AdManagerError::invalid(
+            field,
+            "must be a valid positive 64-bit unsigned integer",
         )),
     }
 }
@@ -317,6 +323,7 @@ mod tests {
         reject("1234567", " 0123456789abcdef", &["100"]);
         reject("1234567", "0123456789abcdeF", &["100"]);
         reject("1234567", "0123456789abcdef", &["0100"]);
+        reject("1234567", "0123456789abcdef", &["18446744073709551616"]);
         reject("1234567", "0123456789abcdef", &["100", "100"]);
         reject("1234567", "0123456789abcdef", &[]);
     }
