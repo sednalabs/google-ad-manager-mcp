@@ -103,6 +103,24 @@ same network and canonical-ID rule; malformed hierarchy data makes the proof
 partial instead of being treated as a clear hierarchy read. Invalid SOAP API
 versions fail input validation before any provider read.
 
+Small results keep the native response shape. If the full response would exceed
+the Contract V1 or RMCP transport limit, the adapter returns a validated compact
+projection instead. Decisions, certainty and proof states, aggregate
+counts, cap/truncation flags, block classes, and the no-mutation policy remain
+authoritative. Expanded match arrays, raw SOAP, and diagnostic detail move to a
+typed omission ledger with exact source and witness counts. Eligible receipts
+are rebound to that projection; `not_generated` remains explicitly unbound. A
+compact result is rejected rather than returned if those semantics or receipt
+bindings drift.
+Compact success is explicit at `data.result_projection`; its
+`receipt_binds_returned_projection` flag states whether the returned receipt is
+usable. `data.source_result_fingerprint` identifies the pre-projection proof for
+audit only. Consumers must persist and compare the returned
+`data.result_fingerprint` and, when binding is true, the matching
+`data.evidence_receipt_template.result_hash`. They must not substitute the
+source fingerprint for the returned receipt hash. An oversized error uses the
+same explicit marker at `meta.result_projection` and is never receipt-bearing.
+
 ## `gam_ad_unit_dependency_probe`
 
 `gam_ad_unit_dependency_probe` is a read-only helper for ad-unit cleanup,
@@ -155,6 +173,31 @@ counts, request metadata, and inspected-row progress. Its `proof_state` remains
 `blocked`, while its decision remains `dependencies_found`; a late read failure
 cannot erase already-observed positive evidence. A block before any dependency
 is observed remains `blocked`.
+
+Small dependency results keep the native response shape. Oversized results use
+the same validated compact-projection contract as the exchange probe. The
+dependency decision, every proof flag, placement and line-item counts and
+progress fields, late-block state, status counts, and
+`safe_to_archive_or_retire=false` remain unchanged. Detail arrays and optional
+XML are replaced by explicit aggregate counts, bounded witnesses, and an exact
+typed omission ledger; they are never silently shortened under native
+completeness flags. Generated receipts are rebound to the returned projection,
+while `not_generated` remains ineligible.
+
+Before rebinding, the adapter re-derives all six dependency proof flags from
+the retained targets, resolution issues, placement state, and line-item
+progress. Contradictory source flags fail closed rather than receiving a new
+compact receipt.
+
+Skipped and permission-blocked dependency surfaces use the same compact
+contract without inventing scan metadata they never produced. When optional
+line-item XML is omitted, `upstream_xml_sample_summary` preserves the sample
+count, original and retained UTF-8 byte totals, and the number of truncated XML
+samples. The omission ledger separately counts and fingerprints the actual
+retained XML sample bytes removed from the returned projection; original
+upstream byte totals remain summary metadata. Nested placement, yield-group, and line-item target evidence must stay
+within the exact top-level probe target scope before a returned receipt can bind
+the compact result.
 
 ## `gam_report_run`
 

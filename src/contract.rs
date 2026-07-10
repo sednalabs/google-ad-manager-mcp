@@ -36,7 +36,11 @@ pub(crate) fn success_envelope_with_meta(data: Value, meta: Value, started: Inst
 }
 
 pub fn error(err: AdManagerError, started: Instant) -> CallToolResult {
-    CallToolResult::structured(json!({
+    CallToolResult::structured(error_envelope(&err, started))
+}
+
+pub(crate) fn error_envelope(err: &AdManagerError, started: Instant) -> Value {
+    json!({
         "ok": false,
         "error": {
             "code": err.code(),
@@ -48,7 +52,7 @@ pub fn error(err: AdManagerError, started: Instant) -> CallToolResult {
         "meta": {
             "elapsed_ms": elapsed_ms(started),
         }
-    }))
+    })
 }
 
 pub(crate) fn result_contract_error(

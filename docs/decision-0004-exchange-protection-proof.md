@@ -44,3 +44,31 @@ prove those exposed ad-unit fields. GPT render observations such as a slot
 rendering with no line-item id are separate delivery evidence; they must not be
 collapsed into proof that AdX, protections, inventory rules, unified pricing,
 or other account-level yield controls are clean.
+
+## Bounded Output Contract
+
+The native response is returned unchanged while it fits both the 8 KiB
+Contract V1 envelope and 20 KiB RMCP transport limits. An oversized response is
+projected only after the full proof has been finalized. The compact projection
+must preserve the overall decision, certainty, per-surface proof and block
+states, authoritative counts, cap/truncation flags, mutation prohibition, and
+receipt scope. Omitted raw XML, diagnostic text, and expanded arrays are
+recorded by path and typed class with exact source, witness, and omitted counts.
+An eligible receipt is validated, cloned, and rebound to the compact
+fingerprint; all other receipt fields remain identical. An ineligible
+`not_generated` template stays unbound and otherwise unchanged. Any semantic,
+accounting, receipt, or compact-size mismatch fails closed.
+
+The projection independently re-derives the root decision, certainty claims,
+yield-group proof state, yield decision, and target-classification accounting
+from the retained source surfaces before a compact receipt can bind.
+Normal yield-group evidence must include a usable total result count or an
+explicit incomplete-response signal. A capped private-auction or private-deal
+surface with observed rows currently fails compact projection closed because
+the native producer reports that state as partial rather than attention
+required; projection does not silently change the native decision contract.
+
+The projection contract is visible at `data.result_projection`.
+`source_result_fingerprint` is an audit link to the full producer result, while
+the returned `result_fingerprint` is the value bound by the returned receipt.
+Consumers must use the latter for subsequent receipt validation.

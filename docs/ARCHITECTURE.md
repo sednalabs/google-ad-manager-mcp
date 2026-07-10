@@ -30,6 +30,11 @@ surface, not an SDK mirror or generic upstream proxy.
   - Contract V1 response envelopes
   - secret-text redaction
   - scratchpad error envelopes
+- `src/evidence.rs`
+  - neutral evidence receipts, fingerprints, and Contract/RMCP byte limits
+- `src/probe_projection/`
+  - semantic-preserving compact exchange/dependency proof projections
+  - typed omission accounting and bounded proof error fallbacks
 - `src/tool_surface.rs`
   - `ToolInventory` metadata for `find_tools`
 - `src/tools.rs`
@@ -80,6 +85,16 @@ helper does not call upstream and does not broaden the SOAP boundary; it only
 turns validated template inputs such as line item IDs, order IDs, creative IDs,
 and safe name fragments into inner `payload_xml` for the allowlisted SOAP
 operations.
+
+The two high-level proof tools return their native Contract V1 shape when it
+fits the model-visible and RMCP limits. Oversized results cross a separate
+projection boundary: authoritative semantics are extracted before and after
+projection, root decisions, certainty, and dependency proof flags are
+re-derived from retained source surfaces, omissions are recorded explicitly,
+and an eligible receipt is rebound to the returned compact fingerprint. Oversized errors retain their stable
+classification and a redacted UTF-8-safe message prefix. A projection that
+drifts semantically or remains oversized is replaced by a bounded contract
+error.
 
 ## Tool design
 

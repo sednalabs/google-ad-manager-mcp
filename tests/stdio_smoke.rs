@@ -70,6 +70,12 @@ fn probe_handlers_reject_invalid_soap_versions_before_provider_access() {
             "JSON-RPC error: {response}"
         );
         let result = &response["result"]["structuredContent"];
+        assert!(
+            serde_json::to_vec(result)
+                .expect("serialize public probe error")
+                .len()
+                < 20 * 1024
+        );
         assert_eq!(result["ok"], false);
         assert_eq!(result["error"]["code"], "invalid_input");
         assert_eq!(result["error"]["reason"], "validation_failed");
@@ -80,4 +86,33 @@ fn probe_handlers_reject_invalid_soap_versions_before_provider_access() {
         );
         assert!(result.get("data").is_none());
     }
+}
+
+#[test]
+fn probe_handler_validation_errors_do_not_echo_oversized_inputs() {
+    let mut process = StdioMcpProcess::start(env!("CARGO_BIN_EXE_google-ad-manager-mcp"));
+    let oversized_version = "v".repeat(64 * 1024);
+    let response = process.call_tool(
+        5,
+        "gam_ad_unit_dependency_probe",
+        json!({
+            "network_code": "1234567",
+            "ad_unit_ids": ["200"],
+            "api_version": oversized_version,
+        }),
+    );
+    let result = &response["result"]["structuredContent"];
+    let encoded = serde_json::to_vec(result).expect("serialize bounded public error");
+    let encoded_transport =
+        serde_json::to_vec(&response["result"]).expect("serialize bounded public transport");
+
+    assert!(encoded.len() < 20 * 1024);
+    assert!(encoded_transport.len() < 20 * 1024);
+    assert_eq!(result["ok"], false);
+    assert_eq!(result["error"]["code"], "invalid_input");
+    assert!(
+        !String::from_utf8(encoded)
+            .expect("UTF-8 response")
+            .contains(&"v".repeat(512))
+    );
 }
