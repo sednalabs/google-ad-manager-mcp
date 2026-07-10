@@ -2827,11 +2827,8 @@ fn collect_network_bound_ad_unit_ids(
             for key in ["adUnitId", "adUnit", "name", "parentAdUnit", "id"] {
                 if let Some(value) = object.get(key) {
                     recognized = true;
-                    complete &= collect_network_bound_ad_unit_ids(
-                        value,
-                        network_code,
-                        &mut candidate_ids,
-                    );
+                    complete &=
+                        collect_network_bound_ad_unit_ids(value, network_code, &mut candidate_ids);
                 }
             }
             let valid = recognized && complete && candidate_ids.len() == 1;
@@ -7214,7 +7211,10 @@ mod tests {
             "dependencies_found",
         )
         .expect("partial dependency producer finalization");
-        assert_eq!(response["proof_flags"]["target_resolution_incomplete"], true);
+        assert_eq!(
+            response["proof_flags"]["target_resolution_incomplete"],
+            true
+        );
         assert_eq!(
             response["evidence_receipt_template"]["state"],
             "not_generated"
