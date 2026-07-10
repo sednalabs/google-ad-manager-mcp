@@ -131,7 +131,8 @@ not authoritative totals. Consumers must use `request_id_count` and
 sample is complete only when its truncation flag is false and its length equals
 the corresponding count. Results using this sampling contract identify
 `source_version=gam-evidence-producer-v2`; consumers that only understand v1
-must reject the result rather than treat a prefix sample as complete.
+must reject the result rather than treat a prefix sample as complete. Generated
+and `not_generated` receipt templates both expose this producer version.
 
 The response uses `dependency_decision` plus `proof_flags`, not a cleanup
 approval. Any capped line-item read, truncated SOAP response, id-only target,

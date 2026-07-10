@@ -4076,6 +4076,8 @@ fn attach_evidence_receipt_template(
         }
         None => {
             json!({
+                "source": source.as_str(),
+                "source_version": crate::evidence::EVIDENCE_PRODUCER_CONTRACT_VERSION,
                 "state": "not_generated",
                 "reason": "evidence receipts require a canonical network, result fingerprint, and one to ten fully resolved exact ad-unit ids"
             })

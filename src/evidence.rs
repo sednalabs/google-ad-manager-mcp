@@ -295,6 +295,7 @@ mod tests {
 
         assert_eq!(receipt["network_code"], "1234567");
         assert_eq!(receipt["source"], "dependency_probe");
+        assert_eq!(receipt["source_version"], "gam-evidence-producer-v2");
         assert_eq!(
             receipt["source_version"],
             EVIDENCE_PRODUCER_CONTRACT_VERSION

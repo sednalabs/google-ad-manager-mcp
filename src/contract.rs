@@ -154,11 +154,41 @@ fn credential_key_context(lower: &str, key: &str) -> bool {
 fn compound_secret_key_start(lower: &str, key: &str) -> Option<usize> {
     lower.match_indices(key).find_map(|(start, _)| {
         let before = lower[..start].chars().next_back();
-        let after = lower[start + key.len()..].chars().next();
+        let tail = &lower[start + key.len()..];
+        let after = tail.chars().next();
         let before_is_boundary = before.is_none_or(|ch| !ch.is_ascii_alphanumeric());
-        let after_is_boundary = after.is_none_or(|ch| !ch.is_ascii_alphanumeric() && ch != '_');
-        (before_is_boundary && after_is_boundary).then_some(start)
+        if !before_is_boundary || after.is_some_and(|ch| ch.is_ascii_alphanumeric()) {
+            return None;
+        }
+        if after == Some('_')
+            && !tail.contains(':')
+            && !tail.contains('=')
+            && benign_secret_status_suffix(tail)
+        {
+            return None;
+        }
+        Some(start)
     })
+}
+
+fn benign_secret_status_suffix(tail: &str) -> bool {
+    [
+        "_check",
+        "_configured",
+        "_disabled",
+        "_error",
+        "_expired",
+        "_failed",
+        "_failure",
+        "_missing",
+        "_present",
+        "_rotation",
+        "_status",
+        "_unavailable",
+        "_validation",
+    ]
+    .into_iter()
+    .any(|prefix| tail.starts_with(prefix))
 }
 
 fn assigned_value_after_key<'a>(lower: &'a str, key: &str) -> Option<&'a str> {
@@ -192,11 +222,15 @@ fn redaction_separator_token(token: &str) -> bool {
             .all(|ch| !(ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.')))
 }
 
-fn authorization_key_context(lower: &str, next: Option<&str>) -> bool {
-    credential_key_context(lower, "authorization")
-        && ((lower.contains(':') || lower.contains('='))
-            || next.is_some_and(redaction_separator_token)
-            || next.is_some_and(|value| scheme_needs_following_value(&value.to_ascii_lowercase())))
+fn credential_key_starts_value(lower: &str, key: &str, next: Option<&str>) -> bool {
+    if !credential_key_context(lower, key) {
+        return false;
+    }
+    assigned_value_after_key(lower, key).is_some()
+        || next.is_some_and(|value| {
+            redaction_separator_token(value)
+                || !benign_diagnostic_qualifier(&value.to_ascii_lowercase())
+        })
 }
 
 fn scheme_starts_credential(lower: &str, next: Option<&str>) -> bool {
@@ -206,19 +240,28 @@ fn scheme_starts_credential(lower: &str, next: Option<&str>) -> bool {
     let Some(next) = next else {
         return false;
     };
-    !matches!(
-        next
-            .trim_matches(|ch: char| !ch.is_ascii_alphanumeric())
-            .to_ascii_lowercase()
-            .as_str(),
+    !benign_diagnostic_qualifier(&next.to_ascii_lowercase())
+}
+
+fn benign_diagnostic_qualifier(value: &str) -> bool {
+    matches!(
+        value.trim_matches(|ch: char| !ch.is_ascii_alphanumeric()),
         "authentication"
             | "authorization"
             | "check"
+            | "configured"
+            | "disabled"
             | "error"
+            | "expired"
             | "failed"
             | "failure"
+            | "missing"
             | "mode"
+            | "present"
+            | "rotation"
+            | "status"
             | "support"
+            | "unavailable"
             | "validation"
     )
 }
@@ -252,10 +295,15 @@ fn elapsed_ms(started: Instant) -> u64 {
 
 fn looks_secret_bearing(token: &str, next: Option<&str>) -> bool {
     let lower = token.to_ascii_lowercase();
-    ["access_token", "refresh_token", "client_secret", "private_key"]
-        .into_iter()
-        .any(|key| credential_key_context(&lower, key))
-        || authorization_key_context(&lower, next)
+    [
+        "access_token",
+        "refresh_token",
+        "client_secret",
+        "private_key",
+        "authorization",
+    ]
+    .into_iter()
+    .any(|key| credential_key_starts_value(&lower, key, next))
         || scheme_starts_credential(&lower, next)
         || lower.contains("-----begin")
         || lower
@@ -320,7 +368,15 @@ mod tests {
             ),
             (
                 "service_account_private_key=opaque-secret ok",
-                "[redacted] [redacted]",
+                "[redacted] ok",
+            ),
+            (
+                "access_token_value=opaque-secret ok",
+                "[redacted] ok",
+            ),
+            (
+                "private_key_material=opaque-secret ok",
+                "[redacted] ok",
             ),
             (
                 "access_token is opaque-secret ok",
@@ -328,6 +384,14 @@ mod tests {
             ),
             (
                 "access_token has value opaque-secret ok",
+                "[redacted] [redacted] [redacted] [redacted] [redacted]",
+            ),
+            (
+                "Authorization is opaque-secret ok",
+                "[redacted] [redacted] [redacted] [redacted]",
+            ),
+            (
+                "proxy_authorization has value opaque-secret ok",
                 "[redacted] [redacted] [redacted] [redacted] [redacted]",
             ),
             (
