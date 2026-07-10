@@ -21,11 +21,13 @@
 //! * Google Ad Manager API (Beta) Authentication
 //! * Google Ad Manager API (Beta) Reports
 
+mod ad_unit_retirement;
 pub mod auth_ux;
 mod client;
 mod config;
 mod contract;
 mod error;
+mod fingerprint;
 mod tool_surface;
 mod tools;
 

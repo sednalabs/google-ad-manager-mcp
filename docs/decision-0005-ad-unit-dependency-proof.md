@@ -39,4 +39,11 @@ from a sample:
 - `id_only_targets_have_unknown_ancestors`
 - `soap_manage_scope_required`
 
+The response includes a stable `result_fingerprint` over the bounded proof
+payload. It can bind a later evidence-grading receipt, but it does not upgrade a
+capped or blocked proof state. For one to ten resolved targets, the probe also
+returns a canonical caller-supplied receipt template; an operator must review
+the underlying result before using it. The retirement assessor grades the
+receipt but cannot verify operator identity or authorize retirement.
+
 The helper is read-only and always reports `mutation_performed=false`.

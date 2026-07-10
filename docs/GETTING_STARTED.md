@@ -117,6 +117,8 @@ google-ad-manager-mcp --print-tool-schema > spec/tool_schema_snapshot.v1.json
    proof for exact ad units
 5. `gam_ad_unit_dependency_probe` when you need placement and line-item
    dependency proof before cleanup or retargeting work
+6. `gam_ad_unit_retirement_assessment` after exact-target dependency, delivery,
+   protection, site-contract, and telemetry receipts are ready for grading
 
 For reports:
 

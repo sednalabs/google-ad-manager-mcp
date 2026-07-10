@@ -14,6 +14,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use tokio::process::Command;
 
+use crate::ad_unit_retirement::{
+    AdUnitRetirementAssessmentArgs, MAX_WIRE_RESULT_BYTES, RetirementEvidenceSource,
+    RetirementEvidenceState, assess_ad_unit_retirement, evidence_receipt_template, response_bytes,
+};
 use crate::auth_ux::{gcloud_adc_login_command, shell_join_with_cloudsdk_config};
 use crate::client::{
     CatalogCollection, DEFAULT_SOAP_API_VERSION, RestWriteOperation, RestWritePlan,
@@ -24,6 +28,7 @@ use crate::config::{
     GCLOUD_ADC_REQUIRED_SCOPE, server_adc_credentials_path, server_cloudsdk_config_dir,
 };
 use crate::contract;
+use crate::fingerprint::stable_fingerprint;
 use crate::{AdManagerError, AdManagerServer, MANAGE_SCOPE, McpError};
 use mcp_toolkit_core::guarded_action::{
     GuardedActionApply, GuardedActionError, GuardedActionNoMutationProof, GuardedActionPlanSeed,
@@ -546,6 +551,7 @@ impl AdManagerServer {
                     "Call gam_network_catalog_list for ad_units, orders, line_items, placements, private_auctions, private_auction_deals, or reports.",
                     "Call gam_exchange_protection_probe when you need explicit partial-proof states for Exchange, private auction, private deal, or yield-group exposure.",
                     "Call gam_ad_unit_dependency_probe before ad-unit cleanup, archive, or retargeting work so placement and line-item dependencies are explicit.",
+                    "Call gam_ad_unit_retirement_assessment only after collecting exact-target dependency, delivery, protection, site-contract, and telemetry receipts; it grades freshness and proof gaps without authorizing a mutation.",
                     "Call gam_report_run for saved reports and gam_report_result_rows for large paginated results.",
                     "Call gam_trafficking_tool_matrix before planning writes so the REST and SOAP trafficking surfaces are explicit.",
                     "Use gam_rest_write_plan for dry-run write plans; gam_rest_write_apply only works when the server is explicitly started with GOOGLE_AD_MANAGER_MCP_WRITE_MODE=enabled and the manage scope.",
@@ -587,6 +593,7 @@ impl AdManagerServer {
                     "gam_network_catalog_list",
                     "gam_exchange_protection_probe",
                     "gam_ad_unit_dependency_probe",
+                    "gam_ad_unit_retirement_assessment",
                     "gam_trafficking_tool_matrix",
                     "gam_rest_write_plan",
                     "gam_soap_trafficking_plan",
@@ -998,30 +1005,47 @@ impl AdManagerServer {
             "api_exposed_surfaces_clear"
         };
 
+        let mut response = json!({
+            "network_code": args.network_code,
+            "overall_decision": overall_decision,
+            "ad_units": ad_unit_summaries,
+            "private_auctions": private_auctions,
+            "private_auction_deals": private_auction_deals,
+            "yield_groups": yield_groups,
+            "rest_discovery": rest_discovery,
+            "unsupported_or_unintegrated_surfaces": unsupported_surfaces,
+            "attention_reasons": attention_reasons,
+            "partial_reasons": partial_reasons,
+            "certainty": {
+                "can_prove_requested_ad_unit_flags": ad_unit_summaries.iter().all(|summary| summary.get("proof_complete").and_then(Value::as_bool).unwrap_or(false)),
+                "can_prove_private_auction_absence_or_presence": private_auctions.get("proof_state").and_then(Value::as_str).is_some_and(|state| state == "complete_empty" || state == "complete_present"),
+                "can_prove_private_deal_absence_or_presence": private_auction_deals.get("proof_state").and_then(Value::as_str).is_some_and(|state| state == "complete_empty" || state == "complete_present"),
+                "can_prove_yield_group_targeting": yield_groups.get("proof_state").and_then(Value::as_str).is_some_and(|state| state == "complete"),
+                "cannot_prove_via_current_api": [
+                    "protections",
+                    "inventory_rules",
+                    "unified_pricing_rules"
+                ]
+            }
+        });
+        let response_fingerprint = stable_fingerprint(&response.to_string());
+        response
+            .as_object_mut()
+            .expect("exchange proof response is an object")
+            .insert(
+                "result_fingerprint".to_string(),
+                Value::String(response_fingerprint),
+            );
+        let receipt_state = exchange_retirement_receipt_state(&response);
+        attach_retirement_receipt_template(
+            &mut response,
+            &args.network_code,
+            RetirementEvidenceSource::ExchangeProtectionReview,
+            receipt_state,
+        );
+
         Ok(contract::success_with_meta(
-            json!({
-                "network_code": args.network_code,
-                "overall_decision": overall_decision,
-                "ad_units": ad_unit_summaries,
-                "private_auctions": private_auctions,
-                "private_auction_deals": private_auction_deals,
-                "yield_groups": yield_groups,
-                "rest_discovery": rest_discovery,
-                "unsupported_or_unintegrated_surfaces": unsupported_surfaces,
-                "attention_reasons": attention_reasons,
-                "partial_reasons": partial_reasons,
-                "certainty": {
-                    "can_prove_requested_ad_unit_flags": ad_unit_summaries.iter().all(|summary| summary.get("proof_complete").and_then(Value::as_bool).unwrap_or(false)),
-                    "can_prove_private_auction_absence_or_presence": private_auctions.get("proof_state").and_then(Value::as_str).is_some_and(|state| state == "complete_empty" || state == "complete_present"),
-                    "can_prove_private_deal_absence_or_presence": private_auction_deals.get("proof_state").and_then(Value::as_str).is_some_and(|state| state == "complete_empty" || state == "complete_present"),
-                    "can_prove_yield_group_targeting": yield_groups.get("proof_state").and_then(Value::as_str).is_some_and(|state| state == "complete"),
-                    "cannot_prove_via_current_api": [
-                        "protections",
-                        "inventory_rules",
-                        "unified_pricing_rules"
-                    ]
-                }
-            }),
+            response,
             json!({
                 "mutation_performed": false,
                 "upstream_called": true,
@@ -1170,7 +1194,7 @@ impl AdManagerServer {
             &placement_summary,
             &line_item_summary,
         );
-        let response = dependency_probe_response_json(
+        let mut response = dependency_probe_response_json(
             &args.network_code,
             target_rows,
             placement_summary,
@@ -1178,6 +1202,21 @@ impl AdManagerServer {
             target_resolution_issues,
             proof_flags,
             dependency_decision,
+        );
+        let receipt_state = match dependency_decision {
+            "dependencies_found" => RetirementEvidenceState::CompleteBlocked,
+            "no_dependencies_observed" => RetirementEvidenceState::CompleteClear,
+            "incomplete_no_dependencies_observed" | "missing_or_ambiguous_targets" => {
+                RetirementEvidenceState::PartialCapped
+            }
+            "blocked" => blocked_retirement_receipt_state(&response),
+            _ => RetirementEvidenceState::NotRun,
+        };
+        attach_retirement_receipt_template(
+            &mut response,
+            &args.network_code,
+            RetirementEvidenceSource::DependencyProbe,
+            receipt_state,
         );
 
         Ok(contract::success_with_meta(
@@ -1190,6 +1229,38 @@ impl AdManagerServer {
                 "placement_page_size": placement_page_size,
                 "soap_default_api_version": DEFAULT_SOAP_API_VERSION,
                 "required_line_item_scope": MANAGE_SCOPE,
+                "policy": provider_safety_contract_json(),
+            }),
+            started,
+        ))
+    }
+
+    #[tool(
+        name = "gam_ad_unit_retirement_assessment",
+        description = "Read-only evidence-graded retirement assessment for exact Ad Manager ad-unit ids, with current identity and descendant proof."
+    )]
+    async fn gam_ad_unit_retirement_assessment(
+        &self,
+        Parameters(args): Parameters<AdUnitRetirementAssessmentArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let started = Instant::now();
+        let ad_unit_page_size = args.ad_unit_page_size.unwrap_or(1_000);
+        let max_ad_units = args.max_ad_units.unwrap_or(5_000);
+        let response = match assess_ad_unit_retirement(self, &args).await {
+            Ok(response) => response,
+            Err(err) => return Ok(contract::error(err, started)),
+        };
+        let serialized_response_bytes = response_bytes(&response);
+
+        Ok(retirement_success_with_wire_guard(
+            response,
+            json!({
+                "mutation_performed": false,
+                "upstream_called": true,
+                "ad_unit_page_size": ad_unit_page_size,
+                "max_ad_units": max_ad_units,
+                "serialized_response_bytes": serialized_response_bytes,
+                "max_wire_result_bytes": MAX_WIRE_RESULT_BYTES,
                 "policy": provider_safety_contract_json(),
             }),
             started,
@@ -2916,9 +2987,18 @@ fn apply_probe_collection_decision(
 }
 
 fn blocked_probe_surface(surface: &str, err: AdManagerError) -> Value {
+    let block_class = match &err {
+        AdManagerError::AuthBootstrap(_)
+        | AdManagerError::UpstreamApi {
+            status: 401 | 403, ..
+        }
+        | AdManagerError::WriteScopeRequired { .. } => "permission",
+        _ => "upstream",
+    };
     json!({
         "surface": surface,
         "proof_state": "blocked",
+        "block_class": block_class,
         "error": contract::redact_secret_text(&err.to_string()),
         "hint": err.hint(),
     })
@@ -2946,6 +3026,7 @@ async fn probe_yield_groups(
             "surface": "yield_groups",
             "decision": "blocked",
             "proof_state": "blocked",
+            "block_class": "permission",
             "reason": "YieldGroupService SOAP reads require the Google Ad Manager manage scope",
             "required_scope": MANAGE_SCOPE,
             "current_scope": server.client().scope(),
@@ -3548,7 +3629,7 @@ fn dependency_probe_response_json(
     proof_flags: Value,
     dependency_decision: &str,
 ) -> Value {
-    json!({
+    let mut response = json!({
         "network_code": network_code,
         "dependency_decision": dependency_decision,
         "ad_units": target_rows,
@@ -3561,7 +3642,185 @@ fn dependency_probe_response_json(
             "safe_to_archive_or_retire": false,
             "reason": "This read-only helper reports dependencies and proof gaps; archive, deactivate, or retarget decisions require a separate reviewed workflow."
         }
-    })
+    });
+    let response_fingerprint = stable_fingerprint(&response.to_string());
+    response
+        .as_object_mut()
+        .expect("dependency proof response is an object")
+        .insert(
+            "result_fingerprint".to_string(),
+            Value::String(response_fingerprint),
+        );
+    response
+}
+
+fn attach_retirement_receipt_template(
+    response: &mut Value,
+    network_code: &str,
+    source: RetirementEvidenceSource,
+    state: RetirementEvidenceState,
+) {
+    let target_ids = retirement_receipt_target_ids(response);
+    let template = target_ids
+        .and_then(|target_ids| {
+            response
+                .get("result_fingerprint")
+                .and_then(Value::as_str)
+                .and_then(|result_fingerprint| {
+                    evidence_receipt_template(
+                        network_code,
+                        source,
+                        state,
+                        result_fingerprint,
+                        target_ids,
+                    )
+                    .ok()
+                })
+        })
+        .unwrap_or_else(|| {
+            json!({
+                "state": "not_generated",
+                "reason": "retirement assessment receipts require a canonical network, result fingerprint, and one to ten fully resolved exact ad-unit ids"
+            })
+        });
+    response
+        .as_object_mut()
+        .expect("proof response is an object")
+        .insert("evidence_receipt_template".to_string(), template);
+}
+
+fn retirement_success_with_wire_guard(
+    data: Value,
+    meta: Value,
+    started: Instant,
+) -> CallToolResult {
+    let error_started = started;
+    let result = contract::success_with_meta(data, meta, started);
+    match serde_json::to_vec(&result) {
+        Ok(serialized) if serialized.len() <= MAX_WIRE_RESULT_BYTES => result,
+        Ok(serialized) => contract::error(
+            AdManagerError::invalid(
+                "assessment_result",
+                format!(
+                    "final tool result would be {} bytes, above the {MAX_WIRE_RESULT_BYTES}-byte wire cap; assess fewer targets",
+                    serialized.len()
+                ),
+            ),
+            error_started,
+        ),
+        Err(_) => contract::error(
+            AdManagerError::invalid(
+                "assessment_result",
+                "final tool result could not be serialized for its wire-size guard",
+            ),
+            error_started,
+        ),
+    }
+}
+
+fn retirement_receipt_target_ids(response: &Value) -> Option<Vec<String>> {
+    if response
+        .get("target_resolution_issues")
+        .and_then(Value::as_array)
+        .is_some_and(|issues| !issues.is_empty())
+    {
+        return None;
+    }
+    let rows = response.get("ad_units")?.as_array()?;
+    if rows.is_empty() || rows.len() > 10 {
+        return None;
+    }
+    if rows.iter().any(|row| {
+        row.get("proof_complete").and_then(Value::as_bool) == Some(false)
+            || row
+                .get("proof_state")
+                .and_then(Value::as_str)
+                .is_some_and(|state| state != "resolved_exact")
+    }) {
+        return None;
+    }
+    let target_ids = rows
+        .iter()
+        .filter_map(|row| row.get("ad_unit_id").and_then(Value::as_str))
+        .map(str::to_string)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    (target_ids.len() == rows.len()).then_some(target_ids)
+}
+
+fn exchange_retirement_receipt_state(response: &Value) -> RetirementEvidenceState {
+    let target_exposed = response
+        .get("ad_units")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .any(|row| row.get("decision").and_then(Value::as_str) == Some("attention_required"))
+        || response
+            .get("yield_groups")
+            .and_then(|value| value.get("decision"))
+            .and_then(Value::as_str)
+            == Some("targeted_exposed");
+    if target_exposed {
+        return RetirementEvidenceState::CompleteBlocked;
+    }
+
+    let blocked = [
+        "private_auctions",
+        "private_auction_deals",
+        "yield_groups",
+        "rest_discovery",
+    ]
+    .into_iter()
+    .any(|surface| {
+        response
+            .get(surface)
+            .and_then(|value| value.get("proof_state"))
+            .and_then(Value::as_str)
+            == Some("blocked")
+    });
+    if blocked {
+        return blocked_retirement_receipt_state(response);
+    }
+
+    let api_complete = response
+        .get("certainty")
+        .and_then(Value::as_object)
+        .is_some_and(|certainty| {
+            [
+                "can_prove_requested_ad_unit_flags",
+                "can_prove_private_auction_absence_or_presence",
+                "can_prove_private_deal_absence_or_presence",
+                "can_prove_yield_group_targeting",
+            ]
+            .into_iter()
+            .all(|field| certainty.get(field).and_then(Value::as_bool) == Some(true))
+        });
+    if api_complete {
+        RetirementEvidenceState::ManualUiProofRequired
+    } else {
+        RetirementEvidenceState::PartialCapped
+    }
+}
+
+fn blocked_retirement_receipt_state(response: &Value) -> RetirementEvidenceState {
+    if contains_permission_block(response) {
+        RetirementEvidenceState::BlockedPermission
+    } else {
+        RetirementEvidenceState::BlockedRead
+    }
+}
+
+fn contains_permission_block(value: &Value) -> bool {
+    match value {
+        Value::Object(object) => {
+            (object.get("proof_state").and_then(Value::as_str) == Some("blocked")
+                && object.get("block_class").and_then(Value::as_str) == Some("permission"))
+                || object.values().any(contains_permission_block)
+        }
+        Value::Array(values) => values.iter().any(contains_permission_block),
+        _ => false,
+    }
 }
 
 fn dependency_proof_incomplete(placement_summary: &Value, line_item_summary: &Value) -> bool {
@@ -5147,15 +5406,6 @@ fn guarded_soap_identifiers(
     let plan_id = format!("{}.{}", seed.stable_plan_id(), fingerprint);
     let confirmation_token = format!("confirm-gam-soap-{fingerprint}");
     Ok((plan_id, confirmation_token, fingerprint))
-}
-
-fn stable_fingerprint(input: &str) -> String {
-    let mut hash: u64 = 0xcbf29ce484222325;
-    for byte in input.as_bytes() {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    format!("{hash:016x}")
 }
 
 fn rest_write_plan_to_json(plan: &RestWritePlan) -> Value {
@@ -6872,6 +7122,11 @@ mod tests {
 
         assert_eq!(response["network_code"], "1015422");
         assert_eq!(response["dependency_decision"], "dependencies_found");
+        assert!(
+            response["result_fingerprint"]
+                .as_str()
+                .is_some_and(|value| value.len() == 16)
+        );
         assert_eq!(response["mutation_performed"], false);
         assert_eq!(
             response["cleanup_decision"]["safe_to_archive_or_retire"],
@@ -6883,6 +7138,100 @@ mod tests {
                 .get("target_placement_matches")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn retirement_receipt_attachment_is_source_bound_and_unverified() {
+        let mut response = json!({
+            "result_fingerprint": "0123456789abcdef",
+            "ad_units": [{"ad_unit_id":"200"}]
+        });
+        attach_retirement_receipt_template(
+            &mut response,
+            "1234567",
+            RetirementEvidenceSource::DependencyProbe,
+            RetirementEvidenceState::CompleteClear,
+        );
+        let receipt = &response["evidence_receipt_template"];
+        assert_eq!(receipt["network_code"], "1234567");
+        assert_eq!(receipt["source"], "dependency_probe");
+        assert_eq!(receipt["target_ad_unit_ids"][0], "200");
+        assert_eq!(receipt["provenance"], "caller_supplied_unverified");
+        assert_eq!(receipt["result_hash"], "0123456789abcdef");
+    }
+
+    #[test]
+    fn retirement_receipt_is_suppressed_for_unresolved_scope() {
+        let mut response = json!({
+            "result_fingerprint": "0123456789abcdef",
+            "ad_units": [
+                {"ad_unit_id":"200","proof_state":"resolved_exact"},
+                {"proof_state":"missing_or_ambiguous"}
+            ]
+        });
+        attach_retirement_receipt_template(
+            &mut response,
+            "1234567",
+            RetirementEvidenceSource::DependencyProbe,
+            RetirementEvidenceState::PartialCapped,
+        );
+        assert_eq!(response["evidence_receipt_template"]["state"], "not_generated");
+    }
+
+    #[test]
+    fn exchange_receipt_state_preserves_target_and_read_proof() {
+        let complete = json!({
+            "ad_units":[{"decision":"clear"}],
+            "private_auctions":{"proof_state":"complete_empty"},
+            "private_auction_deals":{"proof_state":"complete_empty"},
+            "yield_groups":{"proof_state":"complete","decision":"targeted_clear"},
+            "rest_discovery":{"proof_state":"complete"},
+            "certainty":{
+                "can_prove_requested_ad_unit_flags":true,
+                "can_prove_private_auction_absence_or_presence":true,
+                "can_prove_private_deal_absence_or_presence":true,
+                "can_prove_yield_group_targeting":true
+            }
+        });
+        assert!(matches!(
+            exchange_retirement_receipt_state(&complete),
+            RetirementEvidenceState::ManualUiProofRequired
+        ));
+
+        let mut target_exposed = complete.clone();
+        target_exposed["ad_units"][0]["decision"] = json!("attention_required");
+        assert!(matches!(
+            exchange_retirement_receipt_state(&target_exposed),
+            RetirementEvidenceState::CompleteBlocked
+        ));
+
+        let mut upstream_blocked = complete.clone();
+        upstream_blocked["yield_groups"] =
+            json!({"proof_state":"blocked","block_class":"upstream"});
+        assert!(matches!(
+            exchange_retirement_receipt_state(&upstream_blocked),
+            RetirementEvidenceState::BlockedRead
+        ));
+
+        let mut permission_blocked = complete;
+        permission_blocked["yield_groups"] =
+            json!({"proof_state":"blocked","block_class":"permission"});
+        assert!(matches!(
+            exchange_retirement_receipt_state(&permission_blocked),
+            RetirementEvidenceState::BlockedPermission
+        ));
+    }
+
+    #[test]
+    fn retirement_wire_guard_replaces_oversized_results() {
+        let result = retirement_success_with_wire_guard(
+            json!({"value":"x".repeat(MAX_WIRE_RESULT_BYTES)}),
+            json!({"mutation_performed":false}),
+            Instant::now(),
+        );
+        let serialized = serde_json::to_string(&result).expect("serialize guarded result");
+        assert!(serialized.len() < MAX_WIRE_RESULT_BYTES);
+        assert!(serialized.contains("invalid_input"));
     }
 
     #[test]

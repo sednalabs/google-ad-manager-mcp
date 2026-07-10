@@ -81,6 +81,22 @@ pub(crate) fn build_tool_inventory() -> Result<ToolInventory, ToolInventoryError
             ],
         ),
         cap(
+            "gam_ad_unit_retirement_assessment",
+            "catalog",
+            "Read-only evidence-graded retirement assessment for exact ad-unit ids, including current identity, descendants, freshness, and proof gaps.",
+            [
+                "google",
+                "ad-manager",
+                "ad-units",
+                "retirement",
+                "archive",
+                "evidence",
+                "freshness",
+                "descendants",
+                "cleanup",
+            ],
+        ),
+        cap(
             "gam_report_run",
             "reports",
             "Run a saved Google Ad Manager report and optionally wait for the first result page.",
@@ -462,6 +478,26 @@ mod tests {
             results
                 .iter()
                 .any(|result| result.name == "gam_ad_unit_dependency_probe")
+        );
+    }
+
+    #[test]
+    fn inventory_search_finds_ad_unit_retirement_assessment() {
+        let inventory = build_tool_inventory().expect("inventory");
+        let results = inventory.search(
+            &ToolSearchFilter {
+                query: Some("ad unit retirement archive evidence descendants".to_string()),
+                group: Some("catalog".to_string()),
+                read_only: Some(true),
+                limit: Some(10),
+            },
+            ToolOperation::List,
+            &ToolInventoryPolicy::strict(),
+        );
+        assert!(
+            results
+                .iter()
+                .any(|result| result.name == "gam_ad_unit_retirement_assessment")
         );
     }
 }

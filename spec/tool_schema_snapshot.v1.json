@@ -118,6 +118,256 @@
       "name": "gam_ad_unit_dependency_probe"
     },
     {
+      "description": "Read-only evidence-graded retirement assessment for exact Ad Manager ad-unit ids or resource names, with current identity and descendant proof.",
+      "inputSchema": {
+        "$defs": {
+          "RetirementEvidenceBundle": {
+            "properties": {
+              "delivery": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/RetirementEvidenceReceipt"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "dependency": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/RetirementEvidenceReceipt"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "exchange_protection": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/RetirementEvidenceReceipt"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "site_contract": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/RetirementEvidenceReceipt"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "telemetry": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/RetirementEvidenceReceipt"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "type": "object"
+          },
+          "RetirementEvidenceReceipt": {
+            "properties": {
+              "attested_by": {
+                "description": "Bounded non-sensitive operator or role identifier. Required when trust is operator_attested.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "manual_ui_proof_included": {
+                "default": false,
+                "description": "Required for exchange/protection complete-clear proof while GAM UI-only surfaces remain unsupported by API.",
+                "type": "boolean"
+              },
+              "network_code": {
+                "description": "Network code covered by this evidence receipt.",
+                "type": "string"
+              },
+              "note": {
+                "description": "Optional bounded, non-sensitive operator note. The note is not echoed.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "observed_at_unix_seconds": {
+                "description": "Unix epoch seconds when the source proof completed.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "result_hash": {
+                "description": "Opaque result hash from the source proof. Raw payloads are not accepted.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "source": {
+                "$ref": "#/$defs/RetirementEvidenceSource",
+                "description": "Expected evidence source for this proof surface."
+              },
+              "source_version": {
+                "description": "Source tool, schema, or contract version that produced the result hash.",
+                "type": "string"
+              },
+              "state": {
+                "$ref": "#/$defs/RetirementEvidenceState",
+                "description": "Evidence conclusion before freshness, target binding, and provenance grading."
+              },
+              "target_ad_unit_ids": {
+                "default": [],
+                "description": "Exact canonical ad-unit ids covered by the source proof.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "trust": {
+                "$ref": "#/$defs/RetirementEvidenceTrust",
+                "default": "caller_supplied",
+                "description": "Caller-supplied evidence is untrusted unless an operator explicitly attests it."
+              },
+              "ttl_seconds": {
+                "description": "Maximum age accepted for this proof. Maximum 31 days.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "window_end_unix_seconds": {
+                "description": "Optional evidence-window end. Required for delivery-report and telemetry receipts.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "window_start_unix_seconds": {
+                "description": "Optional evidence-window start. Required for delivery-report and telemetry receipts.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "network_code",
+              "source",
+              "source_version",
+              "state"
+            ],
+            "type": "object"
+          },
+          "RetirementEvidenceSource": {
+            "enum": [
+              "dependency_probe",
+              "delivery_report",
+              "exchange_protection_review",
+              "site_contract",
+              "telemetry"
+            ],
+            "type": "string"
+          },
+          "RetirementEvidenceState": {
+            "enum": [
+              "complete_clear",
+              "complete_blocked",
+              "partial_capped",
+              "blocked_permission",
+              "unsupported_surface",
+              "manual_ui_proof_required",
+              "not_run"
+            ],
+            "type": "string"
+          },
+          "RetirementEvidenceTrust": {
+            "enum": [
+              "caller_supplied",
+              "operator_attested"
+            ],
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "ad_unit_ids": {
+            "default": [],
+            "description": "Exact positive numeric ad-unit ids to assess. Maximum 10 unique targets.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "ad_unit_page_size": {
+            "description": "Number of ad-unit rows to fetch per descendant-scan page. Defaults to 1000, max 1000.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "ad_unit_resource_names": {
+            "default": [],
+            "description": "Exact resource names, for example networks/1234567/adUnits/456.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "evidence": {
+            "$ref": "#/$defs/RetirementEvidenceBundle",
+            "default": {
+              "delivery": null,
+              "dependency": null,
+              "exchange_protection": null,
+              "site_contract": null,
+              "telemetry": null
+            },
+            "description": "Freshness-bound external proof receipts. Raw reports and telemetry are not accepted."
+          },
+          "max_ad_units": {
+            "description": "Maximum ad-unit rows to inspect before the descendant proof becomes partial. Defaults to 5000, max 10000.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "network_code": {
+            "description": "Raw positive numeric Ad Manager network code, for example 1234567.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "network_code"
+        ],
+        "type": "object"
+      },
+      "name": "gam_ad_unit_retirement_assessment"
+    },
+    {
       "description": "Build a copyable gcloud Application Default Credentials login command for Google Ad Manager without running it.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",

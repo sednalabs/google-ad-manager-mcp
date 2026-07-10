@@ -15,6 +15,7 @@ All tools return Contract V1 envelopes: `ok/data/meta` on success and
 | `gam_network_catalog_list` | List one curated network collection: `ad_units`, `orders`, `line_items`, `placements`, `private_auctions`, `private_auction_deals`, or `reports`. |
 | `gam_exchange_protection_probe` | Read-only proof for exact ad-unit exchange/yield/protection exposure, with explicit partial-proof states. |
 | `gam_ad_unit_dependency_probe` | Read-only proof for exact ad-unit dependencies across placements and SOAP line-item inventory targeting. |
+| `gam_ad_unit_retirement_assessment` | Read-only evidence grading for exact ad-unit retirement candidates, including current identity and descendant proof. |
 | `gam_report_run` | Run a saved Ad Manager report, optionally wait, and optionally fetch the first result page. |
 | `gam_report_result_rows` | Fetch rows from a completed report result resource. |
 | `gam_trafficking_tool_matrix` | Describe REST-supported writes, SOAP trafficking operations, and remaining ergonomics gaps. |
@@ -91,7 +92,11 @@ surface. Its top-level decision returns one of:
 `protections`, `inventory_rules`, and `unified_pricing_rules` are reported as
 unsupported or unintegrated surfaces unless a future API/read implementation
 adds authoritative coverage. Do not interpret their absence from the probe as
-proof that those settings are clean in the GAM UI.
+proof that those settings are clean in the GAM UI. The response includes a
+stable `result_fingerprint` and, for one to ten resolved targets, a canonical
+caller-supplied receipt template. The template remains
+`manual_ui_proof_required` until the unsupported GAM UI surfaces are reviewed
+and that review is recorded in the receipt.
 
 ## `gam_ad_unit_dependency_probe`
 
@@ -119,6 +124,46 @@ approval. Any capped line-item read, truncated SOAP response, id-only target,
 unknown placement membership shape, or blocked SOAP scope remains incomplete
 evidence. Do not archive, deactivate, or retarget inventory solely because this
 tool returns `no_dependencies_observed` or `incomplete_no_dependencies_observed`.
+The response includes a stable `result_fingerprint` suitable for binding a
+later evidence receipt.
+
+## `gam_ad_unit_retirement_assessment`
+
+`gam_ad_unit_retirement_assessment` is the conservative decisioning step after
+candidate discovery. It requires one to ten exact numeric `ad_unit_ids`; it
+does not accept names, codes, resource names, search terms, or broad filters.
+The tool reads each current ad-unit resource, reconciles the paginated catalog
+hierarchy, and then grades a list containing at most one receipt for each of
+five external proof sources:
+
+- dependency;
+- delivery;
+- exchange/protection;
+- site contract;
+- telemetry.
+
+Every non-`not_run` receipt must bind the same canonical network and target-id
+set, the expected proof source, a source contract/version, an opaque
+source-result hash, Unix observation time, and TTL. Delivery-report and
+telemetry receipts must cover a non-zero activity window of at least 30 days;
+both the observation and window end must remain inside the TTL. Expired
+receipts are `stale`, capped receipts remain `partial_capped`, generic read
+failures remain `blocked_read`, and binding mismatches remain `invalid_binding`.
+Dependency and exchange/protection probes emit canonical templates only when
+their complete requested target scope resolved exactly.
+
+Complete API exchange/protection proof emits `manual_ui_proof_required` because
+the API cannot authoritatively cover every GAM protection, inventory-rule, or
+unified-pricing surface. Recording `manual_ui_proof_included=true` on that same
+receipt completes the surface. The flag cannot upgrade `partial_capped`,
+`blocked_permission`, or `blocked_read` evidence.
+
+Receipts remain `caller_supplied_unverified`; this stdio service cannot verify
+the identity of a person who supplied or edited one. The strongest decision is
+therefore `evidence_complete_operator_review_required`, never automatic
+retirement eligibility. The response always reports `mutation_performed=false`.
+Identity and descendant details are compact, ancestry mismatches fail closed,
+and the response is capped at 5 KiB for inner data and 8 KiB on the final wire.
 
 ## `gam_report_run`
 
