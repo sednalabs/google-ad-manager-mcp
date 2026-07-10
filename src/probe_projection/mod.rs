@@ -6,12 +6,10 @@ use std::time::Instant;
 use mcp_toolkit::rmcp::model::CallToolResult;
 use serde_json::{Value, json};
 
-use crate::contract;
-use crate::evidence::{
-    EvidenceSource, dependency_probe_decision, guard_envelope, guarded_success,
-};
-use crate::fingerprint::stable_fingerprint;
 use crate::AdManagerError;
+use crate::contract;
+use crate::evidence::{EvidenceSource, dependency_probe_decision, guard_envelope, guarded_success};
+use crate::fingerprint::stable_fingerprint;
 
 mod dependency;
 mod exchange;
@@ -125,7 +123,11 @@ fn project(kind: ProbeKind, full: &Value) -> Result<(Value, Vec<Value>), String>
 fn compact_error(kind: ProbeKind, full: &Value) -> Result<Value, String> {
     let root = object(full, "error envelope")?;
     let error = object(get(root, "error", "error envelope")?, "error")?;
-    exact_keys(error, &["code", "reason", "message", "category", "hint"], "error")?;
+    exact_keys(
+        error,
+        &["code", "reason", "message", "category", "hint"],
+        "error",
+    )?;
     let message = text(error, "message", "error")?;
     let prefix = utf8_prefix(message, ERROR_PREFIX_BYTES);
     if prefix.len() == message.len() {

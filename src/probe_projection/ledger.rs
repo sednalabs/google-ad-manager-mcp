@@ -82,9 +82,7 @@ pub(super) fn select(
     ledger: &mut Ledger,
 ) -> Result<Map<String, Value>, String> {
     for key in source.keys() {
-        if !keep.contains(&key.as_str())
-            && !omit.iter().any(|(field, _)| *field == key.as_str())
-        {
+        if !keep.contains(&key.as_str()) && !omit.iter().any(|(field, _)| *field == key.as_str()) {
             return Err(format!("{path} contained unprojected field {key}"));
         }
     }
@@ -128,9 +126,22 @@ fn witness(value: &Value, class: Class) -> Option<Value> {
 
 fn witness_rank(value: &Value) -> u8 {
     let priority = [
-        ("decision", ["attention_required", "dependencies_found", "targeted_exposed"]),
-        ("proof_state", ["blocked", "sample_only", "sample_or_shape_incomplete"]),
-        ("classification", ["targeted_exposed", "exact_target", "placement_target"]),
+        (
+            "decision",
+            [
+                "attention_required",
+                "dependencies_found",
+                "targeted_exposed",
+            ],
+        ),
+        (
+            "proof_state",
+            ["blocked", "sample_only", "sample_or_shape_incomplete"],
+        ),
+        (
+            "classification",
+            ["targeted_exposed", "exact_target", "placement_target"],
+        ),
     ];
     priority
         .iter()

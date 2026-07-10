@@ -4,7 +4,10 @@ use serde_json::{Map, Value, json};
 
 use super::ProbeKind;
 
-pub(super) fn string_counts(rows: &[Value], field: &str) -> Result<BTreeMap<String, usize>, String> {
+pub(super) fn string_counts(
+    rows: &[Value],
+    field: &str,
+) -> Result<BTreeMap<String, usize>, String> {
     let mut counts = BTreeMap::new();
     for row in rows {
         let label = text(object(row, "classified row")?, field, "classified row")?;
@@ -16,13 +19,20 @@ pub(super) fn string_counts(rows: &[Value], field: &str) -> Result<BTreeMap<Stri
     Ok(counts)
 }
 
-pub(super) fn status_counts(rows: &[Value], field: &str) -> Result<BTreeMap<String, usize>, String> {
+pub(super) fn status_counts(
+    rows: &[Value],
+    field: &str,
+) -> Result<BTreeMap<String, usize>, String> {
     let mut counts = BTreeMap::new();
     for row in rows {
         let row = object(row, "status row")?;
         let label = match row.get(field) {
             None | Some(Value::Null) => "unknown",
-            Some(Value::String(value)) if value.len() <= 64 && !value.chars().any(char::is_control) => value,
+            Some(Value::String(value))
+                if value.len() <= 64 && !value.chars().any(char::is_control) =>
+            {
+                value
+            }
             _ => return Err(format!("status {field} was not a bounded label")),
         };
         *counts.entry(label.into()).or_default() += 1;
@@ -30,7 +40,10 @@ pub(super) fn status_counts(rows: &[Value], field: &str) -> Result<BTreeMap<Stri
     Ok(counts)
 }
 
-pub(super) fn bool_counts(rows: &[Value], field: &str) -> Result<BTreeMap<&'static str, usize>, String> {
+pub(super) fn bool_counts(
+    rows: &[Value],
+    field: &str,
+) -> Result<BTreeMap<&'static str, usize>, String> {
     let mut counts = BTreeMap::from([("false", 0_usize), ("true", 0), ("unknown", 0)]);
     for row in rows {
         let key = match row.get(field) {
@@ -115,7 +128,11 @@ pub(super) fn require_target_member(
     Ok(())
 }
 
-pub(super) fn verify_no_mutation(kind: ProbeKind, full: &Value, meta: &Value) -> Result<(), String> {
+pub(super) fn verify_no_mutation(
+    kind: ProbeKind,
+    full: &Value,
+    meta: &Value,
+) -> Result<(), String> {
     if meta.get("mutation_performed").and_then(Value::as_bool) != Some(false) {
         return Err("probe metadata did not prove mutation_performed=false".into());
     }
@@ -144,29 +161,49 @@ fn reject_mutation_claim(value: &Value) -> Result<(), String> {
     }
 }
 
-pub(super) fn exact_keys(source: &Map<String, Value>, keys: &[&str], name: &str) -> Result<(), String> {
+pub(super) fn exact_keys(
+    source: &Map<String, Value>,
+    keys: &[&str],
+    name: &str,
+) -> Result<(), String> {
     if source.len() != keys.len() || source.keys().any(|key| !keys.contains(&key.as_str())) {
-        return Err(format!("{name} fields did not match the projection contract"));
+        return Err(format!(
+            "{name} fields did not match the projection contract"
+        ));
     }
     Ok(())
 }
 
 pub(super) fn object<'a>(value: &'a Value, name: &str) -> Result<&'a Map<String, Value>, String> {
-    value.as_object().ok_or_else(|| format!("{name} was not an object"))
+    value
+        .as_object()
+        .ok_or_else(|| format!("{name} was not an object"))
 }
 
 pub(super) fn as_object_mut<'a>(
     value: &'a mut Value,
     name: &str,
 ) -> Result<&'a mut Map<String, Value>, String> {
-    value.as_object_mut().ok_or_else(|| format!("{name} was not an object"))
+    value
+        .as_object_mut()
+        .ok_or_else(|| format!("{name} was not an object"))
 }
 
-pub(super) fn get<'a>(source: &'a Map<String, Value>, field: &str, name: &str) -> Result<&'a Value, String> {
-    source.get(field).ok_or_else(|| format!("{name} omitted {field}"))
+pub(super) fn get<'a>(
+    source: &'a Map<String, Value>,
+    field: &str,
+    name: &str,
+) -> Result<&'a Value, String> {
+    source
+        .get(field)
+        .ok_or_else(|| format!("{name} omitted {field}"))
 }
 
-pub(super) fn text<'a>(source: &'a Map<String, Value>, field: &str, name: &str) -> Result<&'a str, String> {
+pub(super) fn text<'a>(
+    source: &'a Map<String, Value>,
+    field: &str,
+    name: &str,
+) -> Result<&'a str, String> {
     get(source, field, name)?
         .as_str()
         .ok_or_else(|| format!("{name}.{field} was not text"))
@@ -182,7 +219,11 @@ pub(super) fn array<'a>(
         .ok_or_else(|| format!("{name}.{field} was not an array"))
 }
 
-pub(super) fn false_field(source: &Map<String, Value>, field: &str, name: &str) -> Result<(), String> {
+pub(super) fn false_field(
+    source: &Map<String, Value>,
+    field: &str,
+    name: &str,
+) -> Result<(), String> {
     if get(source, field, name)?.as_bool() != Some(false) {
         return Err(format!("{name}.{field} was not false"));
     }
@@ -202,7 +243,11 @@ pub(super) fn count(source: &Map<String, Value>, field: &str, name: &str) -> Res
     usize::try_from(value).map_err(|_| format!("{name}.{field} exceeded usize"))
 }
 
-pub(super) fn false_if_present(source: &Map<String, Value>, field: &str, name: &str) -> Result<(), String> {
+pub(super) fn false_if_present(
+    source: &Map<String, Value>,
+    field: &str,
+    name: &str,
+) -> Result<(), String> {
     if source.get(field).is_some() {
         false_field(source, field, name)?;
     }

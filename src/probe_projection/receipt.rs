@@ -1,8 +1,8 @@
 use serde_json::Value;
 
 use crate::evidence::{
-    EVIDENCE_PRODUCER_CONTRACT_VERSION, dependency_evidence_state,
-    evidence_receipt_target_ids, exchange_evidence_state, validated_receipt_binding,
+    EVIDENCE_PRODUCER_CONTRACT_VERSION, dependency_evidence_state, evidence_receipt_target_ids,
+    exchange_evidence_state, validated_receipt_binding,
 };
 
 use super::validation::{array, as_object_mut, canonical_id, exact_keys, get, object, text};
@@ -52,8 +52,7 @@ pub(super) fn verify_receipt(kind: ProbeKind, full: &Value) -> Result<Receipt, S
         )?;
         if text(receipt, "network_code", "receipt")? != network
             || text(receipt, "source", "receipt")? != kind.evidence_source().as_str()
-            || text(receipt, "source_version", "receipt")?
-                != EVIDENCE_PRODUCER_CONTRACT_VERSION
+            || text(receipt, "source_version", "receipt")? != EVIDENCE_PRODUCER_CONTRACT_VERSION
             || text(receipt, "state", "receipt")? != expected_receipt_state(kind, full)?
             || text(receipt, "result_hash", "receipt")? != fingerprint
         {
@@ -68,7 +67,10 @@ pub(super) fn verify_receipt(kind: ProbeKind, full: &Value) -> Result<Receipt, S
                 != Some("caller_supplied_unverified")
             || receipt.get("window_start_unix_seconds") != Some(&Value::Null)
             || receipt.get("window_end_unix_seconds") != Some(&Value::Null)
-            || receipt.get("manual_ui_proof_included").and_then(Value::as_bool) != Some(false)
+            || receipt
+                .get("manual_ui_proof_included")
+                .and_then(Value::as_bool)
+                != Some(false)
             || receipt
                 .get("operator_action")
                 .and_then(Value::as_str)
@@ -95,8 +97,7 @@ pub(super) fn verify_receipt(kind: ProbeKind, full: &Value) -> Result<Receipt, S
             "not-generated receipt",
         )?;
         if receipt.get("result_hash").is_some()
-            || text(receipt, "source", "not-generated receipt")?
-                != kind.evidence_source().as_str()
+            || text(receipt, "source", "not-generated receipt")? != kind.evidence_source().as_str()
             || text(receipt, "source_version", "not-generated receipt")?
                 != EVIDENCE_PRODUCER_CONTRACT_VERSION
             || receipt.get("state").and_then(Value::as_str) != Some("not_generated")
@@ -115,7 +116,10 @@ pub(super) fn verify_receipt(kind: ProbeKind, full: &Value) -> Result<Receipt, S
     })
 }
 
-pub(super) fn expected_receipt_state(kind: ProbeKind, full: &Value) -> Result<&'static str, String> {
+pub(super) fn expected_receipt_state(
+    kind: ProbeKind,
+    full: &Value,
+) -> Result<&'static str, String> {
     match kind {
         ProbeKind::AdUnitDependency => {
             let decision = full
@@ -138,8 +142,7 @@ pub(super) fn validate_projection(
     let map = object(compact, "compact probe")?;
     if map.get("source_result_fingerprint").and_then(Value::as_str)
         != Some(receipt.source_fingerprint.as_str())
-        || map.get("result_projection")
-            != Some(&projection_meta(kind, receipt.binds, ledger))
+        || map.get("result_projection") != Some(&projection_meta(kind, receipt.binds, ledger))
         || validated_receipt_binding(compact) != Some(receipt.binds)
     {
         return Err("compact fingerprint, ledger, or binding claim was invalid".into());

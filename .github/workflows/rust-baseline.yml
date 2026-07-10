@@ -24,7 +24,7 @@ jobs:
       matrix:
         lane:
           - phase_name: fmt
-            command: cargo fmt --all
+            command: cargo fmt --all --check
           - phase_name: clippy
             command: cargo clippy --all-targets --all-features -- -D warnings
           - phase_name: targeted-tests
@@ -59,17 +59,6 @@ jobs:
 
       - name: Run baseline lane
         run: ${{ matrix.lane.command }}
-
-      - name: Upload hosted rustfmt output
-        if: ${{ matrix.lane.phase_name == 'fmt' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        with:
-          name: rustfmt-${{ github.sha }}
-          path: |
-            src/
-            tests/
-          if-no-files-found: error
-          retention-days: 1
 
   rust-baseline:
     name: Run targeted Rust baseline

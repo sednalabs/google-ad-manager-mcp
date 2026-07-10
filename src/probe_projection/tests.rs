@@ -2,8 +2,8 @@ use super::*;
 use serde_json::Map;
 
 use crate::evidence::{
-    EVIDENCE_PRODUCER_CONTRACT_VERSION, MAX_CONTRACT_ENVELOPE_BYTES,
-    MAX_RMCP_TRANSPORT_BYTES, validated_receipt_binding,
+    EVIDENCE_PRODUCER_CONTRACT_VERSION, MAX_CONTRACT_ENVELOPE_BYTES, MAX_RMCP_TRANSPORT_BYTES,
+    validated_receipt_binding,
 };
 
 fn structured(result: CallToolResult) -> Value {
@@ -15,8 +15,12 @@ fn seal(mut data: Value, kind: ProbeKind, generated: bool) -> Value {
     let hash = stable_fingerprint(&data.to_string());
     data["result_fingerprint"] = json!(hash);
     data["evidence_receipt_template"] = if generated {
-        let ids = data["ad_units"].as_array().unwrap().iter()
-            .map(|row| row["ad_unit_id"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+        let ids = data["ad_units"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["ad_unit_id"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>();
         json!({
             "network_code":"1234567","source":kind.evidence_source().as_str(),
             "source_version":EVIDENCE_PRODUCER_CONTRACT_VERSION,"state":state,
@@ -71,17 +75,21 @@ fn ad_unit(id: usize, exchange: bool) -> Value {
 fn exchange(generated: bool, raw: usize) -> Value {
     let count = if generated { 1 } else { 50 };
     let target_ad_unit_ids = (1..=count).map(|id| id.to_string()).collect::<Vec<_>>();
-    seal(json!({
-        "network_code":"1234567","overall_decision":"partial_api_proof",
-        "ad_units":(1..=count).map(|id| ad_unit(id,true)).collect::<Vec<_>>(),
-        "private_auctions":{"collection":"private_auctions","proof_state":"complete_empty","row_count_in_page":0,"page_size":100,"next_page_token_present":false,"capped_or_possibly_more":false,"sample":[]},
-        "private_auction_deals":{"collection":"private_auction_deals","proof_state":"complete_empty","row_count_in_page":0,"page_size":100,"next_page_token_present":false,"capped_or_possibly_more":false,"sample":[]},
-        "yield_groups":{"surface":"yield_groups","decision":"no_target_matches","proof_state":"complete","request_id":"r","request_id_truncated":false,"response_time":"1","response_time_truncated":false,"total_result_set_size":0,"inspected_results":0,"response_truncated":false,"target_ad_unit_ids":target_ad_unit_ids,"target_ad_unit_matches":[],"targeted_exposed":[],"targeted_and_excluded":[],"targeted_inactive":[],"targeted_activity_unknown":[],"mutation_performed":false,"upstream_response_xml":"x".repeat(raw)},
-        "rest_discovery":{"proof_state":"metadata_read","resource_count":1,"interesting_resources":["yieldGroups"]},
-        "unsupported_or_unintegrated_surfaces":[{"surface":"protections","proof_state":"not_proven","api_exposure":"not_seen","note":"not integrated"}],
-        "attention_reasons":[],"partial_reasons":["manual proof remains"],
-        "certainty":{"can_prove_requested_ad_unit_flags":true,"can_prove_private_auction_absence_or_presence":true,"can_prove_private_deal_absence_or_presence":true,"can_prove_yield_group_targeting":true,"cannot_prove_via_current_api":["protections","inventory_rules","unified_pricing_rules"]}
-    }), ProbeKind::ExchangeProtection, generated)
+    seal(
+        json!({
+            "network_code":"1234567","overall_decision":"partial_api_proof",
+            "ad_units":(1..=count).map(|id| ad_unit(id,true)).collect::<Vec<_>>(),
+            "private_auctions":{"collection":"private_auctions","proof_state":"complete_empty","row_count_in_page":0,"page_size":100,"next_page_token_present":false,"capped_or_possibly_more":false,"sample":[]},
+            "private_auction_deals":{"collection":"private_auction_deals","proof_state":"complete_empty","row_count_in_page":0,"page_size":100,"next_page_token_present":false,"capped_or_possibly_more":false,"sample":[]},
+            "yield_groups":{"surface":"yield_groups","decision":"no_target_matches","proof_state":"complete","request_id":"r","request_id_truncated":false,"response_time":"1","response_time_truncated":false,"total_result_set_size":0,"inspected_results":0,"response_truncated":false,"target_ad_unit_ids":target_ad_unit_ids,"target_ad_unit_matches":[],"targeted_exposed":[],"targeted_and_excluded":[],"targeted_inactive":[],"targeted_activity_unknown":[],"mutation_performed":false,"upstream_response_xml":"x".repeat(raw)},
+            "rest_discovery":{"proof_state":"metadata_read","resource_count":1,"interesting_resources":["yieldGroups"]},
+            "unsupported_or_unintegrated_surfaces":[{"surface":"protections","proof_state":"not_proven","api_exposure":"not_seen","note":"not integrated"}],
+            "attention_reasons":[],"partial_reasons":["manual proof remains"],
+            "certainty":{"can_prove_requested_ad_unit_flags":true,"can_prove_private_auction_absence_or_presence":true,"can_prove_private_deal_absence_or_presence":true,"can_prove_yield_group_targeting":true,"cannot_prove_via_current_api":["protections","inventory_rules","unified_pricing_rules"]}
+        }),
+        ProbeKind::ExchangeProtection,
+        generated,
+    )
 }
 
 fn dependency(generated: bool, raw: usize) -> Value {
@@ -95,20 +103,26 @@ fn dependency(generated: bool, raw: usize) -> Value {
             )
         })
         .collect::<Map<String, Value>>();
-    seal(json!({
-        "network_code":"1234567","dependency_decision":"dependencies_found",
-        "ad_units":(1..=count).map(|id| ad_unit(id,false)).collect::<Vec<_>>(),
-        "placements":{"surface":"placements","proof_state":"complete_for_page","row_count_in_page":1,"page_size":500,"next_page_token_present":false,"capped_or_possibly_more":false,"membership_shape_unknown_count":0,"membership_shape_unknown_sample":[],"target_placement_match_count":1,"target_placement_matches_truncated":false,"target_placement_id_limit_per_ad_unit":200,"target_placement_ids_truncated":false,"target_placement_ids_by_ad_unit_id":target_map,"target_placement_matches_sample":[{"status":"ACTIVE","matched_ad_unit_ids":["1"]}],"mutation_performed":false},
-        "line_items":{"surface":"line_items","decision":"dependencies_found","proof_state":"blocked","total_result_set_size":2,"inspected_results":1,"max_line_items":1000,"line_item_page_size":500,"response_truncated":false,"missing_total_result_set_size":false,"request_ids":["r"],"request_id_count":1,"request_ids_truncated":false,"response_times":["1"],"response_time_count":1,"response_times_truncated":false,"transport_metadata_sample_limit":50,"status_counts":{"DELIVERING":1},"dependency_match_count":1,"dependency_matches_sample":[{"status":"DELIVERING","activity_state":"delivering","target_matches":[{"ad_unit_id":"1","classification":"exact_target","dependency_excluded":false}],"upstream_xml_sample":"x".repeat(xml_sample_bytes),"upstream_xml_truncated":raw > xml_sample_bytes,"upstream_xml_bytes":raw}],"dependency_matches_truncated":false,"dependency_match_sample_limit":50,"mutation_performed":false,"block_class":"upstream","message":"late read blocked","message_truncated":false},
-        "target_resolution_issues":[],
-        "proof_flags":{"target_resolution_incomplete":false,"id_only_targets_have_unknown_ancestors":false,"placements_capped_or_shape_unknown":false,"line_items_capped_or_truncated":true,"soap_manage_scope_required":false,"line_items_blocked":true},
-        "mutation_performed":false,"cleanup_decision":{"safe_to_archive_or_retire":false,"reason":"separate review required"}
-    }), ProbeKind::AdUnitDependency, generated)
+    seal(
+        json!({
+            "network_code":"1234567","dependency_decision":"dependencies_found",
+            "ad_units":(1..=count).map(|id| ad_unit(id,false)).collect::<Vec<_>>(),
+            "placements":{"surface":"placements","proof_state":"complete_for_page","row_count_in_page":1,"page_size":500,"next_page_token_present":false,"capped_or_possibly_more":false,"membership_shape_unknown_count":0,"membership_shape_unknown_sample":[],"target_placement_match_count":1,"target_placement_matches_truncated":false,"target_placement_id_limit_per_ad_unit":200,"target_placement_ids_truncated":false,"target_placement_ids_by_ad_unit_id":target_map,"target_placement_matches_sample":[{"status":"ACTIVE","matched_ad_unit_ids":["1"]}],"mutation_performed":false},
+            "line_items":{"surface":"line_items","decision":"dependencies_found","proof_state":"blocked","total_result_set_size":2,"inspected_results":1,"max_line_items":1000,"line_item_page_size":500,"response_truncated":false,"missing_total_result_set_size":false,"request_ids":["r"],"request_id_count":1,"request_ids_truncated":false,"response_times":["1"],"response_time_count":1,"response_times_truncated":false,"transport_metadata_sample_limit":50,"status_counts":{"DELIVERING":1},"dependency_match_count":1,"dependency_matches_sample":[{"status":"DELIVERING","activity_state":"delivering","target_matches":[{"ad_unit_id":"1","classification":"exact_target","dependency_excluded":false}],"upstream_xml_sample":"x".repeat(xml_sample_bytes),"upstream_xml_truncated":raw > xml_sample_bytes,"upstream_xml_bytes":raw}],"dependency_matches_truncated":false,"dependency_match_sample_limit":50,"mutation_performed":false,"block_class":"upstream","message":"late read blocked","message_truncated":false},
+            "target_resolution_issues":[],
+            "proof_flags":{"target_resolution_incomplete":false,"id_only_targets_have_unknown_ancestors":false,"placements_capped_or_shape_unknown":false,"line_items_capped_or_truncated":true,"soap_manage_scope_required":false,"line_items_blocked":true},
+            "mutation_performed":false,"cleanup_decision":{"safe_to_archive_or_retire":false,"reason":"separate review required"}
+        }),
+        ProbeKind::AdUnitDependency,
+        generated,
+    )
 }
 
 fn reseal(mut full: Value, kind: ProbeKind, generated: bool) -> Value {
     full.as_object_mut().unwrap().remove("result_fingerprint");
-    full.as_object_mut().unwrap().remove("evidence_receipt_template");
+    full.as_object_mut()
+        .unwrap()
+        .remove("evidence_receipt_template");
     seal(full, kind, generated)
 }
 
@@ -131,7 +145,12 @@ fn skipped_dependency() -> Value {
     });
     full["target_resolution_issues"] = Value::Array(
         (0..50)
-            .map(|index| json!(format!("ad unit code unresolved-{index}-{} did not resolve exactly", "x".repeat(160))))
+            .map(|index| {
+                json!(format!(
+                    "ad unit code unresolved-{index}-{} did not resolve exactly",
+                    "x".repeat(160)
+                ))
+            })
             .collect(),
     );
     full["proof_flags"] = json!({
@@ -182,44 +201,47 @@ fn permission_dependency() -> Value {
 
 #[test]
 fn maximal_exchange_and_dependency_are_bounded_and_keep_receipt_state() {
-        for (kind, full, binds) in [
-            (ProbeKind::ExchangeProtection, exchange(true, 9_000), true),
-            (
-                ProbeKind::ExchangeProtection,
-                exchange(false, 9_000),
-                false,
-            ),
-            (ProbeKind::AdUnitDependency, dependency(true, 9_000), true),
-            (ProbeKind::AdUnitDependency, dependency(false, 9_000), false),
-        ] {
+    for (kind, full, binds) in [
+        (ProbeKind::ExchangeProtection, exchange(true, 9_000), true),
+        (ProbeKind::ExchangeProtection, exchange(false, 9_000), false),
+        (ProbeKind::AdUnitDependency, dependency(true, 9_000), true),
+        (ProbeKind::AdUnitDependency, dependency(false, 9_000), false),
+    ] {
         let result = bounded_probe_success(
-            kind, full, json!({"mutation_performed":false}), Instant::now(), "probe",
+            kind,
+            full,
+            json!({"mutation_performed":false}),
+            Instant::now(),
+            "probe",
         );
         assert!(serde_json::to_vec(&result).unwrap().len() < MAX_RMCP_TRANSPORT_BYTES);
         let envelope = structured(result);
-            assert_eq!(envelope["ok"], true);
-            assert!(serde_json::to_vec(&envelope).unwrap().len() < MAX_CONTRACT_ENVELOPE_BYTES);
-            assert_eq!(validated_receipt_binding(&envelope["data"]), Some(binds));
-            assert!(envelope["data"].get("ad_units").is_none());
-            if kind == ProbeKind::AdUnitDependency {
-                assert_eq!(envelope["data"]["dependency_decision"], "dependencies_found");
-                assert_eq!(envelope["data"]["line_items"]["proof_state"], "blocked");
-                assert_eq!(envelope["data"]["proof_flags"]["line_items_blocked"], true);
-                assert_eq!(
-                    envelope["data"]["cleanup_decision"]["safe_to_archive_or_retire"],
-                    false
-                );
-                assert_eq!(
-                    envelope["data"]["line_items"]["upstream_xml_sample_summary"],
-                    json!({
-                        "sample_count": 1,
-                        "source_bytes": 9_000,
-                        "retained_bytes": 4_096,
-                        "truncated_count": 1,
-                    })
-                );
-            }
+        assert_eq!(envelope["ok"], true);
+        assert!(serde_json::to_vec(&envelope).unwrap().len() < MAX_CONTRACT_ENVELOPE_BYTES);
+        assert_eq!(validated_receipt_binding(&envelope["data"]), Some(binds));
+        assert!(envelope["data"].get("ad_units").is_none());
+        if kind == ProbeKind::AdUnitDependency {
+            assert_eq!(
+                envelope["data"]["dependency_decision"],
+                "dependencies_found"
+            );
+            assert_eq!(envelope["data"]["line_items"]["proof_state"], "blocked");
+            assert_eq!(envelope["data"]["proof_flags"]["line_items_blocked"], true);
+            assert_eq!(
+                envelope["data"]["cleanup_decision"]["safe_to_archive_or_retire"],
+                false
+            );
+            assert_eq!(
+                envelope["data"]["line_items"]["upstream_xml_sample_summary"],
+                json!({
+                    "sample_count": 1,
+                    "source_bytes": 9_000,
+                    "retained_bytes": 4_096,
+                    "truncated_count": 1,
+                })
+            );
         }
+    }
 }
 
 #[test]
@@ -341,8 +363,8 @@ fn nested_evidence_cannot_escape_the_receipt_target_scope() {
     );
 
     let mut dependency_sample = dependency(true, 9_000);
-    dependency_sample["placements"]["target_placement_matches_sample"][0]
-        ["matched_ad_unit_ids"] = json!(["999"]);
+    dependency_sample["placements"]["target_placement_matches_sample"][0]["matched_ad_unit_ids"] =
+        json!(["999"]);
     dependency_sample = reseal(dependency_sample, ProbeKind::AdUnitDependency, true);
     assert!(
         compact_success(
@@ -440,15 +462,21 @@ fn semantic_tamper_and_off_by_one_ledger_are_rejected() {
     let full = exchange(true, 9_000);
     let receipt = verify_receipt(ProbeKind::ExchangeProtection, &full).unwrap();
     let mut compact = compact_success(
-        ProbeKind::ExchangeProtection, &full, &json!({"mutation_performed":false}),
-    ).unwrap();
+        ProbeKind::ExchangeProtection,
+        &full,
+        &json!({"mutation_performed":false}),
+    )
+    .unwrap();
     compact["overall_decision"] = json!("attention_required");
     compact = rebind(compact);
     assert_eq!(validated_receipt_binding(&compact), Some(true));
     assert!(validate_projection(ProbeKind::ExchangeProtection, &full, &compact, &receipt).is_err());
     let mut compact = compact_success(
-        ProbeKind::ExchangeProtection, &full, &json!({"mutation_performed":false}),
-    ).unwrap();
+        ProbeKind::ExchangeProtection,
+        &full,
+        &json!({"mutation_performed":false}),
+    )
+    .unwrap();
     compact["result_projection"]["omissions"][0]["source_count"] = json!(2);
     compact = rebind(compact);
     assert_eq!(validated_receipt_binding(&compact), Some(true));
@@ -457,8 +485,11 @@ fn semantic_tamper_and_off_by_one_ledger_are_rejected() {
     let full = dependency(true, 9_000);
     let receipt = verify_receipt(ProbeKind::AdUnitDependency, &full).unwrap();
     let mut compact = compact_success(
-        ProbeKind::AdUnitDependency, &full, &json!({"mutation_performed":false}),
-    ).unwrap();
+        ProbeKind::AdUnitDependency,
+        &full,
+        &json!({"mutation_performed":false}),
+    )
+    .unwrap();
     compact["proof_flags"]["line_items_blocked"] = json!(false);
     compact["cleanup_decision"]["safe_to_archive_or_retire"] = json!(true);
     compact = rebind(compact);
@@ -469,10 +500,15 @@ fn semantic_tamper_and_off_by_one_ledger_are_rejected() {
 #[test]
 fn oversized_error_is_redacted_utf8_safe_and_byte_exact() {
     let error = AdManagerError::AuthBootstrap(format!(
-        "access_token=secret {} {}", "€".repeat(3_000), "\\\"".repeat(2_000)
+        "access_token=secret {} {}",
+        "€".repeat(3_000),
+        "\\\"".repeat(2_000)
     ));
     let result = bounded_probe_error(
-        ProbeKind::ExchangeProtection, error, Instant::now(), "probe",
+        ProbeKind::ExchangeProtection,
+        error,
+        Instant::now(),
+        "probe",
     );
     assert!(serde_json::to_vec(&result).unwrap().len() < MAX_RMCP_TRANSPORT_BYTES);
     let envelope = structured(result);
@@ -486,7 +522,10 @@ fn oversized_error_is_redacted_utf8_safe_and_byte_exact() {
     assert!(message.is_char_boundary(message.len()));
     assert!(!message.contains("secret"));
     let row = &envelope["meta"]["result_projection"]["omissions"][0];
-    assert_eq!(row["source_count"].as_u64().unwrap(), row["retained_count"].as_u64().unwrap() + row["omitted_count"].as_u64().unwrap());
+    assert_eq!(
+        row["source_count"].as_u64().unwrap(),
+        row["retained_count"].as_u64().unwrap() + row["omitted_count"].as_u64().unwrap()
+    );
     assert_eq!(row["retained_count"], json!(message.len()));
 }
 
@@ -495,11 +534,16 @@ fn compact_oversize_fails_closed() {
     let mut full = exchange(true, 9_000);
     full["unsupported_or_unintegrated_surfaces"][0]["note"] = json!("x".repeat(9_000));
     full.as_object_mut().unwrap().remove("result_fingerprint");
-    full.as_object_mut().unwrap().remove("evidence_receipt_template");
+    full.as_object_mut()
+        .unwrap()
+        .remove("evidence_receipt_template");
     full = seal(full, ProbeKind::ExchangeProtection, true);
     let envelope = structured(bounded_probe_success(
-        ProbeKind::ExchangeProtection, full, json!({"mutation_performed":false}),
-        Instant::now(), "probe",
+        ProbeKind::ExchangeProtection,
+        full,
+        json!({"mutation_performed":false}),
+        Instant::now(),
+        "probe",
     ));
     assert_eq!(envelope["error"]["code"], "result_contract_error");
 }

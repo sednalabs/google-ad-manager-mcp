@@ -5,9 +5,17 @@ pub(super) fn project_dependency(full: &Value) -> Result<(Value, Vec<Value>), St
     exact_keys(
         root,
         &[
-            "network_code", "dependency_decision", "ad_units", "placements", "line_items",
-            "target_resolution_issues", "proof_flags", "mutation_performed",
-            "cleanup_decision", "result_fingerprint", "evidence_receipt_template",
+            "network_code",
+            "dependency_decision",
+            "ad_units",
+            "placements",
+            "line_items",
+            "target_resolution_issues",
+            "proof_flags",
+            "mutation_performed",
+            "cleanup_decision",
+            "result_fingerprint",
+            "evidence_receipt_template",
         ],
         "dependency probe",
     )?;
@@ -15,8 +23,15 @@ pub(super) fn project_dependency(full: &Value) -> Result<(Value, Vec<Value>), St
     text(root, "dependency_decision", "dependency probe")?;
     false_field(root, "mutation_performed", "dependency probe")?;
     object(get(root, "proof_flags", "dependency probe")?, "proof flags")?;
-    let cleanup = object(get(root, "cleanup_decision", "dependency probe")?, "cleanup")?;
-    if cleanup.get("safe_to_archive_or_retire").and_then(Value::as_bool) != Some(false) {
+    let cleanup = object(
+        get(root, "cleanup_decision", "dependency probe")?,
+        "cleanup",
+    )?;
+    if cleanup
+        .get("safe_to_archive_or_retire")
+        .and_then(Value::as_bool)
+        != Some(false)
+    {
         return Err("cleanup decision did not prohibit mutation".into());
     }
     let ad_units = array(root, "ad_units", "dependency probe")?;
@@ -32,35 +47,28 @@ pub(super) fn project_dependency(full: &Value) -> Result<(Value, Vec<Value>), St
         .collect::<Result<Vec<_>, _>>()?;
     let placement_source = get(root, "placements", "dependency probe")?;
     let line_item_source = get(root, "line_items", "dependency probe")?;
-    let expected_decision = dependency_probe_decision(
-        &issue_strings,
-        placement_source,
-        line_item_source,
-    );
+    let expected_decision =
+        dependency_probe_decision(&issue_strings, placement_source, line_item_source);
     if text(root, "dependency_decision", "dependency probe")? != expected_decision {
         return Err("dependency decision contradicted the retained proof surfaces".into());
     }
     let target_identity = target_identity_summary(ad_units)?;
     let target_ids = canonical_target_ids(ad_units)?;
     let mut ledger = Ledger::default();
-    ledger.omit("/ad_units", get(root, "ad_units", "dependency probe")?, Class::Array)?;
+    ledger.omit(
+        "/ad_units",
+        get(root, "ad_units", "dependency probe")?,
+        Class::Array,
+    )?;
     ledger.omit(
         "/target_resolution_issues",
         get(root, "target_resolution_issues", "dependency probe")?,
         Class::Reason,
     )?;
-    let placements = dependency_placements(
-        placement_source,
-        "/placements",
-        &target_ids,
-        &mut ledger,
-    )?;
-    let line_items = dependency_line_items(
-        line_item_source,
-        "/line_items",
-        &target_ids,
-        &mut ledger,
-    )?;
+    let placements =
+        dependency_placements(placement_source, "/placements", &target_ids, &mut ledger)?;
+    let line_items =
+        dependency_line_items(line_item_source, "/line_items", &target_ids, &mut ledger)?;
     Ok((
         json!({
             "network_code": root["network_code"],
@@ -92,12 +100,21 @@ fn dependency_placements(
         source,
         path,
         &[
-            "surface", "proof_state", "row_count_in_page", "page_size",
-            "next_page_token_present", "capped_or_possibly_more",
-            "membership_shape_unknown_count", "target_placement_match_count",
-            "target_placement_matches_truncated", "target_placement_id_limit_per_ad_unit",
-            "target_placement_ids_truncated", "mutation_performed", "block_class",
-            "error_truncated", "hint_truncated",
+            "surface",
+            "proof_state",
+            "row_count_in_page",
+            "page_size",
+            "next_page_token_present",
+            "capped_or_possibly_more",
+            "membership_shape_unknown_count",
+            "target_placement_match_count",
+            "target_placement_matches_truncated",
+            "target_placement_id_limit_per_ad_unit",
+            "target_placement_ids_truncated",
+            "mutation_performed",
+            "block_class",
+            "error_truncated",
+            "hint_truncated",
         ],
         &[
             ("membership_shape_unknown_sample", Class::Array),
@@ -116,7 +133,9 @@ fn dependency_placements(
         "placements",
     )?;
     if let Some(sample) = source.get("target_placement_matches_sample") {
-        let sample = sample.as_array().ok_or("placement sample was not an array")?;
+        let sample = sample
+            .as_array()
+            .ok_or("placement sample was not an array")?;
         let matches = count(source, "target_placement_match_count", "placements")?;
         if sample.len() != matches.min(50)
             || flag(source, "target_placement_matches_truncated", "placements")?
@@ -139,11 +158,20 @@ fn dependency_placements(
             }
         }
         result.insert("target_placement_sample_count".into(), json!(sample.len()));
-        result.insert("sample_status_counts".into(), json!(status_counts(sample, "status")?));
+        result.insert(
+            "sample_status_counts".into(),
+            json!(status_counts(sample, "status")?),
+        );
     }
     if let Some(targets) = source.get("target_placement_ids_by_ad_unit_id") {
-        let targets = targets.as_object().ok_or("placement target map was not an object")?;
-        let limit = count(source, "target_placement_id_limit_per_ad_unit", "placements")?;
+        let targets = targets
+            .as_object()
+            .ok_or("placement target map was not an object")?;
+        let limit = count(
+            source,
+            "target_placement_id_limit_per_ad_unit",
+            "placements",
+        )?;
         let mut counts = BTreeMap::new();
         let mut map_target_ids = BTreeSet::new();
         let mut references = 0_usize;
@@ -152,12 +180,18 @@ fn dependency_placements(
                 return Err("placement target map escaped the probe target scope".into());
             }
             map_target_ids.insert(target.clone());
-            let ids = ids.as_array().filter(|ids| ids.len() <= limit)
+            let ids = ids
+                .as_array()
+                .filter(|ids| ids.len() <= limit)
                 .ok_or("placement target ids were not bounded arrays")?;
-            if ids.iter().any(|id| id.as_str().is_none_or(|id| !canonical_id(id))) {
+            if ids
+                .iter()
+                .any(|id| id.as_str().is_none_or(|id| !canonical_id(id)))
+            {
                 return Err("placement target map contained a noncanonical placement id".into());
             }
-            references = references.checked_add(ids.len())
+            references = references
+                .checked_add(ids.len())
                 .ok_or("placement target reference count overflowed")?;
             counts.insert(target.clone(), ids.len());
         }
@@ -165,8 +199,14 @@ fn dependency_placements(
             return Err("placement target map did not cover the exact probe target scope".into());
         }
         result.insert("target_placement_target_count".into(), json!(targets.len()));
-        result.insert("target_placement_id_reference_count".into(), json!(references));
-        result.insert("target_placement_id_counts_by_ad_unit_id".into(), json!(counts));
+        result.insert(
+            "target_placement_id_reference_count".into(),
+            json!(references),
+        );
+        result.insert(
+            "target_placement_id_counts_by_ad_unit_id".into(),
+            json!(counts),
+        );
     }
     Ok(Value::Object(result))
 }
@@ -182,16 +222,34 @@ fn dependency_line_items(
         source,
         path,
         &[
-            "surface", "decision", "proof_state", "total_result_set_size",
-            "inspected_results", "max_line_items", "line_item_page_size",
-            "response_truncated", "missing_total_result_set_size", "status_counts",
-            "request_id_count", "request_ids_truncated", "response_time_count",
-            "response_times_truncated", "transport_metadata_sample_limit",
-            "dependency_match_count", "dependency_matches_truncated",
-            "dependency_match_sample_limit", "mutation_performed", "block_class",
-            "upstream_status", "error_truncated", "hint_truncated",
-            "request_id_truncated", "response_time_truncated", "soap_fault_truncated",
-            "message_truncated", "current_scope_truncated",
+            "surface",
+            "decision",
+            "proof_state",
+            "total_result_set_size",
+            "inspected_results",
+            "max_line_items",
+            "line_item_page_size",
+            "response_truncated",
+            "missing_total_result_set_size",
+            "status_counts",
+            "request_id_count",
+            "request_ids_truncated",
+            "response_time_count",
+            "response_times_truncated",
+            "transport_metadata_sample_limit",
+            "dependency_match_count",
+            "dependency_matches_truncated",
+            "dependency_match_sample_limit",
+            "mutation_performed",
+            "block_class",
+            "upstream_status",
+            "error_truncated",
+            "hint_truncated",
+            "request_id_truncated",
+            "response_time_truncated",
+            "soap_fault_truncated",
+            "message_truncated",
+            "current_scope_truncated",
         ],
         &[
             ("request_ids", Class::Transport),
@@ -234,14 +292,13 @@ fn dependency_line_items(
         "response_times_truncated",
     ];
     if source.get("transport_metadata_sample_limit").is_some() {
-        if transport_fields.iter().any(|field| source.get(*field).is_none()) {
+        if transport_fields
+            .iter()
+            .any(|field| source.get(*field).is_none())
+        {
             return Err("line-item transport metadata shape was incomplete".into());
         }
-        let metadata_limit = count(
-            source,
-            "transport_metadata_sample_limit",
-            "line items",
-        )?;
+        let metadata_limit = count(source, "transport_metadata_sample_limit", "line items")?;
         if metadata_limit == 0 {
             return Err("line-item transport metadata limit was zero".into());
         }
@@ -271,7 +328,9 @@ fn dependency_line_items(
         return Err("line-item transport metadata shape was incomplete".into());
     }
     if let Some(sample) = source.get("dependency_matches_sample") {
-        let sample = sample.as_array().ok_or("dependency sample was not an array")?;
+        let sample = sample
+            .as_array()
+            .ok_or("dependency sample was not an array")?;
         let matches = count(source, "dependency_match_count", "line items")?;
         let sample_limit = count(source, "dependency_match_sample_limit", "line items")?;
         if sample.len() != matches.min(sample_limit)
@@ -289,7 +348,11 @@ fn dependency_line_items(
         }
         if text(source, "proof_state", "line items")? == "blocked"
             && source.get("decision").and_then(Value::as_str)
-                != Some(if matches > 0 { "dependencies_found" } else { "blocked" })
+                != Some(if matches > 0 {
+                    "dependencies_found"
+                } else {
+                    "blocked"
+                })
         {
             return Err("late line-item block lost observed dependency semantics".into());
         }
@@ -308,9 +371,13 @@ fn dependency_line_items(
                     target_ids,
                     "line-item dependency target",
                 )?;
-                *classes.entry(text(target, "classification", "dependency target")?.into()).or_default() += 1;
+                *classes
+                    .entry(text(target, "classification", "dependency target")?.into())
+                    .or_default() += 1;
                 let value = flag(target, "dependency_excluded", "dependency target")?;
-                *excluded.get_mut(if value { "true" } else { "false" }).expect("bool key") += 1;
+                *excluded
+                    .get_mut(if value { "true" } else { "false" })
+                    .expect("bool key") += 1;
             }
             match (
                 row.get("upstream_xml_sample"),
@@ -349,7 +416,10 @@ fn dependency_line_items(
             }
         }
         result.insert("dependency_sample_count".into(), json!(sample.len()));
-        result.insert("sample_status_counts".into(), json!(status_counts(sample, "status")?));
+        result.insert(
+            "sample_status_counts".into(),
+            json!(status_counts(sample, "status")?),
+        );
         result.insert(
             "sample_activity_state_counts".into(),
             json!(status_counts(sample, "activity_state")?),

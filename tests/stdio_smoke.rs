@@ -110,5 +110,9 @@ fn probe_handler_validation_errors_do_not_echo_oversized_inputs() {
     assert!(encoded_transport.len() < 20 * 1024);
     assert_eq!(result["ok"], false);
     assert_eq!(result["error"]["code"], "invalid_input");
-    assert!(!String::from_utf8(encoded).expect("UTF-8 response").contains(&"v".repeat(512)));
+    assert!(
+        !String::from_utf8(encoded)
+            .expect("UTF-8 response")
+            .contains(&"v".repeat(512))
+    );
 }

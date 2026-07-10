@@ -428,10 +428,7 @@ mod tests {
         guarded_success, validated_receipt_binding,
     };
 
-    fn finalized_value(
-        mut data: serde_json::Value,
-        binds_receipt: bool,
-    ) -> serde_json::Value {
+    fn finalized_value(mut data: serde_json::Value, binds_receipt: bool) -> serde_json::Value {
         let fingerprint = stable_fingerprint(&data.to_string());
         data["result_fingerprint"] = json!(fingerprint.clone());
         data["evidence_receipt_template"] = if binds_receipt {
@@ -564,12 +561,9 @@ mod tests {
                 "20 KiB RMCP transport cap",
             ),
         ] {
-            let failure = guarded_success(
-                data,
-                json!({"mutation_performed":false}),
-                Instant::now(),
-            )
-            .expect_err("oversized result must fail its wire guard");
+            let failure =
+                guarded_success(data, json!({"mutation_performed":false}), Instant::now())
+                    .expect_err("oversized result must fail its wire guard");
             assert!(failure.contains(expected));
         }
     }
@@ -600,10 +594,16 @@ mod tests {
 
         let mut false_binding_without_state = not_generated;
         false_binding_without_state["evidence_receipt_template"] = json!({});
-        assert_eq!(validated_receipt_binding(&false_binding_without_state), None);
+        assert_eq!(
+            validated_receipt_binding(&false_binding_without_state),
+            None
+        );
 
         let mut changed_after_fingerprinting = generated;
         changed_after_fingerprinting["decision"] = json!("changed_after_fingerprinting");
-        assert_eq!(validated_receipt_binding(&changed_after_fingerprinting), None);
+        assert_eq!(
+            validated_receipt_binding(&changed_after_fingerprinting),
+            None
+        );
     }
 }

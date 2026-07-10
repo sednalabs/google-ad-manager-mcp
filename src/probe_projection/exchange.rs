@@ -5,10 +5,19 @@ pub(super) fn project_exchange(full: &Value) -> Result<(Value, Vec<Value>), Stri
     exact_keys(
         root,
         &[
-            "network_code", "overall_decision", "ad_units", "private_auctions",
-            "private_auction_deals", "yield_groups", "rest_discovery",
-            "unsupported_or_unintegrated_surfaces", "attention_reasons", "partial_reasons",
-            "certainty", "result_fingerprint", "evidence_receipt_template",
+            "network_code",
+            "overall_decision",
+            "ad_units",
+            "private_auctions",
+            "private_auction_deals",
+            "yield_groups",
+            "rest_discovery",
+            "unsupported_or_unintegrated_surfaces",
+            "attention_reasons",
+            "partial_reasons",
+            "certainty",
+            "result_fingerprint",
+            "evidence_receipt_template",
         ],
         "exchange probe",
     )?;
@@ -16,7 +25,11 @@ pub(super) fn project_exchange(full: &Value) -> Result<(Value, Vec<Value>), Stri
     text(root, "overall_decision", "exchange probe")?;
     object(get(root, "certainty", "exchange probe")?, "certainty")?;
     let ad_units = array(root, "ad_units", "exchange probe")?;
-    let unsupported = array(root, "unsupported_or_unintegrated_surfaces", "exchange probe")?;
+    let unsupported = array(
+        root,
+        "unsupported_or_unintegrated_surfaces",
+        "exchange probe",
+    )?;
     let attention = array(root, "attention_reasons", "exchange probe")?;
     let partial = array(root, "partial_reasons", "exchange probe")?;
     let expected_decision = if !attention.is_empty() {
@@ -32,7 +45,11 @@ pub(super) fn project_exchange(full: &Value) -> Result<(Value, Vec<Value>), Stri
     let target_identity = target_identity_summary(ad_units)?;
     let target_ids = canonical_target_ids(ad_units)?;
     let mut ledger = Ledger::default();
-    ledger.omit("/ad_units", get(root, "ad_units", "exchange probe")?, Class::Array)?;
+    ledger.omit(
+        "/ad_units",
+        get(root, "ad_units", "exchange probe")?,
+        Class::Array,
+    )?;
     ledger.omit(
         "/attention_reasons",
         get(root, "attention_reasons", "exchange probe")?,
@@ -97,9 +114,16 @@ fn exchange_collection(full: &Value, path: &str, ledger: &mut Ledger) -> Result<
         source,
         path,
         &[
-            "collection", "surface", "proof_state", "row_count_in_page", "page_size",
-            "next_page_token_present", "capped_or_possibly_more", "block_class",
-            "error_truncated", "hint_truncated",
+            "collection",
+            "surface",
+            "proof_state",
+            "row_count_in_page",
+            "page_size",
+            "next_page_token_present",
+            "capped_or_possibly_more",
+            "block_class",
+            "error_truncated",
+            "hint_truncated",
         ],
         &[
             ("sample", Class::Array),
@@ -115,14 +139,13 @@ fn exchange_collection(full: &Value, path: &str, ledger: &mut Ledger) -> Result<
         "exchange collection",
     )?;
     if let Some(sample) = source.get("sample") {
-        let sample = sample.as_array().ok_or("collection sample was not an array")?;
+        let sample = sample
+            .as_array()
+            .ok_or("collection sample was not an array")?;
         if sample.len() != count(source, "row_count_in_page", "exchange collection")?.min(5) {
             return Err("collection row count and omitted sample were inconsistent".into());
         }
-        result.insert(
-            "sample_count".into(),
-            json!(sample.len()),
-        );
+        result.insert("sample_count".into(), json!(sample.len()));
     }
     Ok(Value::Object(result))
 }
@@ -138,11 +161,22 @@ fn exchange_yield(
         source,
         path,
         &[
-            "surface", "decision", "proof_state", "total_result_set_size",
-            "inspected_results", "response_truncated", "mutation_performed", "block_class",
-            "upstream_status", "request_id_truncated", "response_time_truncated",
-            "soap_fault_truncated", "message_truncated", "current_scope_truncated",
-            "error_truncated", "hint_truncated",
+            "surface",
+            "decision",
+            "proof_state",
+            "total_result_set_size",
+            "inspected_results",
+            "response_truncated",
+            "mutation_performed",
+            "block_class",
+            "upstream_status",
+            "request_id_truncated",
+            "response_time_truncated",
+            "soap_fault_truncated",
+            "message_truncated",
+            "current_scope_truncated",
+            "error_truncated",
+            "hint_truncated",
         ],
         &[
             ("target_ad_unit_ids", Class::Array),
@@ -196,12 +230,19 @@ fn exchange_yield(
         let mut counts = BTreeMap::new();
         for (field, class) in fields {
             let rows = array(source, field, "yield groups")?;
-            if rows.iter().any(|row| row.get("classification").and_then(Value::as_str) != Some(class)) {
+            if rows
+                .iter()
+                .any(|row| row.get("classification").and_then(Value::as_str) != Some(class))
+            {
                 return Err("yield classification array was semantically inconsistent".into());
             }
             for row in rows {
                 require_target_member(
-                    get(object(row, "yield classification")?, "requested_ad_unit_id", "yield classification")?,
+                    get(
+                        object(row, "yield classification")?,
+                        "requested_ad_unit_id",
+                        "yield classification",
+                    )?,
                     target_ids,
                     "yield classification target",
                 )?;
@@ -223,7 +264,10 @@ fn exchange_yield(
                 ("targeted_exposed_ad_unit_ids", "targeted_exposed"),
                 ("targeted_and_excluded_ad_unit_ids", "targeted_and_excluded"),
                 ("targeted_inactive_ad_unit_ids", "targeted_inactive"),
-                ("targeted_activity_unknown_ad_unit_ids", "targeted_activity_unknown"),
+                (
+                    "targeted_activity_unknown_ad_unit_ids",
+                    "targeted_activity_unknown",
+                ),
             ] {
                 let ids = array(row, field, "yield target match")?;
                 for id in ids {
