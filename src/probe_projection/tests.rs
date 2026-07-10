@@ -211,10 +211,16 @@ fn maximal_exchange_and_dependency_are_bounded_and_keep_receipt_state() {
         (ProbeKind::AdUnitDependency, dependency(true, 9_000), true),
         (ProbeKind::AdUnitDependency, dependency(false, 9_000), false),
     ] {
+        let meta = json!({"mutation_performed":false});
+        let native_envelope =
+            contract::success_envelope_with_meta(full.clone(), meta.clone(), Instant::now());
+        assert!(
+            serde_json::to_vec(&native_envelope).unwrap().len() > MAX_CONTRACT_ENVELOPE_BYTES
+        );
         let result = bounded_probe_success(
             kind,
             full,
-            json!({"mutation_performed":false}),
+            meta,
             Instant::now(),
             "probe",
         );
