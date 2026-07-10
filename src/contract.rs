@@ -143,7 +143,7 @@ fn secret_value_extends_past_token(lower: &str) -> bool {
             .into_iter()
             .find(|key| lower.contains(key))
             .is_some_and(|key| assigned_value_after_key(lower, key).is_none_or(str::is_empty))
-            || scheme_needs_following_value(lower)
+            || contains_scheme_marker(lower)
     }
 }
 
@@ -230,11 +230,8 @@ fn authorization_needs_following_value(lower: &str) -> bool {
     }
 }
 
-fn scheme_needs_following_value(lower: &str) -> bool {
-    matches!(
-        lower.trim_matches(|ch: char| !ch.is_ascii_alphanumeric()),
-        "bearer" | "basic"
-    )
+fn contains_scheme_marker(lower: &str) -> bool {
+    lower.contains("bearer") || lower.contains("basic")
 }
 
 fn redaction_separator_token(token: &str) -> bool {
@@ -265,10 +262,11 @@ fn credential_key_starts_value(lower: &str, key: &str, following: &[&str]) -> bo
 }
 
 fn scheme_starts_credential(lower: &str, following: &[&str]) -> bool {
-    if !scheme_needs_following_value(lower) {
+    if !contains_scheme_marker(lower) {
         return false;
     }
-    following.first().is_some_and(|next| !next.is_empty())
+    !matches!(lower, "bearer" | "basic")
+        || following.first().is_some_and(|next| !next.is_empty())
 }
 
 fn benign_authorization_diagnostic_phrase(following: &[&str]) -> bool {
@@ -338,9 +336,7 @@ fn looks_secret_bearing(token: &str, following: &[&str]) -> bool {
     .any(|key| credential_key_starts_value(&lower, key, following))
         || scheme_starts_credential(&lower, following)
         || lower.contains("-----begin")
-        || lower
-            .trim_matches(|ch: char| !ch.is_ascii_alphanumeric())
-            .starts_with("ya29.")
+        || lower.contains("ya29.")
 }
 
 #[cfg(test)]
@@ -501,6 +497,10 @@ mod tests {
                 "\u{79d8}\u{5bc6}authorization failed",
                 "[redacted] [redacted]",
             ),
+            ("Bearer\u{79d8}\u{5bc6}", "[redacted]"),
+            ("opaqueBearer", "[redacted]"),
+            ("opaqueya29.synthetic", "[redacted]"),
+            ("Bearer", "Bearer"),
         ] {
             assert_eq!(redact_secret_text(source), expected);
         }
