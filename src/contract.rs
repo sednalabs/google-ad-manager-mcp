@@ -238,8 +238,7 @@ fn assignment_delegates_to_next_marker(lower: &str, start: usize, key: &str) -> 
     let Some(separator) = prefix.find([':', '=']) else {
         return false;
     };
-    allowed_credential_key_extension(key, &prefix[..separator])
-        && separator + 1 == prefix.len()
+    allowed_credential_key_extension(key, &prefix[..separator]) && separator + 1 == prefix.len()
 }
 
 fn marker_has_inline_material(lower: &str, start: usize, marker_len: usize) -> bool {
@@ -623,7 +622,10 @@ mod tests {
             ("access_token=ya29.synthetic ok", "[redacted] ok"),
             ("Authorization=Bearer:opaque ok", "[redacted] ok"),
             ("access_token=client_secret=masked ok", "[redacted] ok"),
-            ("authorization=Bearer opaque-secret", "[redacted] [redacted]"),
+            (
+                "authorization=Bearer opaque-secret",
+                "[redacted] [redacted]",
+            ),
             ("access_token=--- opaque-secret", "[redacted] [redacted]"),
             ("access_token=... opaque-secret", "[redacted] [redacted]"),
             (
