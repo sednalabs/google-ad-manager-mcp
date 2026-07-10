@@ -134,21 +134,17 @@ pub fn redact_secret_text(input: &str) -> String {
 fn secret_value_extends_past_token(lower: &str) -> bool {
     if lower.contains("-----begin") {
         true
-    } else if credential_key_context(lower, "private_key") {
+    } else if lower.contains("private_key") {
         assigned_value_after_key(lower, "private_key").is_none_or(str::is_empty)
-    } else if credential_key_context(lower, "authorization") {
+    } else if lower.contains("authorization") {
         authorization_needs_following_value(lower)
     } else {
         ["access_token", "refresh_token", "client_secret"]
             .into_iter()
-            .find(|key| credential_key_context(lower, key))
+            .find(|key| lower.contains(key))
             .is_some_and(|key| assigned_value_after_key(lower, key).is_none_or(str::is_empty))
             || scheme_needs_following_value(lower)
     }
-}
-
-fn credential_key_context(lower: &str, key: &str) -> bool {
-    compound_secret_key_start(lower, key).is_some()
 }
 
 fn compound_secret_key_start(lower: &str, key: &str) -> Option<usize> {
@@ -249,11 +245,14 @@ fn redaction_separator_token(token: &str) -> bool {
 }
 
 fn credential_key_starts_value(lower: &str, key: &str, following: &[&str]) -> bool {
-    if !credential_key_context(lower, key) {
+    if !lower.contains(key) {
         return false;
     }
     if benign_secret_status_phrase(lower, key, following) {
         return false;
+    }
+    if compound_secret_key_start(lower, key).is_none() {
+        return true;
     }
     assigned_value_after_key(lower, key).is_some()
         || inline_value_after_key(lower, key)
@@ -275,26 +274,27 @@ fn benign_authorization_diagnostic_phrase(following: &[&str]) -> bool {
     let [qualifier] = following else {
         return false;
     };
-    matches!(
-        qualifier.trim_matches(|ch: char| !ch.is_ascii_alphanumeric()),
-        "authentication"
-            | "authorization"
-            | "check"
-            | "configured"
-            | "disabled"
-            | "error"
-            | "expired"
-            | "failed"
-            | "failure"
-            | "missing"
-            | "mode"
-            | "present"
-            | "rotation"
-            | "status"
-            | "support"
-            | "unavailable"
-            | "validation"
-    )
+    [
+        "authentication",
+        "authorization",
+        "check",
+        "configured",
+        "disabled",
+        "error",
+        "expired",
+        "failed",
+        "failure",
+        "missing",
+        "mode",
+        "present",
+        "rotation",
+        "status",
+        "support",
+        "unavailable",
+        "validation",
+    ]
+    .into_iter()
+    .any(|allowed| qualifier.eq_ignore_ascii_case(allowed))
 }
 
 pub fn redact_secret_value(value: Value) -> Value {
@@ -475,6 +475,18 @@ mod tests {
             (
                 "opaque-secret_client_secret_missing",
                 "[redacted]",
+            ),
+            (
+                "opaqueclient_secret_missing",
+                "[redacted]",
+            ),
+            (
+                "Authorization failed\u{79d8}\u{5bc6}",
+                "[redacted] [redacted]",
+            ),
+            (
+                "Authorization [failed]",
+                "[redacted] [redacted]",
             ),
         ] {
             assert_eq!(redact_secret_text(source), expected);
