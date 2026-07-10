@@ -2446,26 +2446,28 @@ fn validate_probe_ad_unit_ids(ids: &[String]) -> Result<Vec<String>, AdManagerEr
     let mut cleaned = Vec::with_capacity(ids.len());
     for id in ids {
         let trimmed = id.trim();
-        if trimmed.is_empty()
-            || !trimmed.chars().all(|ch| ch.is_ascii_digit())
-            || trimmed
-                .parse::<u64>()
-                .ok()
-                .filter(|value| *value > 0)
-                .is_none()
-        {
+        let canonical_id = match trimmed.parse::<u64>() {
+            Ok(value) if value > 0 => value.to_string(),
+            _ => {
+                return Err(AdManagerError::invalid(
+                    "ad_unit_ids",
+                    "each ad-unit id must be a positive numeric identifier",
+                ));
+            }
+        };
+        if trimmed.is_empty() || !trimmed.chars().all(|ch| ch.is_ascii_digit()) {
             return Err(AdManagerError::invalid(
                 "ad_unit_ids",
                 "each ad-unit id must be a positive numeric identifier",
             ));
         }
-        if !seen.insert(trimmed.to_string()) {
+        if !seen.insert(canonical_id.clone()) {
             return Err(AdManagerError::invalid(
                 "ad_unit_ids",
-                format!("duplicate ad-unit id `{trimmed}`"),
+                format!("duplicate ad-unit id `{canonical_id}`"),
             ));
         }
-        cleaned.push(trimmed.to_string());
+        cleaned.push(canonical_id);
     }
     Ok(cleaned)
 }
@@ -3509,6 +3511,10 @@ fn dependency_probe_decision(
         .get("proof_state")
         .and_then(Value::as_str)
         .is_some_and(|state| state == "blocked")
+        || placement_summary
+            .get("proof_state")
+            .and_then(Value::as_str)
+            .is_some_and(|state| state == "blocked")
     {
         return "blocked";
     }
@@ -6801,6 +6807,43 @@ mod tests {
         );
         let flags = dependency_proof_flags(&[], &placement_summary, &line_item_summary, false);
         assert_eq!(flags["placements_capped_or_shape_unknown"], true);
+    }
+
+    #[test]
+    fn dependency_probe_decision_marks_blocked_when_placements_are_blocked() {
+        let placement_summary = json!({
+            "proof_state": "blocked",
+            "target_placement_match_count": 0
+        });
+        let line_item_summary = json!({
+            "proof_state": "complete",
+            "dependency_match_count": 0
+        });
+
+        assert_eq!(
+            dependency_probe_decision(&[], &placement_summary, &line_item_summary),
+            "blocked"
+        );
+    }
+
+    #[test]
+    fn validate_probe_ad_unit_ids_canonicalizes_numeric_strings() {
+        let cleaned = validate_probe_ad_unit_ids(&["00123".to_string(), "456".to_string()])
+            .expect("ids should be accepted");
+        assert_eq!(cleaned, vec!["123".to_string(), "456".to_string()]);
+    }
+
+    #[test]
+    fn validate_probe_ad_unit_ids_rejects_duplicates_after_canonicalization() {
+        let err = validate_probe_ad_unit_ids(&["00123".to_string(), "123".to_string()])
+            .expect_err("canonical duplicate should be rejected");
+        assert!(matches!(
+            err,
+            AdManagerError::InvalidInput {
+                field: "ad_unit_ids",
+                ..
+            }
+        ));
     }
 
     #[test]
