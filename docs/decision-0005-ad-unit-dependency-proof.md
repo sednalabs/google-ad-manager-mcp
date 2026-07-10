@@ -60,6 +60,7 @@ plan, transport call, HTTP response, or SOAP fault blocks the scan, the result
 retains all dependencies and progress confirmed on earlier pages. The surface
 still reports `proof_state=blocked`; its decision is `dependencies_found` only
 when an earlier page proved at least one dependency, and otherwise remains
-`blocked`.
+`blocked`. A blocked result independently retains capped/truncated proof flags,
+including truncation reported by the failed SOAP response itself.
 
 The helper is read-only and always reports `mutation_performed=false`.
