@@ -1358,7 +1358,7 @@ fn validate_rest_write_body(
     Ok(())
 }
 
-fn validate_soap_api_version(value: Option<&str>) -> Result<String, AdManagerError> {
+pub(crate) fn validate_soap_api_version(value: Option<&str>) -> Result<String, AdManagerError> {
     let version = value
         .map(str::trim)
         .filter(|value| !value.is_empty())

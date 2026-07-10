@@ -26,10 +26,9 @@ mod client;
 mod config;
 mod contract;
 mod error;
-// Neutral producer contracts land before their existing-probe integrations.
+// The bounded projection guard is consumed after receipt integration.
 #[allow(dead_code)]
 mod evidence;
-#[allow(dead_code)]
 mod fingerprint;
 mod tool_surface;
 mod tools;

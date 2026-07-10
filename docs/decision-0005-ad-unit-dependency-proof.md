@@ -39,4 +39,20 @@ from a sample:
 - `id_only_targets_have_unknown_ancestors`
 - `soap_manage_scope_required`
 
+The response includes a stable `result_fingerprint` over the bounded proof
+payload. It can bind a later evidence-grading receipt, but it does not upgrade a
+capped or blocked proof state. For one to ten resolved exact targets in the
+requested network, the probe also returns a canonical caller-supplied receipt
+template under the explicit `gam-evidence-producer-v1` source contract. An
+operator must still review the underlying result before using it.
+
+Target rows contribute dependency evidence only when their resource names bind
+exactly to the canonical requested network and positive numeric ad-unit ID.
+Ancestor, placement, and placement-member resource identities use the same
+network-bound rule. Invalid nested identities cannot contribute dependencies
+and keep the affected proof surface incomplete. Invalid SOAP API versions fail
+before an upstream read. Caller-actionable permission and authentication faults
+remain explicit permission blocks; authentication-service connection failures
+remain upstream read blocks.
+
 The helper is read-only and always reports `mutation_performed=false`.
