@@ -139,6 +139,12 @@ Malformed nested identities make the relevant surface incomplete and cannot
 create a dependency. Invalid SOAP API versions fail before provider access.
 Caller-actionable SOAP permission and authentication faults are classified
 separately from server-side connection and generic upstream read failures.
+If a later SOAP page blocks after an earlier page observed a dependency, the
+line-item summary preserves the accumulated count, bounded sample, status
+counts, request metadata, and inspected-row progress. Its `proof_state` remains
+`blocked`, while its decision remains `dependencies_found`; a late read failure
+cannot erase already-observed positive evidence. A block before any dependency
+is observed remains `blocked`.
 
 ## `gam_report_run`
 
