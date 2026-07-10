@@ -3538,6 +3538,7 @@ impl LineItemDependencyScanState {
             "response_times": self.response_times,
             "response_time_count": self.response_time_count,
             "response_times_truncated": self.response_times_truncated,
+            "transport_metadata_sample_limit": PROBE_TRANSPORT_METADATA_SAMPLE_LIMIT,
             "status_counts": self.status_counts,
             "dependency_match_count": self.dependency_match_count,
             "dependency_matches_sample": self.dependency_matches_sample,
@@ -7663,6 +7664,7 @@ mod tests {
         assert_eq!(response["response_time_count"], 55);
         assert_eq!(response["request_ids_truncated"], true);
         assert_eq!(response["response_times_truncated"], true);
+        assert_eq!(response["transport_metadata_sample_limit"], 50);
         assert_eq!(response["request_ids"].as_array().map(Vec::len), Some(50));
         assert_eq!(response["response_times"].as_array().map(Vec::len), Some(50));
         assert!(response["request_ids"].as_array().is_some_and(|values| {
@@ -7872,6 +7874,7 @@ mod tests {
                 "response_times": ["43"],
                 "response_time_count": 1,
                 "response_times_truncated": false,
+                "transport_metadata_sample_limit": PROBE_TRANSPORT_METADATA_SAMPLE_LIMIT,
                 "status_counts": {"PAUSED": 1},
                 "dependency_match_count": 0,
                 "dependency_matches_sample": [],
