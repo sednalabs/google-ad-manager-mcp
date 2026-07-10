@@ -3625,7 +3625,9 @@ fn attach_result_fingerprint(response: &mut Value) {
 
 fn compact_probe_response(response: &Value) -> Value {
     let mut compact = response.clone();
-    let object = compact.as_object_mut().expect("probe response is an object");
+    let object = compact
+        .as_object_mut()
+        .expect("probe response is an object");
     object.remove("result_fingerprint");
     let original_receipt = object
         .remove("evidence_receipt_template")
@@ -6948,7 +6950,7 @@ mod tests {
     #[test]
     fn dependency_probe_classifies_line_item_inventory_matches() {
         let target = dependency_target("200", &["100"], &["Section_Page_LS"]);
-        let mut placement_summary = json!({
+        let placement_summary = json!({
             "target_placement_ids_by_ad_unit_id": {
                 "200": ["300"]
             }
@@ -7069,7 +7071,7 @@ mod tests {
 
     #[test]
     fn dependency_probe_decision_marks_blocked_when_placements_are_blocked() {
-        let placement_summary = json!({
+        let mut placement_summary = json!({
             "proof_state": "blocked",
             "target_placement_match_count": 0
         });
@@ -7153,7 +7155,10 @@ mod tests {
         );
         let compact = compact_probe_response(&response);
         assert_eq!(compact["dependency_decision"], "dependencies_found");
-        assert_eq!(compact["cleanup_decision"]["safe_to_archive_or_retire"], false);
+        assert_eq!(
+            compact["cleanup_decision"]["safe_to_archive_or_retire"],
+            false
+        );
         assert_eq!(compact["proof_flags"], response["proof_flags"]);
     }
 

@@ -128,7 +128,7 @@ versioned receipt template only for one to ten fully resolved, exact,
 network-bound target rows. Unresolved, ambiguous, duplicate, id-only, or
 cross-network target scopes receive an explicit `not_generated` marker instead.
 
-Both proof tools enforce 8 KiB model-visible and 20 KiB full RMCP transport
+Both proof tools enforce 8 KiB Contract V1 envelope and 20 KiB full RMCP transport
 bounds. An oversized full proof drops known optional raw/sample detail,
 recomputes its fingerprint, and returns a canonical receipt bound to that exact
 projection. Decision qualifiers, counts, and completeness flags remain intact.
