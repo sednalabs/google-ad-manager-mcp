@@ -128,11 +128,11 @@ versioned receipt template only for one to ten fully resolved, exact,
 network-bound target rows. Unresolved, ambiguous, duplicate, id-only, or
 cross-network target scopes receive an explicit `not_generated` marker instead.
 
-Both proof tools fail closed above either size bound: 8 KiB for the serialized
-model-visible Contract V1 item, and 20 KiB for the full serialized RMCP
-transport after its text and structured representations are encoded. Both
-bounds include optional raw SOAP or line-item XML. Narrow the target set or page
-limits, or omit optional raw output, when a result would exceed either bound.
+Both proof tools enforce 8 KiB model-visible and 20 KiB full RMCP transport
+bounds. An oversized full proof drops known optional raw/sample detail,
+recomputes its fingerprint, and returns a canonical receipt bound to that exact
+projection. Decision qualifiers, counts, and completeness flags remain intact.
+If the projection still exceeds either bound, the tool fails closed.
 
 ## `gam_report_run`
 

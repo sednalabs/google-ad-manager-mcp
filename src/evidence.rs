@@ -87,52 +87,46 @@ pub(crate) fn evidence_receipt_template(
 
 pub(crate) fn success_with_wire_guard(
     data: Value,
+    compact_data: Option<Value>,
     meta: Value,
     started: Instant,
     field: &'static str,
 ) -> CallToolResult {
-    let error_started = started;
+    match guarded_success(data, meta.clone(), started) {
+        Ok(result) => result,
+        Err(primary_failure) => match compact_data {
+            Some(compact) => match guarded_success(compact, meta, started) {
+                Ok(result) => result,
+                Err(failure) => contract::error(AdManagerError::invalid(field, failure), started),
+            },
+            None => contract::error(AdManagerError::invalid(field, primary_failure), started),
+        },
+    }
+}
+
+fn guarded_success(
+    data: Value,
+    meta: Value,
+    started: Instant,
+) -> Result<CallToolResult, &'static str> {
     let envelope = contract::success_envelope_with_meta(data, meta, started);
-    match serde_json::to_vec(&envelope) {
-        Ok(serialized) if serialized.len() <= MAX_MODEL_VISIBLE_RESULT_BYTES => {}
-        Ok(_) => {
-            return contract::error(
-                AdManagerError::invalid(
-                    field,
-                    "tool result exceeded its 8 KiB model-visible Contract V1 cap; narrow the target set, reduce page limits, or omit optional raw output",
-                ),
-                error_started,
-            );
-        }
-        Err(_) => {
-            return contract::error(
-                AdManagerError::invalid(
-                    field,
-                    "tool result could not be serialized for its model-visible size guard",
-                ),
-                error_started,
-            );
-        }
+    let model_visible = serde_json::to_vec(&envelope)
+        .map_err(|_| "tool result could not be serialized for its model-visible size guard")?;
+    if model_visible.len() > MAX_MODEL_VISIBLE_RESULT_BYTES {
+        return Err(
+            "tool result exceeded its 8 KiB model-visible Contract V1 cap; narrow the target set, reduce page limits, or omit optional raw output",
+        );
     }
 
     let result = CallToolResult::structured(envelope);
-    match serde_json::to_vec(&result) {
-        Ok(serialized) if serialized.len() <= MAX_RMCP_TRANSPORT_BYTES => result,
-        Ok(_) => contract::error(
-            AdManagerError::invalid(
-                field,
-                "tool result exceeded its 20 KiB RMCP transport cap after protocol encoding; narrow the target set, reduce page limits, or omit optional raw output",
-            ),
-            error_started,
-        ),
-        Err(_) => contract::error(
-            AdManagerError::invalid(
-                field,
-                "tool result could not be serialized for its RMCP transport-size guard",
-            ),
-            error_started,
-        ),
+    let transport = serde_json::to_vec(&result)
+        .map_err(|_| "tool result could not be serialized for its RMCP transport-size guard")?;
+    if transport.len() > MAX_RMCP_TRANSPORT_BYTES {
+        return Err(
+            "tool result exceeded its 20 KiB RMCP transport cap after protocol encoding; narrow the target set, reduce page limits, or omit optional raw output",
+        );
     }
+    Ok(result)
 }
 
 fn current_unix_seconds() -> Result<u64, AdManagerError> {
@@ -271,6 +265,7 @@ mod tests {
     fn wire_guard_rejects_oversized_model_visible_contract() {
         let result = success_with_wire_guard(
             json!({"optional_raw_output":"x".repeat(MAX_MODEL_VISIBLE_RESULT_BYTES)}),
+            None,
             json!({"mutation_performed":false}),
             Instant::now(),
             "probe_result",
@@ -284,9 +279,19 @@ mod tests {
     }
 
     #[test]
-    fn wire_guard_allows_bounded_one_target_probe_result() {
-        let result = success_with_wire_guard(
+    fn wire_guard_uses_bounded_compact_fallback() {
+        let bounded = success_with_wire_guard(
             json!({"network_code":"1234567","ad_units":[{"ad_unit_id":"200"}]}),
+            None,
+            json!({"mutation_performed":false}),
+            Instant::now(),
+            "probe_result",
+        );
+        assert!(serde_json::to_string(&bounded).unwrap().contains("\"ok\":true"));
+
+        let result = success_with_wire_guard(
+            json!({"optional_raw_output":"x".repeat(MAX_MODEL_VISIBLE_RESULT_BYTES)}),
+            Some(json!({"result_projection":{"truncated":true}})),
             json!({"mutation_performed":false}),
             Instant::now(),
             "probe_result",
@@ -294,12 +299,14 @@ mod tests {
         let serialized = serde_json::to_string(&result).expect("serialize guarded result");
         assert!(serialized.len() < MAX_RMCP_TRANSPORT_BYTES);
         assert!(serialized.contains("\"ok\":true"));
+        assert!(serialized.contains("\"truncated\":true"));
     }
 
     #[test]
     fn wire_guard_rejects_oversized_rmcp_transport() {
         let result = success_with_wire_guard(
             json!({"optional_raw_output":"\"".repeat(3_800)}),
+            None,
             json!({"mutation_performed":false}),
             Instant::now(),
             "probe_result",

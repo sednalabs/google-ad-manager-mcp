@@ -1035,9 +1035,11 @@ impl AdManagerServer {
         ) {
             return Ok(contract::error(err, started));
         }
+        let compact_response = compact_probe_response(&response);
 
         Ok(success_with_wire_guard(
             response,
+            Some(compact_response),
             json!({
                 "mutation_performed": false,
                 "upstream_called": true,
@@ -1205,9 +1207,11 @@ impl AdManagerServer {
         ) {
             return Ok(contract::error(err, started));
         }
+        let compact_response = compact_probe_response(&response);
 
         Ok(success_with_wire_guard(
             response,
+            Some(compact_response),
             json!({
                 "mutation_performed": false,
                 "upstream_called": true,
@@ -3008,7 +3012,7 @@ async fn probe_yield_groups(
             "surface": "yield_groups",
             "decision": "blocked",
             "proof_state": "blocked",
-            "block_class": if matches!(applied.upstream_status, 401 | 403) { "permission" } else { "upstream" },
+            "block_class": soap_probe_block_class(applied.upstream_status),
             "upstream_status": applied.upstream_status,
             "request_id": applied.request_id,
             "response_time": applied.response_time,
@@ -3253,7 +3257,7 @@ async fn probe_ad_unit_line_item_dependencies(
                 "surface": "line_items",
                 "decision": "blocked",
                 "proof_state": "blocked",
-                "block_class": if matches!(applied.upstream_status, 401 | 403) { "permission" } else { "upstream" },
+                "block_class": soap_probe_block_class(applied.upstream_status),
                 "upstream_status": applied.upstream_status,
                 "request_id": applied.request_id,
                 "response_time": applied.response_time,
@@ -3553,17 +3557,6 @@ fn dependency_probe_decision(
     placement_summary: &Value,
     line_item_summary: &Value,
 ) -> &'static str {
-    if line_item_summary
-        .get("proof_state")
-        .and_then(Value::as_str)
-        .is_some_and(|state| state == "blocked")
-        || placement_summary
-            .get("proof_state")
-            .and_then(Value::as_str)
-            .is_some_and(|state| state == "blocked")
-    {
-        return "blocked";
-    }
     let placement_dependencies = placement_summary
         .get("target_placement_match_count")
         .and_then(Value::as_u64)
@@ -3576,6 +3569,16 @@ fn dependency_probe_decision(
         > 0;
     if placement_dependencies || line_item_dependencies {
         "dependencies_found"
+    } else if line_item_summary
+        .get("proof_state")
+        .and_then(Value::as_str)
+        .is_some_and(|state| state == "blocked")
+        || placement_summary
+            .get("proof_state")
+            .and_then(Value::as_str)
+            .is_some_and(|state| state == "blocked")
+    {
+        "blocked"
     } else if !target_resolution_issues.is_empty() {
         "missing_or_ambiguous_targets"
     } else if dependency_proof_incomplete(placement_summary, line_item_summary) {
@@ -3618,6 +3621,65 @@ fn attach_result_fingerprint(response: &mut Value) {
         .as_object_mut()
         .expect("probe response is an object")
         .insert("result_fingerprint".to_string(), Value::String(fingerprint));
+}
+
+fn compact_probe_response(response: &Value) -> Value {
+    let mut compact = response.clone();
+    let original_receipt = compact
+        .as_object_mut()
+        .and_then(|object| {
+            object.remove("result_fingerprint");
+            object.remove("evidence_receipt_template")
+        })
+        .unwrap_or(Value::Null);
+    let receipt_generated = original_receipt.get("result_hash").is_some();
+    let mut detail_omitted = false;
+    compact_probe_value(&mut compact, &mut detail_omitted);
+    compact
+        .as_object_mut()
+        .expect("probe response is an object")
+        .insert(
+            "result_projection".to_string(),
+            json!({
+                "truncated": detail_omitted,
+                "omitted_detail_classes": ["optional_raw_output", "bounded_samples"],
+                "receipt_binds_returned_projection": receipt_generated,
+            }),
+        );
+    attach_result_fingerprint(&mut compact);
+    let fingerprint = compact["result_fingerprint"].clone();
+    let mut receipt = original_receipt;
+    if receipt_generated {
+        receipt["result_hash"] = fingerprint;
+    }
+    compact
+        .as_object_mut()
+        .expect("probe response is an object")
+        .insert("evidence_receipt_template".to_string(), receipt);
+    compact
+}
+
+fn compact_probe_value(value: &mut Value, detail_omitted: &mut bool) {
+    match value {
+        Value::Object(object) => {
+            for field in [
+                "upstream_response_xml",
+                "dependency_matches_sample",
+                "target_placement_matches_sample",
+            ] {
+                *detail_omitted |= object.remove(field).is_some();
+            }
+            object
+                .values_mut()
+                .for_each(|value| compact_probe_value(value, detail_omitted));
+        }
+        Value::Array(values) => {
+            values
+                .iter_mut()
+                .for_each(|value| compact_probe_value(value, detail_omitted));
+        }
+        _ => {}
+    }
 }
 
 fn attach_evidence_receipt_template(
@@ -3770,6 +3832,14 @@ fn contains_permission_block(value: &Value) -> bool {
         }
         Value::Array(values) => values.iter().any(contains_permission_block),
         _ => false,
+    }
+}
+
+fn soap_probe_block_class(status: u16) -> &'static str {
+    if matches!(status, 401 | 403) {
+        "permission"
+    } else {
+        "upstream"
     }
 }
 
@@ -6890,7 +6960,7 @@ mod tests {
     #[test]
     fn dependency_probe_classifies_line_item_inventory_matches() {
         let target = dependency_target("200", &["100"], &["Section_Page_LS"]);
-        let placement_summary = json!({
+        let mut placement_summary = json!({
             "target_placement_ids_by_ad_unit_id": {
                 "200": ["300"]
             }
@@ -7024,6 +7094,11 @@ mod tests {
             dependency_probe_decision(&[], &placement_summary, &line_item_summary),
             "blocked"
         );
+        placement_summary["target_placement_match_count"] = json!(1);
+        assert_eq!(
+            dependency_probe_decision(&[], &placement_summary, &line_item_summary),
+            "dependencies_found"
+        );
     }
 
     #[test]
@@ -7088,11 +7163,20 @@ mod tests {
                 .get("target_placement_matches")
                 .is_none()
         );
+        let compact = compact_probe_response(&response);
+        assert_eq!(compact["dependency_decision"], "dependencies_found");
+        assert_eq!(compact["cleanup_decision"]["safe_to_archive_or_retire"], false);
+        assert_eq!(compact["proof_flags"], response["proof_flags"]);
     }
 
     #[test]
     fn evidence_receipt_attachment_binds_exact_target_and_source() {
         let mut response = json!({
+            "overall_decision": "partial_api_proof",
+            "attention_reasons": ["exposed_flag_requires_attention"],
+            "partial_reasons": ["manual_ui_review_required"],
+            "unsupported_or_unintegrated_surfaces": ["protections"],
+            "certainty": {"can_prove_requested_ad_unit_flags": false},
             "result_fingerprint": "0123456789abcdef",
             "ad_units": [{
                 "ad_unit_id": "200",
@@ -7109,12 +7193,45 @@ mod tests {
         )
         .expect("receipt attachment");
 
-        let receipt = &response["evidence_receipt_template"];
+        let receipt = response["evidence_receipt_template"].clone();
         assert_eq!(receipt["network_code"], "1234567");
         assert_eq!(receipt["source"], "exchange_protection_review");
         assert_eq!(receipt["state"], "partial_capped");
         assert_eq!(receipt["target_ad_unit_ids"], json!(["200"]));
         assert_eq!(receipt["result_hash"], "0123456789abcdef");
+        let full_fingerprint = response["result_fingerprint"].clone();
+        response["upstream_response_xml"] = json!("x".repeat(9_000));
+        let compact = compact_probe_response(&response);
+        assert_ne!(compact["result_fingerprint"], full_fingerprint);
+        assert!(compact.get("upstream_response_xml").is_none());
+        assert_eq!(compact["attention_reasons"], response["attention_reasons"]);
+        assert_eq!(
+            compact["unsupported_or_unintegrated_surfaces"],
+            response["unsupported_or_unintegrated_surfaces"]
+        );
+        assert_eq!(
+            compact["evidence_receipt_template"]["result_hash"],
+            compact["result_fingerprint"]
+        );
+        assert_eq!(
+            compact["evidence_receipt_template"]["target_ad_unit_ids"],
+            receipt["target_ad_unit_ids"]
+        );
+        assert_eq!(compact["result_projection"]["truncated"], true);
+        assert_eq!(
+            compact["result_projection"]["receipt_binds_returned_projection"],
+            true
+        );
+        let guarded = success_with_wire_guard(
+            response,
+            Some(compact.clone()),
+            json!({"mutation_performed":false}),
+            Instant::now(),
+            "probe_result",
+        );
+        let encoded = serde_json::to_string(&guarded).expect("serialize compact fallback");
+        assert!(encoded.contains(compact["result_fingerprint"].as_str().unwrap()));
+        assert!(!encoded.contains(&"x".repeat(9_000)));
     }
 
     #[test]
@@ -7184,6 +7301,16 @@ mod tests {
             dependency_evidence_state("blocked", &read_blocked),
             EvidenceState::BlockedRead
         );
+        assert_eq!(
+            dependency_evidence_state(
+                "blocked",
+                &json!({"line_items":{"proof_state":"blocked","block_class":"permission"}}),
+            ),
+            EvidenceState::BlockedPermission
+        );
+        assert_eq!(soap_probe_block_class(401), "permission");
+        assert_eq!(soap_probe_block_class(403), "permission");
+        assert_eq!(soap_probe_block_class(500), "upstream");
     }
 
     #[test]
