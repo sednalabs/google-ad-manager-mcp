@@ -15,12 +15,13 @@ fn seal(mut data: Value, kind: ProbeKind, generated: bool) -> Value {
     let hash = stable_fingerprint(&data.to_string());
     data["result_fingerprint"] = json!(hash);
     data["evidence_receipt_template"] = if generated {
-        let ids = data["ad_units"]
+        let mut ids = data["ad_units"]
             .as_array()
             .unwrap()
             .iter()
             .map(|row| row["ad_unit_id"].as_str().unwrap().to_string())
             .collect::<Vec<_>>();
+        ids.sort();
         json!({
             "network_code":"1234567","source":kind.evidence_source().as_str(),
             "source_version":EVIDENCE_PRODUCER_CONTRACT_VERSION,"state":state,
@@ -68,6 +69,16 @@ fn ad_unit(id: usize, exchange: bool) -> Value {
         row["applied_adsense_enabled"] = json!(false);
         row["effective_adsense_enabled"] = json!(false);
         row["explicitly_targeted"] = json!(true);
+    } else {
+        row["ad_unit_codes"] = json!([format!("unit-{id}")]);
+        row["display_name"] = json!(format!("Inventory unit {id}"));
+        row["status"] = json!("ACTIVE");
+        row["ad_unit_sizes"] = json!([
+            {"width": 160, "height": 600},
+            {"width": 160, "height": 1200}
+        ]);
+        row["ancestor_ad_unit_ids"] = json!([]);
+        row["proof_notes"] = json!([]);
     }
     row
 }
@@ -214,16 +225,8 @@ fn maximal_exchange_and_dependency_are_bounded_and_keep_receipt_state() {
         let meta = json!({"mutation_performed":false});
         let native_envelope =
             contract::success_envelope_with_meta(full.clone(), meta.clone(), Instant::now());
-        assert!(
-            serde_json::to_vec(&native_envelope).unwrap().len() > MAX_CONTRACT_ENVELOPE_BYTES
-        );
-        let result = bounded_probe_success(
-            kind,
-            full,
-            meta,
-            Instant::now(),
-            "probe",
-        );
+        assert!(serde_json::to_vec(&native_envelope).unwrap().len() > MAX_CONTRACT_ENVELOPE_BYTES);
+        let result = bounded_probe_success(kind, full, meta, Instant::now(), "probe");
         assert!(serde_json::to_vec(&result).unwrap().len() < MAX_RMCP_TRANSPORT_BYTES);
         let envelope = structured(result);
         assert_eq!(envelope["ok"], true);
