@@ -64,6 +64,11 @@ Those hosted artifacts are useful when you want a pinned binary plus SHA256
 manifests and a Sigstore verification bundle from hosted compute rather than a
 local `cargo install`.
 
+Pull-request `rust-baseline` runs also upload `tool-schema-candidate` and
+`rustfmt-patch` diagnostic artifacts. These keep generated schema and formatting
+repairs reproducible when validation is intentionally performed on hosted
+compute.
+
 ## First Run
 
 The server exposes setup tools that do not return secrets:
