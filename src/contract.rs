@@ -165,9 +165,8 @@ fn compound_secret_key_start(lower: &str, key: &str) -> Option<usize> {
 }
 
 fn benign_secret_status_suffix(tail: &str) -> bool {
-    let suffix = tail.trim_matches(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'));
     matches!(
-        suffix,
+        tail,
         "_check"
             | "_check_failed"
             | "_configured"
@@ -201,9 +200,7 @@ fn inline_value_after_key(lower: &str, key: &str) -> bool {
     let Some(start) = compound_secret_key_start(lower, key) else {
         return false;
     };
-    lower[start + key.len()..]
-        .chars()
-        .any(|ch| ch.is_ascii_alphanumeric())
+    !lower[start + key.len()..].is_empty()
 }
 
 fn benign_secret_status_phrase(lower: &str, key: &str, following: &[&str]) -> bool {
@@ -211,21 +208,23 @@ fn benign_secret_status_phrase(lower: &str, key: &str, following: &[&str]) -> bo
         return false;
     };
     let tail = &lower[start + key.len()..];
-    if tail.contains([':', '=']) || !benign_secret_status_suffix(tail) {
+    if start != 0 || !benign_secret_status_suffix(tail) {
         return false;
     }
     if following.is_empty() {
         return true;
     }
-    let normalized = following
-        .iter()
-        .map(|word| word.trim_matches(|ch: char| !ch.is_ascii_alphanumeric()))
-        .collect::<Vec<_>>();
-    matches!(
-        (tail, normalized.as_slice()),
-        ("_rotation_failed", ["please", "retry"])
-            | ("_missing", ["use", "workload", "identity"])
-    )
+    (tail == "_rotation_failed" && exact_ascii_phrase(following, &["please", "retry"]))
+        || (tail == "_missing"
+            && exact_ascii_phrase(following, &["use", "workload", "identity"]))
+}
+
+fn exact_ascii_phrase(actual: &[&str], expected: &[&str]) -> bool {
+    actual.len() == expected.len()
+        && actual
+            .iter()
+            .zip(expected)
+            .all(|(actual, expected)| actual.eq_ignore_ascii_case(expected))
 }
 
 fn authorization_needs_following_value(lower: &str) -> bool {
@@ -460,6 +459,22 @@ mod tests {
             (
                 "client_secret_missing opaque-secret",
                 "[redacted] [redacted]",
+            ),
+            (
+                "client_secret_missing\u{79d8}\u{5bc6}",
+                "[redacted]",
+            ),
+            (
+                "client_secret_missing use workload identity\u{79d8}\u{5bc6}",
+                "[redacted] [redacted] [redacted] [redacted]",
+            ),
+            (
+                "access_token\u{79d8}\u{5bc6}",
+                "[redacted]",
+            ),
+            (
+                "opaque-secret_client_secret_missing",
+                "[redacted]",
             ),
         ] {
             assert_eq!(redact_secret_text(source), expected);
