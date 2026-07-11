@@ -449,6 +449,15 @@ fn evidence_bundle_rejects_duplicate_sources_and_reports_missing_surfaces() {
     }
 }
 
+#[test]
+fn evidence_note_limit_counts_characters_not_utf8_bytes() {
+    let five_hundred_multibyte_characters = "é".repeat(500);
+    assert!(validate_note(Some(&five_hundred_multibyte_characters)).is_ok());
+
+    let five_hundred_and_one_characters = "é".repeat(501);
+    assert!(validate_note(Some(&five_hundred_and_one_characters)).is_err());
+}
+
 #[tokio::test]
 async fn invalid_evidence_fails_before_any_provider_request() {
     let dependency = receipt(

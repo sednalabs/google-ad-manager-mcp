@@ -331,7 +331,7 @@ fn canonical_id_set(ids: &[String]) -> Option<BTreeSet<String>> {
 
 fn validate_note(note: Option<&str>) -> Result<(), AdManagerError> {
     if note.is_some_and(|value| {
-        value.len() > 500 || value.chars().any(|ch| ch.is_control() && ch != '\t')
+        value.chars().count() > 500 || value.chars().any(|ch| ch.is_control() && ch != '\t')
     }) {
         return Err(AdManagerError::invalid(
             "evidence",
