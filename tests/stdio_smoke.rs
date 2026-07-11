@@ -15,6 +15,7 @@ fn stdio_initializes_and_lists_tools() {
         "gam_network_catalog_list",
         "gam_exchange_protection_probe",
         "gam_ad_unit_dependency_probe",
+        "gam_ad_unit_retirement_assessment",
         "gam_report_run",
         "gam_report_result_rows",
         "gam_trafficking_tool_matrix",
@@ -115,4 +116,31 @@ fn probe_handler_validation_errors_do_not_echo_oversized_inputs() {
             .expect("UTF-8 response")
             .contains(&"v".repeat(512))
     );
+}
+
+#[test]
+fn retirement_assessment_rejects_noncanonical_targets_at_stdio_boundary() {
+    let mut process = StdioMcpProcess::start(env!("CARGO_BIN_EXE_google-ad-manager-mcp"));
+    for (id, network_code, ad_unit_ids) in [
+        (6, "01234567", json!(["200"])),
+        (7, "1234567", json!([])),
+        (8, "1234567", json!(["0200"])),
+        (9, "1234567", json!(["200", "200"])),
+    ] {
+        let response = process.call_tool(
+            id,
+            "gam_ad_unit_retirement_assessment",
+            json!({"network_code":network_code,"ad_unit_ids":ad_unit_ids}),
+        );
+        let result = &response["result"]["structuredContent"];
+        assert_eq!(result["ok"], false);
+        assert_eq!(result["error"]["code"], "invalid_input");
+        assert!(result.get("data").is_none());
+        assert!(
+            serde_json::to_vec(result)
+                .expect("serialize retirement validation error")
+                .len()
+                < 20 * 1024
+        );
+    }
 }

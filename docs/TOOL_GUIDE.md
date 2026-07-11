@@ -215,6 +215,42 @@ upstream byte totals remain summary metadata. Nested placement, yield-group, and
 within the exact top-level probe target scope before a returned receipt can bind
 the compact result.
 
+## `gam_ad_unit_retirement_assessment`
+
+`gam_ad_unit_retirement_assessment` is the staged, read-only retirement review
+surface. The current stage is an exact-identity preflight only. It accepts:
+
+- a canonical positive signed-64-bit numeric `network_code` with no whitespace
+  or leading zeroes;
+- one to ten unique canonical positive signed-64-bit numeric `ad_unit_ids`.
+
+Each target is read with an exact REST `adUnits.get` resource name. The result
+contains a bounded current identity summary, per-target identity fingerprint,
+aggregate identity proof state, and assessment fingerprint. Required row shape
+is validated before identity can be clear. Parent resources must be canonical
+ad-unit resources in the requested network. Size output includes source and
+retained counts, a truncation flag, and a fingerprint over the complete source
+array so environment, companion, and tail changes remain bound even when only
+20 items are returned. Every size must declare the official `BROWSER` or
+`VIDEO_PLAYER` environment; companions are accepted only for `VIDEO_PLAYER`.
+Status must be one of `ACTIVE`, `INACTIVE`, or `ARCHIVED`; unspecified or
+unknown values keep identity incomplete. Provider errors are classified
+without returning provider error text. A
+missing target or identity mismatch blocks the identity surface; permission
+and pre-authentication failures remain distinct. A confirmed blocker combined
+with any unread or incomplete target is `partial_blocked`, not complete batch
+proof. Request metadata reports whether provider calls were actually attempted.
+
+The `descendants`, `evidence`, and `recommendation` surfaces are intentionally
+returned as `not_run`. Exact identity alone is not retirement eligibility. The
+response always reports `mutation_performed=false`,
+`archive_or_deactivate_authorized=false`, and
+`safe_to_archive_or_retire=false`. Later stages will add hierarchy
+reconciliation and evidence grading without weakening these fail-closed
+defaults.
+The inner data, complete model-visible Contract V1 content, and serialized RMCP
+result are independently measured against 7 KiB, 8 KiB, and 20 KiB limits.
+
 ## `gam_report_run`
 
 `gam_report_run` is designed for saved reports that already exist in Ad

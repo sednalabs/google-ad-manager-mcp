@@ -32,6 +32,8 @@ surface, not an SDK mirror or generic upstream proxy.
   - scratchpad error envelopes
 - `src/evidence.rs`
   - neutral evidence receipts, fingerprints, and Contract/RMCP byte limits
+- `src/ad_unit_retirement.rs` and `src/ad_unit_retirement/`
+  - staged exact-identity retirement preflight and compact identity summaries
 - `src/probe_projection/`
   - semantic-preserving compact exchange/dependency proof projections
   - typed omission accounting and bounded proof error fallbacks
@@ -154,6 +156,13 @@ ad-unit and placement rows plus SOAP LineItemService reads. It classifies exact,
 ancestor-descendant, placement, root/network, and excluded targeting evidence,
 and returns capped or incomplete proof flags rather than an archive/deactivate
 decision.
+
+`gam_ad_unit_retirement_assessment` is deliberately staged. The current
+implementation accepts one to ten canonical positive ad-unit ids, calls exact
+REST `adUnits.get` reads, and returns compact current identity plus stable
+fingerprints. Descendant reconciliation, external evidence grading, and the
+final recommendation remain explicit `not_run` surfaces. The tool never
+authorizes or applies a GAM mutation.
 
 `gam_yield_group_exclusions_preview` and
 `gam_yield_group_exclusions_apply` are the typed mutation path for descendant-safe
