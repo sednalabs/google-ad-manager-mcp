@@ -16,7 +16,8 @@ use serde_json::{Map, Value, json};
 use tokio::process::Command;
 
 use crate::ad_unit_retirement::{
-    AdUnitRetirementAssessmentArgs, assess_ad_unit_retirement_with_reader, response_bytes,
+    AdUnitRetirementAssessmentArgs, MAX_DESCENDANT_PAGE_BYTES,
+    assess_ad_unit_retirement_with_readers, response_bytes,
 };
 use crate::auth_ux::{gcloud_adc_login_command, shell_join_with_cloudsdk_config};
 use crate::client::{
@@ -560,7 +561,7 @@ impl AdManagerServer {
                     "Call gam_network_catalog_list for ad_units, orders, line_items, placements, private_auctions, private_auction_deals, or reports.",
                     "Call gam_exchange_protection_probe when you need explicit partial-proof states for Exchange, private auction, private deal, or yield-group exposure.",
                     "Call gam_ad_unit_dependency_probe before ad-unit cleanup, archive, or retargeting work so placement and line-item dependencies are explicit.",
-                    "Call gam_ad_unit_retirement_assessment to bind one to ten exact canonical ad-unit ids to current REST identity. Descendants, evidence grading, and recommendations remain explicitly not_run in the current stage.",
+                    "Call gam_ad_unit_retirement_assessment to bind one to ten exact canonical ad-unit ids to current REST identity and a bounded ordered hierarchy/descendant scan. External evidence grading and recommendations remain explicitly not_run in the current stage.",
                     "Call gam_report_run for saved reports and gam_report_result_rows for large paginated results.",
                     "Call gam_trafficking_tool_matrix before planning writes so the REST and SOAP trafficking surfaces are explicit.",
                     "Use gam_rest_write_plan for dry-run write plans; gam_rest_write_apply only works when the server is explicitly started with GOOGLE_AD_MANAGER_MCP_WRITE_MODE=enabled and the manage scope.",
@@ -1240,13 +1241,14 @@ impl AdManagerServer {
 
     #[tool(
         name = "gam_ad_unit_retirement_assessment",
-        description = "Read-only exact-identity preflight for one to ten canonical Ad Manager ad-unit ids; descendant, evidence, and recommendation stages remain not_run."
+        description = "Read-only exact-identity and bounded hierarchy preflight for one to ten canonical Ad Manager ad-unit ids; external evidence and recommendation stages remain not_run."
     )]
     async fn gam_ad_unit_retirement_assessment(
         &self,
         Parameters(args): Parameters<AdUnitRetirementAssessmentArgs>,
     ) -> Result<CallToolResult, McpError> {
         let client = self.client().clone();
+        let catalog_client = client.clone();
         Ok(ad_unit_retirement_tool_result(
             args,
             Instant::now(),
@@ -1255,6 +1257,19 @@ impl AdManagerServer {
                 async move {
                     client
                         .get_ad_unit_with_request_state(&network_code, &resource_name)
+                        .await
+                }
+            },
+            move |network_code, page_size, page_token| {
+                let client = catalog_client.clone();
+                async move {
+                    client
+                        .list_ad_units_bounded_with_request_state(
+                            &network_code,
+                            page_size,
+                            page_token,
+                            MAX_DESCENDANT_PAGE_BYTES,
+                        )
                         .await
                 }
             },
@@ -2451,16 +2466,25 @@ fn default_true() -> bool {
     true
 }
 
-async fn ad_unit_retirement_tool_result<F, Fut>(
+async fn ad_unit_retirement_tool_result<IF, IFut, LF, LFut>(
     args: AdUnitRetirementAssessmentArgs,
     started: Instant,
-    read_ad_unit: F,
+    read_ad_unit: IF,
+    read_ad_unit_page: LF,
 ) -> CallToolResult
 where
-    F: FnMut(String, String) -> Fut,
-    Fut: Future<Output = (Result<Value, AdManagerError>, bool)>,
+    IF: FnMut(String, String) -> IFut,
+    IFut: Future<Output = (Result<Value, AdManagerError>, bool)>,
+    LF: FnMut(String, u32, Option<String>) -> LFut,
+    LFut: Future<Output = (Result<(Value, usize), AdManagerError>, bool)>,
 {
-    let response = match assess_ad_unit_retirement_with_reader(&args, read_ad_unit).await {
+    let response = match assess_ad_unit_retirement_with_readers(
+        &args,
+        read_ad_unit,
+        read_ad_unit_page,
+    )
+    .await
+    {
         Ok(response) => response,
         Err(err) => return contract::error(err, started),
     };
@@ -2470,11 +2494,27 @@ where
         .and_then(|value| value.get("attempted_count"))
         .and_then(Value::as_u64)
         .unwrap_or(0);
+    let identity_attempted_count = response
+        .get("provider_requests")
+        .and_then(|value| value.get("identity_attempted_count"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
     let target_count = response
         .get("provider_requests")
         .and_then(|value| value.get("target_count"))
         .and_then(Value::as_u64)
         .unwrap_or(0);
+    let descendant_page_attempted_count = response
+        .get("provider_requests")
+        .and_then(|value| value.get("descendant_page_attempted_count"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let descendant_request_state = response
+        .get("descendants")
+        .and_then(|value| value.get("provider_request_state"))
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+        .to_string();
     let result = contract::success_with_meta(
         response,
         json!({
@@ -2482,12 +2522,16 @@ where
             "upstream_called": upstream_attempted_count > 0,
             "upstream_call_state": if upstream_attempted_count == 0 {
                 "not_sent"
-            } else if upstream_attempted_count == target_count {
+            } else if identity_attempted_count == target_count
+                && descendant_page_attempted_count > 0
+                && descendant_request_state == "completed"
+            {
                 "attempted_all"
             } else {
                 "attempted_partial"
             },
             "serialized_response_bytes": serialized_response_bytes,
+            "descendant_request_state": descendant_request_state,
             "max_model_visible_result_bytes": MAX_CONTRACT_ENVELOPE_BYTES,
             "max_wire_result_bytes": MAX_RMCP_TRANSPORT_BYTES,
             "policy": provider_safety_contract_json(),
@@ -7702,6 +7746,8 @@ mod tests {
             AdUnitRetirementAssessmentArgs {
                 network_code: "1234567".to_string(),
                 ad_unit_ids: vec!["200".to_string()],
+                ad_unit_page_size: Some(100),
+                max_ad_units: Some(100),
             },
             Instant::now(),
             |network_code, resource_name| async move {
@@ -7718,6 +7764,19 @@ mod tests {
                     true,
                 )
             },
+            |_network_code, _page_size, _page_token| async move {
+                let payload = json!({
+                    "adUnits": [{
+                        "name":"networks/1234567/adUnits/200",
+                        "status":"ACTIVE",
+                        "parentPath":[],
+                        "hasChildren":false,
+                        "updateTime":"2026-07-10T00:00:00Z"
+                    }]
+                });
+                let bytes = payload.to_string().len();
+                (Ok((payload, bytes)), true)
+            },
         )
         .await;
         let response = result.structured_content.expect("structured response");
@@ -7726,7 +7785,10 @@ mod tests {
             response["data"]["identity"]["proof_state"],
             "complete_clear"
         );
-        assert_eq!(response["data"]["descendants"]["proof_state"], "not_run");
+        assert_eq!(
+            response["data"]["descendants"]["proof_state"],
+            "complete_clear"
+        );
         assert_eq!(response["data"]["evidence"]["proof_state"], "not_run");
         assert_eq!(response["data"]["recommendation"]["decision"], "not_run");
         assert_eq!(response["meta"]["mutation_performed"], false);
@@ -7746,6 +7808,8 @@ mod tests {
             AdUnitRetirementAssessmentArgs {
                 network_code: "1234567".to_string(),
                 ad_unit_ids: (200..210).map(|id| id.to_string()).collect(),
+                ad_unit_page_size: Some(100),
+                max_ad_units: Some(100),
             },
             Instant::now(),
             |_network_code, resource_name| async move {
@@ -7756,10 +7820,35 @@ mod tests {
                         "status": "ACTIVE",
                         "adUnitSizes": [],
                         "hasChildren": false,
+                        "parentAdUnit":"networks/1234567/adUnits/100",
                         "updateTime": "2026-07-10T00:00:00Z"
                     })),
                     true,
                 )
+            },
+            |_network_code, _page_size, _page_token| async move {
+                let mut rows = vec![json!({
+                    "name":"networks/1234567/adUnits/100",
+                    "status":"ACTIVE",
+                    "parentPath":[],
+                    "hasChildren":true,
+                    "updateTime":"2026-07-10T00:00:00Z"
+                })];
+                rows.extend((200..210).map(|id| {
+                    json!({
+                        "name":format!("networks/1234567/adUnits/{id}"),
+                        "parentAdUnit":"networks/1234567/adUnits/100",
+                        "status":"ACTIVE",
+                        "parentPath":[{"parentAdUnit":"networks/1234567/adUnits/100"}],
+                        "hasChildren":false,
+                        "updateTime":"2026-07-10T00:00:00Z"
+                    })
+                }));
+                let payload = json!({
+                    "adUnits": rows
+                });
+                let bytes = payload.to_string().len();
+                (Ok((payload, bytes)), true)
             },
         )
         .await;
@@ -7789,9 +7878,19 @@ mod tests {
             AdUnitRetirementAssessmentArgs {
                 network_code: "1234567".to_string(),
                 ad_unit_ids: vec!["200".to_string()],
+                ad_unit_page_size: Some(100),
+                max_ad_units: Some(100),
             },
             Instant::now(),
             |_network_code, _resource_name| async move {
+                (
+                    Err(AdManagerError::AuthBootstrap(
+                        "private auth detail".to_string(),
+                    )),
+                    false,
+                )
+            },
+            |_network_code, _page_size, _page_token| async move {
                 (
                     Err(AdManagerError::AuthBootstrap(
                         "private auth detail".to_string(),
@@ -7808,6 +7907,74 @@ mod tests {
         assert_eq!(response["meta"]["upstream_called"], false);
         assert_eq!(response["meta"]["upstream_call_state"], "not_sent");
         assert!(!response.to_string().contains("private auth detail"));
+    }
+
+    #[tokio::test]
+    async fn retirement_preflight_outer_meta_reports_late_not_sent_page_as_partial() {
+        let page_calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let result = ad_unit_retirement_tool_result(
+            AdUnitRetirementAssessmentArgs {
+                network_code: "1234567".to_string(),
+                ad_unit_ids: vec!["200".to_string()],
+                ad_unit_page_size: Some(100),
+                max_ad_units: Some(100),
+            },
+            Instant::now(),
+            |_network_code, resource_name| async move {
+                (
+                    Ok(json!({
+                        "name":resource_name,
+                        "adUnitCode":"fixture_unit",
+                        "status":"ACTIVE",
+                        "adUnitSizes":[],
+                        "hasChildren":false,
+                        "updateTime":"2026-07-10T00:00:00Z"
+                    })),
+                    true,
+                )
+            },
+            {
+                let page_calls = page_calls.clone();
+                move |_network_code, _page_size, _page_token| {
+                    let page_calls = page_calls.clone();
+                    async move {
+                        if page_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                            let payload = json!({
+                                "adUnits":[{
+                                    "name":"networks/1234567/adUnits/200",
+                                    "status":"ACTIVE",
+                                    "parentPath":[],
+                                    "hasChildren":false,
+                                    "updateTime":"2026-07-10T00:00:00Z"
+                                }],
+                                "nextPageToken":"page-2"
+                            });
+                            let bytes = payload.to_string().len();
+                            (Ok((payload, bytes)), true)
+                        } else {
+                            (
+                                Err(AdManagerError::AuthBootstrap(
+                                    "private auth detail".to_string(),
+                                )),
+                                false,
+                            )
+                        }
+                    }
+                }
+            },
+        )
+        .await;
+        let response = result.structured_content.expect("structured response");
+        assert_eq!(response["ok"], true);
+        assert_eq!(
+            response["data"]["descendants"]["provider_request_state"],
+            "completed_then_not_sent"
+        );
+        assert_eq!(response["meta"]["upstream_call_state"], "attempted_partial");
+        assert_eq!(
+            response["meta"]["descendant_request_state"],
+            "completed_then_not_sent"
+        );
     }
 
     #[test]

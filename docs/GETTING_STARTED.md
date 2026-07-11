@@ -117,9 +117,10 @@ google-ad-manager-mcp --print-tool-schema > spec/tool_schema_snapshot.v1.json
    proof for exact ad units
 5. `gam_ad_unit_dependency_probe` when you need placement and line-item
    dependency proof before cleanup or retargeting work
-6. `gam_ad_unit_retirement_assessment` when you need current exact identity for
-   one to ten canonical ad-unit ids. The current stage does not scan
-   descendants, grade evidence, recommend retirement, or mutate GAM.
+6. `gam_ad_unit_retirement_assessment` when you need current exact identity and
+   bounded hierarchy/descendant reconciliation for one to ten canonical
+   ad-unit ids. The current stage does not grade external evidence, recommend
+   retirement, or mutate GAM.
 
 For reports:
 

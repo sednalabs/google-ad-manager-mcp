@@ -118,7 +118,7 @@
       "name": "gam_ad_unit_dependency_probe"
     },
     {
-      "description": "Read-only exact-identity preflight for one to ten canonical Ad Manager ad-unit ids; descendant, evidence, and recommendation stages remain not_run.",
+      "description": "Read-only exact-identity and bounded hierarchy preflight for one to ten canonical Ad Manager ad-unit ids; external evidence and recommendation stages remain not_run.",
       "inputSchema": {
         "$defs": {
           "RetirementAdUnitIdSchema": {
@@ -138,6 +138,26 @@
             "maxItems": 10,
             "minItems": 1,
             "type": "array"
+          },
+          "ad_unit_page_size": {
+            "description": "Number of ordered ad-unit catalog rows to request per hierarchy page. Defaults to 1000.",
+            "format": "uint32",
+            "maximum": 1000,
+            "minimum": 1,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "max_ad_units": {
+            "description": "Maximum catalog rows to reconcile before hierarchy proof fails closed. Defaults to 5000.",
+            "format": "uint32",
+            "maximum": 10000,
+            "minimum": 1,
+            "type": [
+              "integer",
+              "null"
+            ]
           },
           "network_code": {
             "description": "Canonical positive numeric Ad Manager network code, for example 1234567.",

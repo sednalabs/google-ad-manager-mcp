@@ -218,11 +218,14 @@ the compact result.
 ## `gam_ad_unit_retirement_assessment`
 
 `gam_ad_unit_retirement_assessment` is the staged, read-only retirement review
-surface. The current stage is an exact-identity preflight only. It accepts:
+surface. The current stage combines exact identity with bounded hierarchy and
+descendant reconciliation. It accepts:
 
 - a canonical positive signed-64-bit numeric `network_code` with no whitespace
   or leading zeroes;
-- one to ten unique canonical positive signed-64-bit numeric `ad_unit_ids`.
+- one to ten unique canonical positive signed-64-bit numeric `ad_unit_ids`;
+- optional `ad_unit_page_size` from 1 to 1000, default 1000;
+- optional `max_ad_units` from 1 to 10000, default 5000.
 
 Each target is read with an exact REST `adUnits.get` resource name. The result
 contains a bounded current identity summary, per-target identity fingerprint,
@@ -239,15 +242,30 @@ without returning provider error text. A
 missing target or identity mismatch blocks the identity surface; permission
 and pre-authentication failures remain distinct. A confirmed blocker combined
 with any unread or incomplete target is `partial_blocked`, not complete batch
-proof. Request metadata reports whether provider calls were actually attempted.
+proof. Request metadata reports whether identity and catalog calls were
+actually attempted.
+Target ids are not repeated inside each compact `current` object, and derived
+resource names are omitted; the target id plus exact-match flag remain the
+identity binding.
 
-The `descendants`, `evidence`, and `recommendation` surfaces are intentionally
-returned as `not_run`. Exact identity alone is not retirement eligibility. The
-response always reports `mutation_performed=false`,
+The hierarchy scan is strictly ordered and bounded by page, row, per-page byte,
+and total byte limits. It validates every row's exact network resource,
+root-to-parent path, official status, and child flag; reconstructs direct child
+state to reconcile `hasChildren` in both directions; and compares every target
+against its exact identity read. Pagination drift, malformed pages or tokens,
+catalog gaps, cycles, duplicate ids, cross-network paths, or caps remain
+incomplete. Known active or inactive external descendants remain positive
+blockers even if a later page fails. Archived descendants do not block. When
+targets contain an ancestor and its child, the response returns a deterministic
+child-first order. Only aggregate counts, bounded samples, issue codes, and
+fingerprints are returned.
+
+The `evidence` and `recommendation` surfaces are intentionally returned as
+`not_run`. Identity and hierarchy proof alone are not retirement eligibility.
+Every successful assessment reports `mutation_performed=false`,
 `archive_or_deactivate_authorized=false`, and
-`safe_to_archive_or_retire=false`. Later stages will add hierarchy
-reconciliation and evidence grading without weakening these fail-closed
-defaults.
+`safe_to_archive_or_retire=false`. Later stages will add evidence grading and
+operator-review decisioning without weakening these fail-closed defaults.
 The inner data, complete model-visible Contract V1 content, and serialized RMCP
 result are independently measured against 7 KiB, 8 KiB, and 20 KiB limits.
 

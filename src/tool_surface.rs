@@ -83,13 +83,15 @@ pub(crate) fn build_tool_inventory() -> Result<ToolInventory, ToolInventoryError
         cap(
             "gam_ad_unit_retirement_assessment",
             "catalog",
-            "Read-only exact-identity preflight for one to ten canonical ad-unit ids; later retirement proof stages remain explicit and incomplete.",
+            "Read-only exact-identity and bounded hierarchy preflight for one to ten canonical ad-unit ids; later evidence and recommendation stages remain incomplete.",
             [
                 "google",
                 "ad-manager",
                 "ad-units",
                 "retirement",
                 "identity",
+                "hierarchy",
+                "descendants",
                 "preflight",
                 "cleanup",
             ],
@@ -484,7 +486,7 @@ mod tests {
         let inventory = build_tool_inventory().expect("inventory");
         let results = inventory.search(
             &ToolSearchFilter {
-                query: Some("ad unit retirement identity preflight".to_string()),
+                query: Some("ad unit retirement identity hierarchy descendants".to_string()),
                 group: Some("catalog".to_string()),
                 read_only: Some(true),
                 limit: Some(10),

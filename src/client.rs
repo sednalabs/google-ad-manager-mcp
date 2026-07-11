@@ -23,6 +23,7 @@ pub const DEFAULT_SOAP_API_VERSION: &str = "v202605";
 const MAX_SOAP_PAYLOAD_XML_BYTES: usize = 256 * 1024;
 const MAX_SOAP_RESPONSE_XML_BYTES: usize = 200 * 1024;
 const SOAP_ENVELOPE_NAMESPACE: &str = concat!("http", "://schemas.xmlsoap.org/soap/envelope/");
+const AD_UNIT_HIERARCHY_FIELDS: &str = "adUnits.name,adUnits.parentAdUnit,adUnits.parentPath.parentAdUnit,adUnits.status,adUnits.hasChildren,adUnits.updateTime,nextPageToken";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -706,6 +707,40 @@ impl AdManagerClient {
         .await
     }
 
+    pub(crate) async fn list_ad_units_bounded_with_request_state(
+        &self,
+        network_code: &str,
+        page_size: u32,
+        page_token: Option<String>,
+        max_response_bytes: usize,
+    ) -> (Result<(Value, usize), AdManagerError>, bool) {
+        let network_code = match validate_network_code(network_code) {
+            Ok(value) => value,
+            Err(err) => return (Err(err), false),
+        };
+        let token = match self.access_token().await {
+            Ok(value) => value,
+            Err(err) => return (Err(err), false),
+        };
+        let url = match absolute_api_url(
+            &self.api_base_url,
+            &format!("networks/{network_code}/adUnits"),
+        ) {
+            Ok(value) => value,
+            Err(err) => return (Err(err), false),
+        };
+        let query = ad_unit_hierarchy_list_query(page_size, page_token);
+        let mut request = self.http.request(Method::GET, url).bearer_auth(token);
+        if let Some(quota_project) = &self.quota_project {
+            request = request.header("x-goog-user-project", quota_project.as_ref());
+        }
+        request = request.query(&query);
+        (
+            self.send_json_bounded(request, max_response_bytes).await,
+            true,
+        )
+    }
+
     pub async fn get_ad_unit(
         &self,
         network_code: &str,
@@ -1158,6 +1193,51 @@ impl AdManagerClient {
         Ok(serde_json::from_slice(&bytes)?)
     }
 
+    async fn send_json_bounded(
+        &self,
+        request: RequestBuilder,
+        max_response_bytes: usize,
+    ) -> Result<(Value, usize), AdManagerError> {
+        let mut response = request.send().await?;
+        let status = response.status();
+        if response
+            .content_length()
+            .is_some_and(|length| length > max_response_bytes as u64)
+        {
+            return Err(AdManagerError::invalid(
+                "upstream_response",
+                format!("response exceeded the {max_response_bytes}-byte hierarchy-page limit"),
+            ));
+        }
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response.chunk().await? {
+            if bytes.len().saturating_add(chunk.len()) > max_response_bytes {
+                return Err(AdManagerError::invalid(
+                    "upstream_response",
+                    format!("response exceeded the {max_response_bytes}-byte hierarchy-page limit"),
+                ));
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        let response_bytes = bytes.len();
+
+        if !status.is_success() {
+            let message = String::from_utf8_lossy(&bytes).trim().to_string();
+            return Err(AdManagerError::UpstreamApi {
+                status: status.as_u16(),
+                message: if message.is_empty() {
+                    "no upstream response body".to_string()
+                } else {
+                    clip_message(message)
+                },
+            });
+        }
+        if bytes.is_empty() {
+            return Ok((Value::Null, 0));
+        }
+        Ok((serde_json::from_slice(&bytes)?, response_bytes))
+    }
+
     async fn send_xml(&self, request: RequestBuilder) -> Result<(u16, String), AdManagerError> {
         let response = request.send().await?;
         let status = response.status();
@@ -1256,6 +1336,21 @@ impl AdManagerClient {
             .map_err(|err| AdManagerError::AuthBootstrap(err.to_string()))?;
         Ok(token.as_str().to_string())
     }
+}
+
+fn ad_unit_hierarchy_list_query(
+    page_size: u32,
+    page_token: Option<String>,
+) -> Vec<(&'static str, String)> {
+    let mut query = vec![
+        ("pageSize", page_size.to_string()),
+        ("orderBy", "name".to_string()),
+        ("fields", AD_UNIT_HIERARCHY_FIELDS.to_string()),
+    ];
+    if let Some(page_token) = non_empty(page_token) {
+        query.push(("pageToken", page_token));
+    }
+    query
 }
 
 fn select_auth_mode(settings: &Settings) -> Result<UpstreamAuthMode, AdManagerError> {
@@ -1769,15 +1864,31 @@ fn clip_message_with_truncation(message: String) -> (String, bool) {
 
 #[cfg(test)]
 mod tests {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::thread;
+
     use super::{
-        AdManagerClient, CatalogCollection, MAX_SOAP_RESPONSE_XML_BYTES, RestWriteOperation,
-        RestWriteResource, SOAP_ENVELOPE_NAMESPACE, SoapTraffickingOperation, classify_soap_impact,
-        clip_message, clip_message_with_truncation, clip_xml_response, extract_xml_tag,
-        validate_operation_name, validate_report_result_name, validate_rest_write_body,
-        validate_soap_payload_xml,
+        AD_UNIT_HIERARCHY_FIELDS, AdManagerClient, CatalogCollection, MAX_SOAP_RESPONSE_XML_BYTES,
+        RestWriteOperation, RestWriteResource, SOAP_ENVELOPE_NAMESPACE, SoapTraffickingOperation,
+        ad_unit_hierarchy_list_query, classify_soap_impact, clip_message,
+        clip_message_with_truncation, clip_xml_response, extract_xml_tag, validate_operation_name,
+        validate_report_result_name, validate_rest_write_body, validate_soap_payload_xml,
     };
     use crate::Settings;
     use serde_json::json;
+
+    fn serve_one_http_response(response: Vec<u8>) -> (String, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind local test server");
+        let address = listener.local_addr().expect("local test address");
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept test request");
+            let mut request = [0_u8; 4096];
+            let _ = stream.read(&mut request).expect("read test request");
+            let _ = stream.write_all(&response);
+        });
+        (format!("http://{address}/bounded"), handle)
+    }
 
     #[test]
     fn collection_names_are_curated() {
@@ -1793,6 +1904,93 @@ mod tests {
             CatalogCollection::PrivateAuctionDeals.response_field(),
             "privateAuctionDeals"
         );
+    }
+
+    #[test]
+    fn hierarchy_catalog_query_is_fixed_minimal_and_token_preserving() {
+        let query = ad_unit_hierarchy_list_query(1_000, Some(" next-page ".to_string()));
+        assert_eq!(
+            query,
+            vec![
+                ("pageSize", "1000".to_string()),
+                ("orderBy", "name".to_string()),
+                ("fields", AD_UNIT_HIERARCHY_FIELDS.to_string()),
+                ("pageToken", "next-page".to_string()),
+            ]
+        );
+        assert_eq!(
+            AD_UNIT_HIERARCHY_FIELDS,
+            "adUnits.name,adUnits.parentAdUnit,adUnits.parentPath.parentAdUnit,adUnits.status,adUnits.hasChildren,adUnits.updateTime,nextPageToken"
+        );
+    }
+
+    #[tokio::test]
+    async fn bounded_json_reader_enforces_http_body_limit_before_decode() {
+        let client = AdManagerClient::from_settings(&Settings::default());
+
+        let body = br#"{"ok":true}"#;
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        )
+        .into_bytes()
+        .into_iter()
+        .chain(body.iter().copied())
+        .collect::<Vec<_>>();
+        let (url, server) = serve_one_http_response(response);
+        let (value, bytes) = client
+            .send_json_bounded(client.http.get(url), body.len())
+            .await
+            .expect("exact-boundary JSON response");
+        server.join().expect("valid response server");
+        assert_eq!(value, json!({"ok":true}));
+        assert_eq!(bytes, body.len());
+
+        let oversized = b"0123456789";
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            oversized.len()
+        )
+        .into_bytes()
+        .into_iter()
+        .chain(oversized.iter().copied())
+        .collect::<Vec<_>>();
+        let (url, server) = serve_one_http_response(response);
+        assert!(
+            client
+                .send_json_bounded(client.http.get(url), 5)
+                .await
+                .is_err()
+        );
+        server.join().expect("content-length response server");
+
+        let chunked = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\nA\r\n0123456789\r\n0\r\n\r\n".to_vec();
+        let (url, server) = serve_one_http_response(chunked);
+        assert!(
+            client
+                .send_json_bounded(client.http.get(url), 5)
+                .await
+                .is_err()
+        );
+        server.join().expect("chunked response server");
+
+        let invalid = b"not-json";
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            invalid.len()
+        )
+        .into_bytes()
+        .into_iter()
+        .chain(invalid.iter().copied())
+        .collect::<Vec<_>>();
+        let (url, server) = serve_one_http_response(response);
+        assert!(
+            client
+                .send_json_bounded(client.http.get(url), invalid.len())
+                .await
+                .is_err()
+        );
+        server.join().expect("invalid JSON response server");
     }
 
     #[test]
