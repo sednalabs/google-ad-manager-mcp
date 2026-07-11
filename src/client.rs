@@ -23,6 +23,7 @@ pub const DEFAULT_SOAP_API_VERSION: &str = "v202605";
 const MAX_SOAP_PAYLOAD_XML_BYTES: usize = 256 * 1024;
 const MAX_SOAP_RESPONSE_XML_BYTES: usize = 200 * 1024;
 const SOAP_ENVELOPE_NAMESPACE: &str = concat!("http", "://schemas.xmlsoap.org/soap/envelope/");
+const AD_UNIT_HIERARCHY_FIELDS: &str = "adUnits.name,adUnits.parentAdUnit,adUnits.parentPath.parentAdUnit,adUnits.status,adUnits.hasChildren,adUnits.updateTime,nextPageToken";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -728,13 +729,7 @@ impl AdManagerClient {
             Ok(value) => value,
             Err(err) => return (Err(err), false),
         };
-        let mut query = vec![
-            ("pageSize", page_size.to_string()),
-            ("orderBy", "name".to_string()),
-        ];
-        if let Some(page_token) = non_empty(page_token) {
-            query.push(("pageToken", page_token));
-        }
+        let query = ad_unit_hierarchy_list_query(page_size, page_token);
         let mut request = self.http.request(Method::GET, url).bearer_auth(token);
         if let Some(quota_project) = &self.quota_project {
             request = request.header("x-goog-user-project", quota_project.as_ref());
@@ -1343,6 +1338,21 @@ impl AdManagerClient {
     }
 }
 
+fn ad_unit_hierarchy_list_query(
+    page_size: u32,
+    page_token: Option<String>,
+) -> Vec<(&'static str, String)> {
+    let mut query = vec![
+        ("pageSize", page_size.to_string()),
+        ("orderBy", "name".to_string()),
+        ("fields", AD_UNIT_HIERARCHY_FIELDS.to_string()),
+    ];
+    if let Some(page_token) = non_empty(page_token) {
+        query.push(("pageToken", page_token));
+    }
+    query
+}
+
 fn select_auth_mode(settings: &Settings) -> Result<UpstreamAuthMode, AdManagerError> {
     if let Some(raw_json) = settings
         .service_account_json
@@ -1855,11 +1865,11 @@ fn clip_message_with_truncation(message: String) -> (String, bool) {
 #[cfg(test)]
 mod tests {
     use super::{
-        AdManagerClient, CatalogCollection, MAX_SOAP_RESPONSE_XML_BYTES, RestWriteOperation,
-        RestWriteResource, SOAP_ENVELOPE_NAMESPACE, SoapTraffickingOperation, classify_soap_impact,
-        clip_message, clip_message_with_truncation, clip_xml_response, extract_xml_tag,
-        validate_operation_name, validate_report_result_name, validate_rest_write_body,
-        validate_soap_payload_xml,
+        AD_UNIT_HIERARCHY_FIELDS, AdManagerClient, CatalogCollection, MAX_SOAP_RESPONSE_XML_BYTES,
+        RestWriteOperation, RestWriteResource, SOAP_ENVELOPE_NAMESPACE, SoapTraffickingOperation,
+        ad_unit_hierarchy_list_query, classify_soap_impact, clip_message,
+        clip_message_with_truncation, clip_xml_response, extract_xml_tag, validate_operation_name,
+        validate_report_result_name, validate_rest_write_body, validate_soap_payload_xml,
     };
     use crate::Settings;
     use serde_json::json;
@@ -1877,6 +1887,24 @@ mod tests {
         assert_eq!(
             CatalogCollection::PrivateAuctionDeals.response_field(),
             "privateAuctionDeals"
+        );
+    }
+
+    #[test]
+    fn hierarchy_catalog_query_is_fixed_minimal_and_token_preserving() {
+        let query = ad_unit_hierarchy_list_query(1_000, Some(" next-page ".to_string()));
+        assert_eq!(
+            query,
+            vec![
+                ("pageSize", "1000".to_string()),
+                ("orderBy", "name".to_string()),
+                ("fields", AD_UNIT_HIERARCHY_FIELDS.to_string()),
+                ("pageToken", "next-page".to_string()),
+            ]
+        );
+        assert_eq!(
+            AD_UNIT_HIERARCHY_FIELDS,
+            "adUnits.name,adUnits.parentAdUnit,adUnits.parentPath.parentAdUnit,adUnits.status,adUnits.hasChildren,adUnits.updateTime,nextPageToken"
         );
     }
 

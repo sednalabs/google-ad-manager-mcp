@@ -96,10 +96,23 @@ where
             ))
         })
         .collect::<BTreeMap<_, _>>();
+    let identity_parent_claims = identities
+        .iter()
+        .filter_map(|value| {
+            let ad_unit_id = value.get("ad_unit_id")?.as_str()?.to_string();
+            let parent_id = match value.get("current")?.get("parent_ad_unit_id")? {
+                Value::Null => None,
+                Value::String(parent_id) => Some(parent_id.clone()),
+                _ => return None,
+            };
+            Some((ad_unit_id, parent_id))
+        })
+        .collect::<BTreeMap<_, _>>();
     let (descendants, descendant_page_attempted_count) = scan_descendants_with_reader(
         &network_code,
         &target_ids,
         &identity_child_claims,
+        &identity_parent_claims,
         page_size,
         max_ad_units,
         read_ad_unit_page,

@@ -53,7 +53,7 @@ telemetry, or operator-approval proof.
 ## Hierarchy And Descendant Contract
 
 After exact identity reads, the adapter requests the complete ad-unit catalog
-with a fixed page size and `orderBy=name`. The public `ad_unit_page_size` input
+with a fixed minimal hierarchy field mask, page size, and `orderBy=name`. The public `ad_unit_page_size` input
 defaults to 1000 and is capped at 1000; `max_ad_units` defaults to 5000 and is
 capped at 10000. The scan also caps pages at 100, each upstream response at
 2 MiB before JSON decoding, and the aggregate response budget at 16 MiB.

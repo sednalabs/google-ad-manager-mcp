@@ -447,6 +447,69 @@ fn hierarchy_scan_requires_strict_order_and_bidirectional_child_flags() {
 }
 
 #[test]
+fn hierarchy_scan_requires_one_root_and_reconciles_target_parent_identity() {
+    let mut multiple_roots = DescendantScan::new(
+        "1234567",
+        &["200".to_string()],
+        &child_claims(&[("200", false)]),
+        100,
+    );
+    let page = json!({"adUnits":[
+        catalog_row("100", None, false, "ACTIVE"),
+        catalog_row("200", None, false, "ACTIVE")
+    ]});
+    multiple_roots.consume_page(&page, page.to_string().len());
+    let summary = multiple_roots.finish(100);
+    assert!(summary["issues"].as_array().is_some_and(|issues| {
+        issues
+            .iter()
+            .any(|issue| issue == "catalog_root_count_invalid")
+    }));
+
+    let expected_parents = BTreeMap::from([("200".to_string(), Some("100".to_string()))]);
+    let mut stripped_parent = DescendantScan::new(
+        "1234567",
+        &["200".to_string()],
+        &child_claims(&[("200", false)]),
+        100,
+    )
+    .with_expected_parent_ids(&expected_parents);
+    let page = json!({"adUnits":[catalog_row("200", None, false, "ACTIVE")]});
+    stripped_parent.consume_page(&page, page.to_string().len());
+    let summary = stripped_parent.finish(100);
+    assert!(summary["issues"].as_array().is_some_and(|issues| {
+        issues
+            .iter()
+            .any(|issue| issue == "identity_catalog_parent_mismatch")
+    }));
+    assert_eq!(summary["proof_state"], "partial_capped");
+}
+
+#[test]
+fn duplicate_rows_cannot_erase_an_observed_positive_blocker() {
+    let mut scan = DescendantScan::new(
+        "1234567",
+        &["200".to_string()],
+        &child_claims(&[("200", true)]),
+        100,
+    );
+    let page = json!({"adUnits":[
+        catalog_row("200", None, true, "ACTIVE"),
+        catalog_row("201", Some("200"), false, "INACTIVE"),
+        catalog_row("201", Some("200"), false, "ARCHIVED")
+    ]});
+    scan.consume_page(&page, page.to_string().len());
+    let summary = scan.finish(100);
+    assert_eq!(summary["proof_state"], "partial_blocked");
+    assert_eq!(summary["blocking_external_descendant_count"], 1);
+    assert!(
+        summary["issues"]
+            .as_array()
+            .is_some_and(|issues| issues.iter().any(|issue| issue == "duplicate_catalog_id"))
+    );
+}
+
+#[test]
 fn hierarchy_scan_validates_complete_root_to_parent_paths() {
     let mut scan = DescendantScan::new(
         "1234567",
@@ -506,7 +569,29 @@ fn known_external_descendant_remains_a_blocker_after_late_read_failure() {
     let summary = scan.finish(100);
     assert_eq!(summary["proof_state"], "partial_blocked");
     assert_eq!(summary["blocking_external_descendant_count"], 1);
+    assert_eq!(
+        summary["provider_request_state"],
+        "completed_then_attempted_incomplete"
+    );
     assert!(!summary.to_string().contains("private upstream detail"));
+
+    let mut pre_send_failure = DescendantScan::new(
+        "1234567",
+        &["200".to_string()],
+        &child_claims(&[("200", false)]),
+        100,
+    );
+    let page = json!({
+        "adUnits":[catalog_row("200", None, false, "ACTIVE")],
+        "nextPageToken":"page-2"
+    });
+    pre_send_failure.consume_page(&page, page.to_string().len());
+    pre_send_failure.record_failure(
+        AdManagerError::AuthBootstrap("private auth detail".to_string()),
+        false,
+    );
+    let summary = pre_send_failure.finish(100);
+    assert_eq!(summary["provider_request_state"], "completed_then_not_sent");
 }
 
 #[test]
@@ -540,6 +625,42 @@ fn archived_descendants_do_not_block_and_targets_are_ordered_child_first() {
     assert_eq!(
         summary["required_child_first_target_order"],
         json!(["201", "200"])
+    );
+}
+
+#[test]
+fn intra_target_relationship_sample_reports_truncation_and_full_count() {
+    let target_ids = (200..210).map(|id| id.to_string()).collect::<Vec<_>>();
+    let child_claims = (200..210)
+        .map(|id| (id.to_string(), id < 209))
+        .collect::<BTreeMap<_, _>>();
+    let rows = (200..210)
+        .map(|id| {
+            let ancestors = (200..id)
+                .map(|ancestor| {
+                    json!({"parentAdUnit":format!("networks/1234567/adUnits/{ancestor}")})
+                })
+                .collect::<Vec<_>>();
+            json!({
+                "name":format!("networks/1234567/adUnits/{id}"),
+                "parentAdUnit":(id > 200).then(|| format!("networks/1234567/adUnits/{}", id - 1)),
+                "parentPath":ancestors,
+                "hasChildren":id < 209,
+                "status":"ACTIVE",
+                "updateTime":"2026-07-10T00:00:00Z"
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut scan = DescendantScan::new("1234567", &target_ids, &child_claims, 100);
+    let page = json!({"adUnits":rows});
+    scan.consume_page(&page, page.to_string().len());
+    let summary = scan.finish(100);
+    assert_eq!(summary["proof_state"], "complete_clear");
+    assert_eq!(summary["intra_target_relationship_count"], 9);
+    assert_eq!(summary["intra_target_hierarchy_truncated"], true);
+    assert_eq!(
+        summary["intra_target_hierarchy"].as_array().map(Vec::len),
+        Some(DESCENDANT_SAMPLE_LIMIT)
     );
 }
 
@@ -593,6 +714,49 @@ async fn successful_preflight_reconciles_hierarchy_and_keeps_later_surfaces_not_
     assert_eq!(
         response["authorization"]["archive_or_deactivate_authorized"],
         false
+    );
+    assert!(response_bytes(&response) <= MAX_INNER_DATA_BYTES);
+}
+
+#[tokio::test]
+async fn maximal_descendant_sample_stays_inside_inner_response_cap() {
+    let response = assess_ad_unit_retirement_with_readers(
+        &args("1234567", &["200"]),
+        |_network_code, resource_name| async move {
+            (
+                Ok(json!({
+                    "name":resource_name,
+                    "adUnitCode":"fixture_root",
+                    "status":"ACTIVE",
+                    "adUnitSizes":[],
+                    "hasChildren":true,
+                    "updateTime":"2026-07-10T00:00:00Z"
+                })),
+                true,
+            )
+        },
+        |_network_code, _page_size, _page_token| async move {
+            let mut rows = vec![catalog_row("200", None, true, "ACTIVE")];
+            rows.extend(
+                (201..=209).map(|id| catalog_row(&id.to_string(), Some("200"), false, "ARCHIVED")),
+            );
+            let payload = json!({"adUnits":rows});
+            let bytes = payload.to_string().len();
+            (Ok((payload, bytes)), true)
+        },
+    )
+    .await
+    .expect("bounded maximal descendant sample");
+
+    assert_eq!(
+        response["descendants"]["external_descendant_sample"]
+            .as_array()
+            .map(Vec::len),
+        Some(DESCENDANT_SAMPLE_LIMIT)
+    );
+    assert_eq!(
+        response["descendants"]["external_descendant_sample_truncated"],
+        true
     );
     assert!(response_bytes(&response) <= MAX_INNER_DATA_BYTES);
 }

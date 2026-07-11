@@ -561,7 +561,7 @@ impl AdManagerServer {
                     "Call gam_network_catalog_list for ad_units, orders, line_items, placements, private_auctions, private_auction_deals, or reports.",
                     "Call gam_exchange_protection_probe when you need explicit partial-proof states for Exchange, private auction, private deal, or yield-group exposure.",
                     "Call gam_ad_unit_dependency_probe before ad-unit cleanup, archive, or retargeting work so placement and line-item dependencies are explicit.",
-                    "Call gam_ad_unit_retirement_assessment to bind one to ten exact canonical ad-unit ids to current REST identity. Descendants, evidence grading, and recommendations remain explicitly not_run in the current stage.",
+                    "Call gam_ad_unit_retirement_assessment to bind one to ten exact canonical ad-unit ids to current REST identity and a bounded ordered hierarchy/descendant scan. External evidence grading and recommendations remain explicitly not_run in the current stage.",
                     "Call gam_report_run for saved reports and gam_report_result_rows for large paginated results.",
                     "Call gam_trafficking_tool_matrix before planning writes so the REST and SOAP trafficking surfaces are explicit.",
                     "Use gam_rest_write_plan for dry-run write plans; gam_rest_write_apply only works when the server is explicitly started with GOOGLE_AD_MANAGER_MCP_WRITE_MODE=enabled and the manage scope.",
@@ -7812,20 +7812,32 @@ mod tests {
                         "status": "ACTIVE",
                         "adUnitSizes": [],
                         "hasChildren": false,
+                        "parentAdUnit":"networks/1234567/adUnits/100",
                         "updateTime": "2026-07-10T00:00:00Z"
                     })),
                     true,
                 )
             },
             |_network_code, _page_size, _page_token| async move {
-                let payload = json!({
-                    "adUnits": (200..210).map(|id| json!({
+                let mut rows = vec![json!({
+                    "name":"networks/1234567/adUnits/100",
+                    "status":"ACTIVE",
+                    "parentPath":[],
+                    "hasChildren":true,
+                    "updateTime":"2026-07-10T00:00:00Z"
+                })];
+                rows.extend((200..210).map(|id| {
+                    json!({
                         "name":format!("networks/1234567/adUnits/{id}"),
+                        "parentAdUnit":"networks/1234567/adUnits/100",
                         "status":"ACTIVE",
-                        "parentPath":[],
+                        "parentPath":[{"parentAdUnit":"networks/1234567/adUnits/100"}],
                         "hasChildren":false,
                         "updateTime":"2026-07-10T00:00:00Z"
-                    })).collect::<Vec<_>>()
+                    })
+                }));
+                let payload = json!({
+                    "adUnits": rows
                 });
                 let bytes = payload.to_string().len();
                 (Ok((payload, bytes)), true)

@@ -259,7 +259,7 @@ fingerprints are returned.
 
 The `evidence` and `recommendation` surfaces are intentionally returned as
 `not_run`. Identity and hierarchy proof alone are not retirement eligibility.
-The response always reports `mutation_performed=false`,
+Every successful assessment reports `mutation_performed=false`,
 `archive_or_deactivate_authorized=false`, and
 `safe_to_archive_or_retire=false`. Later stages will add evidence grading and
 operator-review decisioning without weakening these fail-closed defaults.

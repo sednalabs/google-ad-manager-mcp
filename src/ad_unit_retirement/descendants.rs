@@ -25,7 +25,9 @@ pub(super) struct DescendantScan {
     network_code: String,
     target_ids: BTreeSet<String>,
     expected_has_children: BTreeMap<String, bool>,
+    expected_parent_ids: BTreeMap<String, Option<String>>,
     rows_by_id: BTreeMap<String, CatalogRow>,
+    observed_blocking_descendants: BTreeMap<String, Value>,
     listed_target_ids: BTreeSet<String>,
     seen_page_tokens: BTreeSet<String>,
     last_resource_name: Option<String>,
@@ -48,7 +50,9 @@ impl DescendantScan {
             network_code: network_code.to_string(),
             target_ids: target_ids.iter().cloned().collect(),
             expected_has_children: expected_has_children.clone(),
+            expected_parent_ids: BTreeMap::new(),
             rows_by_id: BTreeMap::new(),
+            observed_blocking_descendants: BTreeMap::new(),
             listed_target_ids: BTreeSet::new(),
             seen_page_tokens: BTreeSet::new(),
             last_resource_name: None,
@@ -59,6 +63,14 @@ impl DescendantScan {
             issues: BTreeSet::new(),
             provider_request_state: "completed",
         }
+    }
+
+    pub(super) fn with_expected_parent_ids(
+        mut self,
+        expected_parent_ids: &BTreeMap<String, Option<String>>,
+    ) -> Self {
+        self.expected_parent_ids = expected_parent_ids.clone();
+        self
     }
 
     pub(super) fn consume_page(
@@ -129,7 +141,11 @@ impl DescendantScan {
     }
 
     pub(super) fn record_failure(&mut self, err: AdManagerError, request_attempted: bool) {
-        self.provider_request_state = if request_attempted {
+        self.provider_request_state = if self.page_count > 0 && request_attempted {
+            "completed_then_attempted_incomplete"
+        } else if self.page_count > 0 {
+            "completed_then_not_sent"
+        } else if request_attempted {
             "attempted_no_complete_response"
         } else {
             "not_sent"
@@ -218,6 +234,29 @@ impl DescendantScan {
         if self.target_ids.contains(&ad_unit_id) {
             self.listed_target_ids.insert(ad_unit_id.clone());
         }
+        let mut reported_target_ancestors = reported_ancestors
+            .iter()
+            .filter(|id| self.target_ids.contains(*id))
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        if let Some(parent_id) = &parent_id
+            && self.target_ids.contains(parent_id)
+        {
+            reported_target_ancestors.insert(parent_id.clone());
+        }
+        if !self.target_ids.contains(&ad_unit_id)
+            && status.as_deref() != Some("ARCHIVED")
+            && !reported_target_ancestors.is_empty()
+        {
+            self.observed_blocking_descendants.insert(
+                ad_unit_id.clone(),
+                json!({
+                    "ad_unit_id": ad_unit_id,
+                    "status": status.as_deref().unwrap_or("UNKNOWN"),
+                    "matched_target_ad_unit_ids": reported_target_ancestors,
+                }),
+            );
+        }
         let fingerprint = json!({
             "id": ad_unit_id,
             "status": status,
@@ -233,8 +272,10 @@ impl DescendantScan {
             has_children,
             fingerprint,
         };
-        if self.rows_by_id.insert(ad_unit_id, catalog_row).is_some() {
+        if self.rows_by_id.contains_key(&ad_unit_id) {
             self.issues.insert("duplicate_catalog_id");
+        } else {
+            self.rows_by_id.insert(ad_unit_id, catalog_row);
         }
     }
 
@@ -248,6 +289,15 @@ impl DescendantScan {
             .values()
             .filter_map(|row| row.parent_id.clone())
             .collect::<BTreeSet<_>>();
+        if self
+            .rows_by_id
+            .values()
+            .filter(|row| row.parent_id.is_none())
+            .count()
+            != 1
+        {
+            self.issues.insert("catalog_root_count_invalid");
+        }
         for (id, row) in &self.rows_by_id {
             let actual_has_children = actual_parent_ids.contains(id);
             if row.has_children != Some(actual_has_children) {
@@ -258,6 +308,14 @@ impl DescendantScan {
             {
                 self.issues.insert("identity_catalog_child_flag_mismatch");
             }
+            if self.target_ids.contains(id)
+                && self
+                    .expected_parent_ids
+                    .get(id)
+                    .is_some_and(|expected| expected != &row.parent_id)
+            {
+                self.issues.insert("identity_catalog_parent_mismatch");
+            }
             match resolve_catalog_ancestors(id, &self.rows_by_id) {
                 Some(resolved) if resolved == row.reported_ancestors => {}
                 _ => {
@@ -266,9 +324,7 @@ impl DescendantScan {
             }
         }
 
-        let mut external_descendants = Vec::new();
-        let mut external_sample = Vec::new();
-        let mut status_counts = BTreeMap::<String, u64>::new();
+        let mut external_descendants = BTreeMap::<String, Value>::new();
         let mut intra_target_hierarchy = Vec::new();
         let mut target_depths = BTreeMap::<String, usize>::new();
         for (id, row) in &self.rows_by_id {
@@ -292,17 +348,36 @@ impl DescendantScan {
                 continue;
             }
             let status = row.status.as_deref().unwrap_or("UNKNOWN").to_string();
-            *status_counts.entry(status.clone()).or_default() += 1;
             let summary = json!({
                 "ad_unit_id": id,
                 "status": status,
                 "matched_target_ad_unit_ids": matched_targets,
             });
-            if external_sample.len() < DESCENDANT_SAMPLE_LIMIT {
-                external_sample.push(summary.clone());
-            }
-            external_descendants.push(summary);
+            external_descendants.insert(id.clone(), summary);
         }
+        for (id, observed) in self.observed_blocking_descendants {
+            if external_descendants
+                .get(&id)
+                .is_none_or(|row| row.get("status").and_then(Value::as_str) == Some("ARCHIVED"))
+            {
+                external_descendants.insert(id, observed);
+            }
+        }
+        let external_descendants = external_descendants.into_values().collect::<Vec<_>>();
+        let mut status_counts = BTreeMap::<String, u64>::new();
+        for row in &external_descendants {
+            let status = row
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("UNKNOWN")
+                .to_string();
+            *status_counts.entry(status).or_default() += 1;
+        }
+        let external_sample = external_descendants
+            .iter()
+            .take(DESCENDANT_SAMPLE_LIMIT)
+            .cloned()
+            .collect::<Vec<_>>();
         let blocking_count = external_descendants
             .iter()
             .filter(|row| row.get("status").and_then(Value::as_str) != Some("ARCHIVED"))
@@ -368,6 +443,8 @@ impl DescendantScan {
             "external_descendant_sample": external_sample,
             "external_descendant_sample_truncated": external_descendants.len() > DESCENDANT_SAMPLE_LIMIT,
             "intra_target_hierarchy": intra_target_hierarchy,
+            "intra_target_relationship_count": target_depths.len(),
+            "intra_target_hierarchy_truncated": target_depths.len() > DESCENDANT_SAMPLE_LIMIT,
             "requires_child_first_sequence": !target_depths.is_empty(),
             "required_child_first_target_order": child_first_order,
             "catalog_fingerprint": stable_fingerprint(&Value::Array(fingerprint_rows).to_string()),
@@ -381,6 +458,7 @@ pub(super) async fn scan_descendants_with_reader<F, Fut>(
     network_code: &str,
     target_ids: &[String],
     identity_child_claims: &BTreeMap<String, bool>,
+    identity_parent_claims: &BTreeMap<String, Option<String>>,
     page_size: u32,
     max_rows: u32,
     mut read_page: F,
@@ -389,7 +467,8 @@ where
     F: FnMut(String, u32, Option<String>) -> Fut,
     Fut: Future<Output = (Result<(Value, usize), AdManagerError>, bool)>,
 {
-    let mut scan = DescendantScan::new(network_code, target_ids, identity_child_claims, max_rows);
+    let mut scan = DescendantScan::new(network_code, target_ids, identity_child_claims, max_rows)
+        .with_expected_parent_ids(identity_parent_claims);
     let mut page_token = None;
     let mut request_attempted_count = 0usize;
     loop {
