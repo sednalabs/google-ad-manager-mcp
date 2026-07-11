@@ -280,6 +280,8 @@ closed. A protection receipt cannot become clear without
 UI-only. The output exposes bounded grading states and binding fingerprints,
 not raw receipt notes or provider payloads. Receipt provenance is always
 `caller_supplied_unverified`.
+Absent sources use the compact `{state: "not_run"}` form; full binding and
+freshness diagnostics are returned only for supplied receipts.
 
 Receipts from the built-in dependency and exchange/protection probes must match
 the complete `gam-evidence-producer-v3` contract: a 16-character lowercase

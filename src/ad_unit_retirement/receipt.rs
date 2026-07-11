@@ -149,11 +149,7 @@ pub(super) fn grade_evidence(
 ) -> Result<Value, AdManagerError> {
     let Some(receipt) = receipt else {
         return Ok(json!({
-            "surface": surface,
             "state": "not_run",
-            "binding_valid": false,
-            "complete_for_summary": false,
-            "reason": "no evidence receipt was supplied",
         }));
     };
     if matches!(receipt.state, EvidenceState::NotRun) {

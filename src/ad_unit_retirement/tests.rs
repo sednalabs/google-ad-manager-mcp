@@ -445,7 +445,7 @@ fn evidence_bundle_rejects_duplicate_sources_and_reports_missing_surfaces() {
         "telemetry",
     ] {
         assert_eq!(empty[surface]["state"], "not_run");
-        assert_eq!(empty[surface]["complete_for_summary"], false);
+        assert!(empty[surface].get("complete_for_summary").is_none());
     }
 }
 
