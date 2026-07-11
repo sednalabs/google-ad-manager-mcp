@@ -279,7 +279,7 @@ impl DescendantScan {
         }
     }
 
-    pub(super) fn finish(mut self, page_size: u32) -> Value {
+    pub(super) fn finish(mut self, _page_size: u32) -> Value {
         if self.listed_target_ids != self.target_ids {
             self.issues.insert("target_catalog_row_missing");
         }
@@ -425,32 +425,56 @@ impl DescendantScan {
             .values()
             .map(|row| row.fingerprint.clone())
             .collect::<Vec<_>>();
-        json!({
+        let mut result = json!({
             "proof_state": proof_state,
             "scan_complete": transport_complete,
             "hierarchy_reconciled": hierarchy_reconciled,
-            "issues": self.issues,
             "page_count": self.page_count,
             "rows_scanned": self.rows_scanned,
             "response_bytes_scanned": self.response_bytes_scanned,
-            "page_size": page_size,
-            "max_pages": MAX_DESCENDANT_SCAN_PAGES,
-            "max_ad_units": self.max_rows,
-            "max_scan_response_bytes": MAX_DESCENDANT_SCAN_BYTES,
             "external_descendant_count": external_descendants.len(),
             "blocking_external_descendant_count": blocking_count,
-            "external_descendant_status_counts": status_counts,
-            "external_descendant_sample": external_sample,
-            "external_descendant_sample_truncated": external_descendants.len() > DESCENDANT_SAMPLE_LIMIT,
-            "intra_target_hierarchy": intra_target_hierarchy,
-            "intra_target_relationship_count": target_depths.len(),
-            "intra_target_hierarchy_truncated": target_depths.len() > DESCENDANT_SAMPLE_LIMIT,
             "requires_child_first_sequence": !target_depths.is_empty(),
             "required_child_first_target_order": child_first_order,
             "catalog_fingerprint": stable_fingerprint(&Value::Array(fingerprint_rows).to_string()),
             "descendant_result_fingerprint": stable_fingerprint(&Value::Array(external_descendants).to_string()),
             "provider_request_state": self.provider_request_state,
-        })
+        });
+        let object = result
+            .as_object_mut()
+            .expect("descendant result is constructed as an object");
+        if !self.issues.is_empty() {
+            object.insert("issues".to_string(), json!(self.issues));
+        }
+        if !external_sample.is_empty() {
+            object.insert(
+                "external_descendant_status_counts".to_string(),
+                json!(status_counts),
+            );
+            object.insert(
+                "external_descendant_sample".to_string(),
+                Value::Array(external_sample),
+            );
+            object.insert(
+                "external_descendant_sample_truncated".to_string(),
+                json!(external_descendants.len() > DESCENDANT_SAMPLE_LIMIT),
+            );
+        }
+        if !intra_target_hierarchy.is_empty() {
+            object.insert(
+                "intra_target_hierarchy".to_string(),
+                Value::Array(intra_target_hierarchy),
+            );
+            object.insert(
+                "intra_target_relationship_count".to_string(),
+                json!(target_depths.len()),
+            );
+            object.insert(
+                "intra_target_hierarchy_truncated".to_string(),
+                json!(target_depths.len() > DESCENDANT_SAMPLE_LIMIT),
+            );
+        }
+        result
     }
 }
 
