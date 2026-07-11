@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 
 use crate::{AdManagerError, fingerprint::stable_fingerprint};
 
-use descendants::{scan_descendants_with_reader, scoped_numeric_id};
+use descendants::{DescendantScanInput, scan_descendants_with_reader, scoped_numeric_id};
 use inventory::{blocked_identity, summarize_identities, summarize_identity, validate_targets};
 
 pub(crate) use descendants::MAX_DESCENDANT_PAGE_BYTES;
@@ -133,12 +133,14 @@ where
         .collect::<BTreeMap<_, _>>();
     let (descendants, descendant_page_attempted_count) = scan_descendants_with_reader(
         &network_code,
-        &target_ids,
-        &identity_child_claims,
-        &identity_parent_claims,
-        root_identity,
+        DescendantScanInput {
+            target_ids: &target_ids,
+            identity_child_claims: &identity_child_claims,
+            identity_parent_claims: &identity_parent_claims,
+            root_identity,
+            max_rows: max_ad_units,
+        },
         page_size,
-        max_ad_units,
         read_ad_unit_page,
     )
     .await;

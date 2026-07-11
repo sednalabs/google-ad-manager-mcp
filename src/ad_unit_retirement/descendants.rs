@@ -47,6 +47,14 @@ pub(super) struct DescendantScan {
     provider_request_state: &'static str,
 }
 
+pub(super) struct DescendantScanInput<'a> {
+    pub target_ids: &'a [String],
+    pub identity_child_claims: &'a BTreeMap<String, bool>,
+    pub identity_parent_claims: &'a BTreeMap<String, Option<String>>,
+    pub root_identity: Option<(&'a str, &'a str)>,
+    pub max_rows: u32,
+}
+
 impl DescendantScan {
     pub(super) fn new(
         network_code: &str,
@@ -554,21 +562,22 @@ impl DescendantScan {
 
 pub(super) async fn scan_descendants_with_reader<F, Fut>(
     network_code: &str,
-    target_ids: &[String],
-    identity_child_claims: &BTreeMap<String, bool>,
-    identity_parent_claims: &BTreeMap<String, Option<String>>,
-    root_identity: Option<(&str, &str)>,
+    input: DescendantScanInput<'_>,
     page_size: u32,
-    max_rows: u32,
     mut read_page: F,
 ) -> (Value, usize)
 where
     F: FnMut(String, u32, Option<String>) -> Fut,
     Fut: Future<Output = (Result<(Value, usize), AdManagerError>, bool)>,
 {
-    let mut scan = DescendantScan::new(network_code, target_ids, identity_child_claims, max_rows)
-        .with_expected_parent_ids(identity_parent_claims)
-        .require_root_identity(root_identity);
+    let mut scan = DescendantScan::new(
+        network_code,
+        input.target_ids,
+        input.identity_child_claims,
+        input.max_rows,
+    )
+    .with_expected_parent_ids(input.identity_parent_claims)
+    .require_root_identity(input.root_identity);
     let mut page_token = None;
     let mut request_attempted_count = 0usize;
     loop {
