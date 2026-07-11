@@ -2513,7 +2513,8 @@ where
         .get("descendants")
         .and_then(|value| value.get("provider_request_state"))
         .and_then(Value::as_str)
-        .unwrap_or("unknown");
+        .unwrap_or("unknown")
+        .to_string();
     let result = contract::success_with_meta(
         response,
         json!({
