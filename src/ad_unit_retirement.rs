@@ -124,11 +124,25 @@ where
         target_ids,
         identity,
         descendants,
-        request_attempted_count,
-        descendant_page_attempted_count,
-        page_size,
-        max_ad_units,
+        ProviderRequestSummary {
+            identity_attempted_count: request_attempted_count,
+            descendant_page_attempted_count,
+        },
+        HierarchyScanConfig {
+            page_size,
+            max_ad_units,
+        },
     )
+}
+
+struct ProviderRequestSummary {
+    identity_attempted_count: usize,
+    descendant_page_attempted_count: usize,
+}
+
+struct HierarchyScanConfig {
+    page_size: u32,
+    max_ad_units: u32,
 }
 
 fn build_preflight_response(
@@ -136,16 +150,14 @@ fn build_preflight_response(
     target_ids: Vec<String>,
     identity: Value,
     descendants: Value,
-    identity_request_attempted_count: usize,
-    descendant_page_attempted_count: usize,
-    page_size: u32,
-    max_ad_units: u32,
+    provider_requests: ProviderRequestSummary,
+    scan_config: HierarchyScanConfig,
 ) -> Result<Value, AdManagerError> {
     let target_count = target_ids.len();
     let assessment_fingerprint =
         stable_fingerprint(&json!({"identity":&identity,"descendants":&descendants}).to_string());
-    let total_request_attempted_count =
-        identity_request_attempted_count + descendant_page_attempted_count;
+    let total_request_attempted_count = provider_requests.identity_attempted_count
+        + provider_requests.descendant_page_attempted_count;
     let response = json!({
         "network_code": network_code,
         "target_ad_unit_ids": target_ids,
@@ -164,9 +176,9 @@ fn build_preflight_response(
         "provider_requests": {
             "target_count": target_count,
             "attempted_count": total_request_attempted_count,
-            "identity_attempted_count": identity_request_attempted_count,
-            "identity_not_sent_count": target_count.saturating_sub(identity_request_attempted_count),
-            "descendant_page_attempted_count": descendant_page_attempted_count,
+            "identity_attempted_count": provider_requests.identity_attempted_count,
+            "identity_not_sent_count": target_count.saturating_sub(provider_requests.identity_attempted_count),
+            "descendant_page_attempted_count": provider_requests.descendant_page_attempted_count,
         },
         "mutation_performed": false,
         "authorization": {
@@ -178,8 +190,8 @@ fn build_preflight_response(
             "compact": true,
             "max_targets": MAX_RETIREMENT_TARGETS,
             "max_inner_data_bytes": MAX_INNER_DATA_BYTES,
-            "ad_unit_page_size": page_size,
-            "max_ad_units": max_ad_units,
+            "ad_unit_page_size": scan_config.page_size,
+            "max_ad_units": scan_config.max_ad_units,
             "max_descendant_page_bytes": MAX_DESCENDANT_PAGE_BYTES,
         }
     });

@@ -272,10 +272,13 @@ impl DescendantScan {
             has_children,
             fingerprint,
         };
-        if self.rows_by_id.contains_key(&ad_unit_id) {
-            self.issues.insert("duplicate_catalog_id");
-        } else {
-            self.rows_by_id.insert(ad_unit_id, catalog_row);
+        match self.rows_by_id.entry(ad_unit_id) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(catalog_row);
+            }
+            std::collections::btree_map::Entry::Occupied(_) => {
+                self.issues.insert("duplicate_catalog_id");
+            }
         }
     }
 

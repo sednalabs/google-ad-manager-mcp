@@ -772,10 +772,14 @@ fn response_size_guard_fails_closed() {
             vec!["200".to_string()],
             oversized_identity,
             json!({"proof_state":"complete_clear"}),
-            1,
-            1,
-            100,
-            100,
+            ProviderRequestSummary {
+                identity_attempted_count: 1,
+                descendant_page_attempted_count: 1,
+            },
+            HierarchyScanConfig {
+                page_size: 100,
+                max_ad_units: 100,
+            },
         )
         .is_err()
     );
