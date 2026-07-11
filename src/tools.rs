@@ -7783,6 +7783,7 @@ mod tests {
             AdUnitRetirementAssessmentArgs {
                 network_code: "1234567".to_string(),
                 ad_unit_ids: vec!["200".to_string()],
+                evidence: Vec::new(),
                 ad_unit_page_size: Some(100),
                 max_ad_units: Some(100),
             },
@@ -7849,7 +7850,10 @@ mod tests {
             response["data"]["descendants"]["proof_state"],
             "complete_clear"
         );
-        assert_eq!(response["data"]["evidence"]["proof_state"], "not_run");
+        assert_eq!(
+            response["data"]["evidence"]["dependency"]["state"],
+            "not_run"
+        );
         assert_eq!(response["data"]["recommendation"]["decision"], "not_run");
         assert_eq!(response["meta"]["mutation_performed"], false);
         assert_eq!(response["meta"]["upstream_called"], true);
@@ -7868,6 +7872,7 @@ mod tests {
             AdUnitRetirementAssessmentArgs {
                 network_code: "1234567".to_string(),
                 ad_unit_ids: (200..210).map(|id| id.to_string()).collect(),
+                evidence: Vec::new(),
                 ad_unit_page_size: Some(100),
                 max_ad_units: Some(100),
             },
@@ -7952,6 +7957,7 @@ mod tests {
             AdUnitRetirementAssessmentArgs {
                 network_code: "1234567".to_string(),
                 ad_unit_ids: vec!["200".to_string()],
+                evidence: Vec::new(),
                 ad_unit_page_size: Some(100),
                 max_ad_units: Some(100),
             },
@@ -7998,6 +8004,7 @@ mod tests {
             AdUnitRetirementAssessmentArgs {
                 network_code: "1234567".to_string(),
                 ad_unit_ids: vec!["200".to_string()],
+                evidence: Vec::new(),
                 ad_unit_page_size: Some(100),
                 max_ad_units: Some(100),
             },
