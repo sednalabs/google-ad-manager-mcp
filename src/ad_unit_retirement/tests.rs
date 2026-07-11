@@ -449,6 +449,24 @@ fn hierarchy_scan_requires_strict_order_and_bidirectional_child_flags() {
 }
 
 #[test]
+fn hierarchy_scan_orders_resource_names_by_numeric_ad_unit_id() {
+    let mut scan = DescendantScan::new(
+        "1234567",
+        &["10".to_string()],
+        &child_claims(&[("10", false)]),
+        100,
+    );
+    let page = json!({"adUnits":[
+        catalog_row("9", None, true, "ACTIVE"),
+        catalog_row("10", Some("9"), false, "ACTIVE")
+    ]});
+    scan.consume_page(&page, page.to_string().len());
+    let summary = scan.finish(100);
+    assert_eq!(summary["proof_state"], "complete_clear");
+    assert!(summary.get("issues").is_none());
+}
+
+#[test]
 fn hierarchy_scan_requires_one_root_and_reconciles_target_parent_identity() {
     let mut multiple_roots = DescendantScan::new(
         "1234567",
@@ -515,6 +533,74 @@ fn root_catalog_rows_may_omit_or_null_parent_path() {
 }
 
 #[test]
+fn live_shaped_catalog_may_omit_the_google_created_root_from_parent_path() {
+    let mut network_root = catalog_row("15422", None, true, "ACTIVE");
+    network_root
+        .as_object_mut()
+        .expect("catalog row object")
+        .remove("parentPath");
+    let mut publisher_root = catalog_row("303152", Some("15422"), true, "ACTIVE");
+    publisher_root
+        .as_object_mut()
+        .expect("catalog row object")
+        .remove("parentPath");
+    let target = json!({
+        "name":"networks/1234567/adUnits/182784272",
+        "parentAdUnit":"networks/1234567/adUnits/303152",
+        "parentPath":[{"parentAdUnit":"networks/1234567/adUnits/303152"}],
+        "hasChildren":false,
+        "status":"ACTIVE",
+        "updateTime":"2026-02-10T04:54:39.470Z"
+    });
+    let expected_parents = BTreeMap::from([("182784272".to_string(), Some("303152".to_string()))]);
+    let mut scan = DescendantScan::new(
+        "1234567",
+        &["182784272".to_string()],
+        &child_claims(&[("182784272", false)]),
+        100,
+    )
+    .with_expected_parent_ids(&expected_parents);
+    let page = json!({"adUnits":[network_root,publisher_root,target]});
+    scan.consume_page(&page, page.to_string().len());
+    let summary = scan.finish(100);
+    assert_eq!(summary["proof_state"], "complete_clear");
+    assert!(summary.get("issues").is_none());
+}
+
+#[test]
+fn omitted_parent_path_below_the_root_still_fails_closed() {
+    let mut direct_root_child = catalog_row("200", Some("100"), true, "ACTIVE");
+    direct_root_child
+        .as_object_mut()
+        .expect("catalog row object")
+        .remove("parentPath");
+    let mut grandchild = catalog_row("300", Some("200"), false, "ACTIVE");
+    grandchild
+        .as_object_mut()
+        .expect("catalog row object")
+        .remove("parentPath");
+    let mut scan = DescendantScan::new(
+        "1234567",
+        &["300".to_string()],
+        &child_claims(&[("300", false)]),
+        100,
+    );
+    let page = json!({"adUnits":[
+        catalog_row("100", None, true, "ACTIVE"),
+        direct_root_child,
+        grandchild
+    ]});
+    scan.consume_page(&page, page.to_string().len());
+    let summary = scan.finish(100);
+    assert_eq!(summary["proof_state"], "partial_capped");
+    assert!(summary["issues"].as_array().is_some_and(|issues| {
+        issues
+            .iter()
+            .any(|issue| issue == "catalog_ancestry_mismatch")
+    }));
+}
+
+#[test]
 fn unavailable_identity_child_flag_does_not_create_a_false_mismatch() {
     let mut scan = DescendantScan::new("1234567", &["200".to_string()], &BTreeMap::new(), 100);
     let page = json!({"adUnits":[catalog_row("200", None, false, "ACTIVE")]});
@@ -559,7 +645,7 @@ fn hierarchy_scan_validates_complete_root_to_parent_paths() {
     let malformed_grandchild = json!({
         "name":"networks/1234567/adUnits/300",
         "parentAdUnit":"networks/1234567/adUnits/201",
-        "parentPath":[{"parentAdUnit":"networks/1234567/adUnits/201"}],
+        "parentPath":[],
         "hasChildren":false,
         "status":"ACTIVE",
         "updateTime":"2026-07-10T00:00:00Z"
@@ -608,6 +694,7 @@ fn known_external_descendant_remains_a_blocker_after_late_read_failure() {
     let summary = scan.finish(100);
     assert_eq!(summary["proof_state"], "partial_blocked");
     assert_eq!(summary["blocking_external_descendant_count"], 1);
+    assert_eq!(summary["external_descendant_status_counts"]["INACTIVE"], 1);
     assert_eq!(
         summary["provider_request_state"],
         "completed_then_attempted_incomplete"

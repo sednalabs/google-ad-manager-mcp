@@ -30,7 +30,7 @@ pub(super) struct DescendantScan {
     observed_blocking_descendants: BTreeMap<String, Value>,
     listed_target_ids: BTreeSet<String>,
     seen_page_tokens: BTreeSet<String>,
-    last_resource_name: Option<String>,
+    last_ad_unit_numeric_id: Option<i64>,
     max_rows: u32,
     page_count: u32,
     rows_scanned: u64,
@@ -55,7 +55,7 @@ impl DescendantScan {
             observed_blocking_descendants: BTreeMap::new(),
             listed_target_ids: BTreeSet::new(),
             seen_page_tokens: BTreeSet::new(),
-            last_resource_name: None,
+            last_ad_unit_numeric_id: None,
             max_rows,
             page_count: 0,
             rows_scanned: 0,
@@ -180,14 +180,16 @@ impl DescendantScan {
                 .insert("catalog_resource_invalid_or_cross_network");
             return;
         };
+        let numeric_id = ad_unit_id
+            .parse::<i64>()
+            .expect("scoped_numeric_id returns a canonical signed 64-bit id");
         if self
-            .last_resource_name
-            .as_deref()
-            .is_some_and(|previous| previous >= name)
+            .last_ad_unit_numeric_id
+            .is_some_and(|previous| previous >= numeric_id)
         {
             self.issues.insert("catalog_order_invalid");
         }
-        self.last_resource_name = Some(name.to_string());
+        self.last_ad_unit_numeric_id = Some(numeric_id);
 
         let parent_id = match row.get("parentAdUnit") {
             None | Some(Value::Null) => None,
@@ -323,7 +325,11 @@ impl DescendantScan {
                 self.issues.insert("identity_catalog_parent_mismatch");
             }
             match resolve_catalog_ancestors(id, &self.rows_by_id) {
-                Some(resolved) if resolved == row.reported_ancestors => {}
+                Some(resolved)
+                    if resolved == row.reported_ancestors
+                        || resolved.get(1..).is_some_and(|without_root| {
+                            without_root == row.reported_ancestors.as_slice()
+                        }) => {}
                 _ => {
                     self.issues.insert("catalog_ancestry_mismatch");
                 }
@@ -531,9 +537,8 @@ fn ancestor_ids(
     direct_parent_id: Option<&str>,
 ) -> Result<Vec<String>, ()> {
     let entries = match parent_path {
-        None | Some(Value::Null) if direct_parent_id.is_none() => return Ok(Vec::new()),
+        None | Some(Value::Null) => return Ok(Vec::new()),
         Some(value) => value.as_array().ok_or(())?,
-        None => return Err(()),
     };
     let mut ids = Vec::with_capacity(entries.len());
     let mut seen = BTreeSet::new();
@@ -549,7 +554,7 @@ fn ancestor_ids(
         }
         ids.push(id);
     }
-    if ids.last().map(String::as_str) != direct_parent_id {
+    if !ids.is_empty() && ids.last().map(String::as_str) != direct_parent_id {
         return Err(());
     }
     Ok(ids)
