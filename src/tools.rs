@@ -3656,7 +3656,7 @@ impl LineItemDependencyScanState {
             || self.missing_total_result_set_size
             || self
                 .total_result_set_size
-                .map(|total| total > u64::from(self.inspected_results))
+                .map(|total| total != u64::from(self.inspected_results))
                 .unwrap_or(self.inspected_results >= options.max_line_items);
         let proof_state = if capped { "sample_only" } else { "complete" };
         let decision = if self.dependency_match_count > 0 {
@@ -4151,7 +4151,7 @@ fn dependency_proof_flags(
                 .get("inspected_results")
                 .and_then(Value::as_u64),
         )
-        .is_some_and(|(total, inspected)| total > inspected);
+        .is_some_and(|(total, inspected)| total != inspected);
     let line_items_capped_or_truncated = line_item_state == "sample_only"
         || line_item_summary
             .get("response_truncated")
@@ -8053,9 +8053,11 @@ mod tests {
             "target_placement_match_count":0,
             "target_placement_ids_by_ad_unit_id":{"200":[]}
         });
-        let page = r#"
+        for total in [0, 2] {
+            let page = format!(
+                r#"
         <rval>
-          <totalResultSetSize>2</totalResultSetSize>
+          <totalResultSetSize>{total}</totalResultSetSize>
           <results>
             <id>1</id>
             <status>PAUSED</status>
@@ -8065,30 +8067,39 @@ mod tests {
             </inventoryTargeting></targeting>
           </results>
         </rval>
-        "#;
-        let mut state = LineItemDependencyScanState::default();
-        assert_eq!(
-            state.record_successful_page(
-                SuccessfulLineItemPage {
-                    upstream_response_xml: page,
-                    response_truncated: false,
-                    request_id: Some("request-1".to_string()),
-                    response_time: Some("42".to_string()),
-                },
+        "#
+            );
+            let mut state = LineItemDependencyScanState::default();
+            assert_eq!(
+                state.record_successful_page(
+                    SuccessfulLineItemPage {
+                        upstream_response_xml: &page,
+                        response_truncated: false,
+                        request_id: Some("request-1".to_string()),
+                        response_time: Some("42".to_string()),
+                    },
+                    std::slice::from_ref(&target),
+                    &placement_summary,
+                    false,
+                ),
+                1
+            );
+
+            let completed = state.into_completed_response(&options);
+            assert_eq!(completed["decision"], "no_dependencies_in_sample");
+            assert_eq!(completed["proof_state"], "sample_only");
+            assert_eq!(completed["total_result_set_size"], total);
+            assert_eq!(completed["inspected_results"], 1);
+            assert_eq!(completed["dependency_match_count"], 0);
+            assert_eq!(completed["status_counts"]["PAUSED"], 1);
+            let flags = dependency_proof_flags(
                 std::slice::from_ref(&target),
                 &placement_summary,
+                &completed,
                 false,
-            ),
-            1
-        );
-
-        let completed = state.into_completed_response(&options);
-        assert_eq!(completed["decision"], "no_dependencies_in_sample");
-        assert_eq!(completed["proof_state"], "sample_only");
-        assert_eq!(completed["total_result_set_size"], 2);
-        assert_eq!(completed["inspected_results"], 1);
-        assert_eq!(completed["dependency_match_count"], 0);
-        assert_eq!(completed["status_counts"]["PAUSED"], 1);
+            );
+            assert_eq!(flags["line_items_capped_or_truncated"], true);
+        }
     }
 
     #[test]

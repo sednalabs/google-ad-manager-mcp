@@ -950,12 +950,12 @@ fn validate_line_item_outcome(source: &Map<String, Value>) -> Result<(), String>
     if total.is_none() && !missing_total {
         return Err("completed line-item proof had impossible missing-total state".into());
     }
-    if total.is_some_and(|total| inspected > total) || matches > inspected {
+    if matches > inspected {
         return Err("completed line-item proof had impossible scan progress".into());
     }
 
     let capped =
-        response_truncated || missing_total || total.is_some_and(|total| total > inspected);
+        response_truncated || missing_total || total.is_some_and(|total| total != inspected);
     let expected_state = if capped { "sample_only" } else { "complete" };
     let expected_decision = if matches > 0 {
         "dependencies_found"
