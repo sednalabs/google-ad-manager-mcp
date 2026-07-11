@@ -3087,11 +3087,7 @@ fn apply_yield_group_decision(
         }
         _ => {}
     }
-    if !summary
-        .get("proof_state")
-        .and_then(Value::as_str)
-        .is_some_and(|state| state == "complete")
-    {
+    if summary.get("proof_state").and_then(Value::as_str) != Some("complete") {
         partial_reasons.push("yield group proof is unavailable or incomplete".to_string());
     }
 }
@@ -3320,9 +3316,7 @@ fn summarize_yield_groups(
         }));
     }
     let sample_only = response_truncated
-        || total_result_set_size
-            .map(|total| total != results.len() as u64)
-            .unwrap_or(true);
+        || total_result_set_size.is_none_or(|total| total != results.len() as u64);
     let decision = if !targeted_exposed.is_empty() {
         "targeted_exposed"
     } else if !targeted_and_excluded.is_empty() {

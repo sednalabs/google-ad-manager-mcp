@@ -766,8 +766,7 @@ fn exchange_yield(
         if total.is_some_and(|total| inspected > total) {
             return Err("yield inspected results exceeded the reported total".into());
         }
-        let sample_only =
-            response_truncated || total.is_none() || total.is_some_and(|total| total > inspected);
+        let sample_only = response_truncated || total.is_none_or(|total| total > inspected);
         let expected_proof_state = if sample_only {
             "sample_only"
         } else {
