@@ -12,7 +12,7 @@ later proof surface explicit rather than implying it ran.
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | Resolve exact targets | `gam_ad_unit_retirement_assessment` | read | canonical network and 1-10 canonical exact ad-unit ids | REST `adUnits.get` | compact current identity, exact resource match, stable fingerprints | zero, whitespace, leading zeroes, duplicates, overflow, missing target, identity mismatch, permission or upstream failure | implemented |
 | Reconcile descendants | same | read | bounded hierarchy scan | paginated REST `adUnits.list` | target/list reconciliation, catalog-proven root-to-parent validation, bidirectional child flags, descendant state, and child-first order | byte/row/page cap, pagination or numeric-id order drift, malformed rows, sparse or cross-network ancestry | implemented |
-| Grade evidence | same | read decisioning | freshness-bound receipts | existing proof tools, reports, site contract, telemetry | source/network/target/version/hash/time binding | stale, capped, blocked, unsupported, duplicate, or mismatched receipts | planned Stage 4; returns `not_run` now |
+| Grade evidence | same | read decisioning | freshness-bound receipts | existing proof tools, reports, site contract, telemetry | source/network/target/version/hash/time binding | stale, capped, blocked, unsupported, duplicate, or mismatched receipts | implemented |
 | Return recommendation | same | read decisioning | complete identity, hierarchy, and evidence proof | staged assessment | operator-review recommendation only | any incomplete or blocked surface | planned Stage 5; returns `not_run` now |
 | Archive or deactivate | none | mutation | not accepted | none | none | every call | out of scope |
 
@@ -83,3 +83,33 @@ external descendants are reported but do not block. When assessed targets are
 ancestors of other assessed targets, the response returns a deterministic
 child-first order. Output contains only counts, a bounded sample, issue codes,
 and fingerprints rather than the complete catalog.
+
+## External Evidence Contract
+
+The assessment accepts at most one receipt for each dependency, delivery,
+exchange/protection, site-contract, and telemetry source. Receipts remain
+`caller_supplied_unverified`: the adapter checks their structure and binding,
+but does not claim to verify operator identity or reconstruct the source result
+from its hash.
+
+Every non-`not_run` receipt must use the exact assessed network and complete
+canonical target set, a supported source version, a bounded opaque result hash,
+an observation timestamp no more than five minutes in the future, and a
+positive TTL no greater than 31 days. Dependency and exchange/protection
+receipts use the current evidence-producer contract version. Delivery,
+site-contract, and telemetry receipts use their explicit V1 contracts.
+Delivery and telemetry additionally require a non-zero activity window of at
+least 30 days whose end does not exceed the observation time. Freshness uses
+the older of the observation and activity-window end.
+
+Duplicate sources reject the request. Missing sources remain `not_run`.
+Unknown versions, stale observations, invalid hashes, malformed ids, different
+target sets, and cross-network receipts return bounded incomplete grading.
+Positive partial states remain visible but cannot make the evidence summary
+complete. Exchange/protection clear proof also requires
+`manual_ui_proof_included=true` while relevant protection surfaces remain
+UI-only. Optional notes are bounded, validated, and never echoed.
+
+Stage 4 does not produce a retirement recommendation. The recommendation stays
+`not_run`, `safe_to_archive_or_retire` stays false, and no mutation is
+authorized or performed.

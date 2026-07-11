@@ -110,6 +110,19 @@ it performs the matching post-apply yield-group readback itself and fails
 closed when the requested ad-unit IDs are not proven in `excludedAdUnits` with
 `includeDescendants=true`.
 
+## Retirement evidence safety
+
+`gam_ad_unit_retirement_assessment` accepts compact evidence receipts, not raw
+reports, telemetry rows, screenshots, or provider payloads. Each receipt is
+bound to one known source contract, the exact network and target set, an opaque
+result hash, an observation time, and a bounded TTL. Delivery and telemetry
+also require an evidence window of at least 30 days. Duplicate, stale,
+unsupported, malformed, cross-network, or differently scoped receipts remain
+incomplete. Exchange/protection evidence cannot become clear from API proof
+alone while relevant GAM UI-only surfaces remain unsupported. Operator notes
+are bounded and never echoed. Receipts remain caller-supplied and do not verify
+operator identity or authorize any mutation.
+
 ## Scratchpad safety
 
 Scratchpad tools use `mcp-toolkit-scratchpad` and DuckDB for local, bounded

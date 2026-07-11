@@ -15,8 +15,9 @@ The current alpha focuses on a small useful surface:
   - line items
   - saved reports
 - run saved reports and fetch paginated result rows;
-- bind one to ten exact canonical ad-unit ids to current REST identity through a
-  read-only retirement preflight that cannot recommend or apply a mutation;
+- bind one to ten exact canonical ad-unit ids to current REST identity and
+  hierarchy, then grade exact-target, freshness-bound external evidence through
+  a read-only retirement assessment that cannot recommend or apply a mutation;
 - plan allowlisted REST write operations with no upstream mutation;
 - apply allowlisted REST writes only when an operator explicitly enables write
   mode, uses the manage scope, and passes the matching confirmation token;
@@ -111,8 +112,9 @@ After auth is proven:
 4. `gam_ad_unit_dependency_probe` when you need read-only dependency proof
    before ad-unit cleanup, archive, or retargeting decisions
 5. `gam_ad_unit_retirement_assessment` to prove exact current identity and a
-   bounded, numeric-id-ordered hierarchy/descendant scan while later evidence and
-   recommendation stages remain explicitly `not_run`
+   bounded, numeric-id-ordered hierarchy/descendant scan, then grade optional
+   exact-target evidence receipts while the final recommendation remains
+   explicitly `not_run`
 6. `gam_report_run`
 7. `gam_report_result_rows` when a report result has more pages
 8. `gam_trafficking_tool_matrix` before planning writes

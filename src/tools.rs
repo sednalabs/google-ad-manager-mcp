@@ -1241,7 +1241,7 @@ impl AdManagerServer {
 
     #[tool(
         name = "gam_ad_unit_retirement_assessment",
-        description = "Read-only exact-identity and bounded hierarchy preflight for one to ten canonical Ad Manager ad-unit ids; external evidence and recommendation stages remain not_run."
+        description = "Read-only exact-identity, hierarchy, and freshness-bound external-evidence assessment for one to ten canonical Ad Manager ad-unit ids; the final recommendation remains not_run."
     )]
     async fn gam_ad_unit_retirement_assessment(
         &self,

@@ -224,6 +224,8 @@ descendant reconciliation. It accepts:
 - a canonical positive signed-64-bit numeric `network_code` with no whitespace
   or leading zeroes;
 - one to ten unique canonical positive signed-64-bit numeric `ad_unit_ids`;
+- zero to five `evidence` receipts, with at most one receipt for each supported
+  source;
 - optional `ad_unit_page_size` from 1 to 1000, default 1000;
 - optional `max_ad_units` from 1 to 10000, default 5000.
 
@@ -266,11 +268,25 @@ Archived descendants do not block. When targets contain an ancestor and its
 child, the response returns a deterministic child-first order. Only aggregate
 counts, bounded samples, issue codes, and fingerprints are returned.
 
-The `evidence` and `recommendation` surfaces are intentionally returned as
-`not_run`. Identity and hierarchy proof alone are not retirement eligibility.
+The evidence grader accepts dependency, delivery, exchange/protection,
+site-contract, and telemetry receipts. Every non-`not_run` receipt must bind to
+the exact network and complete target set, a supported source version, a
+canonical opaque result hash, an observation timestamp, and a TTL no greater
+than 31 days. Delivery and telemetry receipts also require a non-zero window of
+at least 30 days whose end is no later than the observation. Stale, duplicate,
+malformed, unsupported, cross-network, or differently scoped receipts fail
+closed. A protection receipt cannot become clear without
+`manual_ui_proof_included=true` while GAM protection surfaces remain partly
+UI-only. The output exposes bounded grading states and binding fingerprints,
+not raw receipt notes or provider payloads. Receipt provenance is always
+`caller_supplied_unverified`.
+
+The `recommendation` surface is intentionally returned as `not_run`. Identity,
+hierarchy, and structurally graded caller-supplied evidence do not yet establish
+retirement eligibility.
 Every successful assessment reports `mutation_performed=false`,
 `archive_or_deactivate_authorized=false`, and
-`safe_to_archive_or_retire=false`. Later stages will add evidence grading and
+`safe_to_archive_or_retire=false`. A later stage will add conservative
 operator-review decisioning without weakening these fail-closed defaults.
 The inner data, complete model-visible Contract V1 content, and serialized RMCP
 result are independently measured against 7 KiB, 8 KiB, and 20 KiB limits.

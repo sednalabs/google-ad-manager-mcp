@@ -118,14 +118,154 @@
       "name": "gam_ad_unit_dependency_probe"
     },
     {
-      "description": "Read-only exact-identity and bounded hierarchy preflight for one to ten canonical Ad Manager ad-unit ids; external evidence and recommendation stages remain not_run.",
+      "description": "Read-only exact-identity, hierarchy, and freshness-bound external-evidence assessment for one to ten canonical Ad Manager ad-unit ids; the final recommendation remains not_run.",
       "inputSchema": {
         "$defs": {
+          "EvidenceSource": {
+            "enum": [
+              "dependency_probe",
+              "delivery_report",
+              "exchange_protection_review",
+              "site_contract",
+              "telemetry"
+            ],
+            "type": "string"
+          },
+          "EvidenceState": {
+            "enum": [
+              "complete_clear",
+              "complete_blocked",
+              "partial_blocked",
+              "partial_capped",
+              "blocked_permission",
+              "blocked_read",
+              "unsupported_surface",
+              "manual_ui_proof_required",
+              "not_run"
+            ],
+            "type": "string"
+          },
           "RetirementAdUnitIdSchema": {
             "maxLength": 19,
             "minLength": 1,
             "pattern": "^(?:[1-9][0-9]{0,17}|[1-8][0-9]{18}|9[01][0-9]{17}|92[01][0-9]{16}|922[0-2][0-9]{15}|9223[0-2][0-9]{14}|92233[0-6][0-9]{13}|922337[01][0-9]{12}|92233720[0-2][0-9]{10}|922337203[0-5][0-9]{9}|9223372036[0-7][0-9]{8}|92233720368[0-4][0-9]{7}|922337203685[0-3][0-9]{6}|9223372036854[0-6][0-9]{5}|92233720368547[0-6][0-9]{4}|922337203685477[0-4][0-9]{3}|9223372036854775[0-7][0-9]{2}|922337203685477580[0-7])$",
             "type": "string"
+          },
+          "RetirementEvidenceHashSchema": {
+            "maxLength": 128,
+            "minLength": 16,
+            "pattern": "^[A-Za-z0-9:_.-]+$",
+            "type": "string"
+          },
+          "RetirementEvidenceNoteSchema": {
+            "maxLength": 500,
+            "type": "string"
+          },
+          "RetirementEvidenceReceipt": {
+            "properties": {
+              "manual_ui_proof_included": {
+                "default": false,
+                "description": "Required for exchange/protection complete-clear proof while GAM UI-only surfaces remain unsupported by API.",
+                "type": "boolean"
+              },
+              "network_code": {
+                "description": "Network code covered by this evidence receipt.",
+                "maxLength": 19,
+                "minLength": 1,
+                "pattern": "^(?:[1-9][0-9]{0,17}|[1-8][0-9]{18}|9[01][0-9]{17}|92[01][0-9]{16}|922[0-2][0-9]{15}|9223[0-2][0-9]{14}|92233[0-6][0-9]{13}|922337[01][0-9]{12}|92233720[0-2][0-9]{10}|922337203[0-5][0-9]{9}|9223372036[0-7][0-9]{8}|92233720368[0-4][0-9]{7}|922337203685[0-3][0-9]{6}|9223372036854[0-6][0-9]{5}|92233720368547[0-6][0-9]{4}|922337203685477[0-4][0-9]{3}|9223372036854775[0-7][0-9]{2}|922337203685477580[0-7])$",
+                "type": "string"
+              },
+              "note": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/RetirementEvidenceNoteSchema"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Optional bounded, non-sensitive operator note. The note is never echoed."
+              },
+              "observed_at_unix_seconds": {
+                "description": "Unix epoch seconds when the source proof completed.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "result_hash": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/RetirementEvidenceHashSchema"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Opaque result hash from the source proof. Raw payloads are not accepted."
+              },
+              "source": {
+                "$ref": "#/$defs/EvidenceSource",
+                "description": "Expected evidence source for this proof surface."
+              },
+              "source_version": {
+                "description": "Source tool, schema, or contract version that produced the result hash.",
+                "maxLength": 64,
+                "minLength": 1,
+                "pattern": "^[A-Za-z0-9._+-]+$",
+                "type": "string"
+              },
+              "state": {
+                "$ref": "#/$defs/EvidenceState",
+                "description": "Evidence conclusion before freshness, target binding, and provenance grading."
+              },
+              "target_ad_unit_ids": {
+                "description": "Exact canonical ad-unit ids covered by the source proof.",
+                "items": {
+                  "$ref": "#/$defs/RetirementAdUnitIdSchema"
+                },
+                "maxItems": 10,
+                "minItems": 1,
+                "type": "array"
+              },
+              "ttl_seconds": {
+                "description": "Maximum age accepted for this proof. Maximum 31 days.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "window_end_unix_seconds": {
+                "description": "Optional evidence-window end. Required for delivery-report and telemetry receipts.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "window_start_unix_seconds": {
+                "description": "Optional evidence-window start. Required for delivery-report and telemetry receipts.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "network_code",
+              "source",
+              "source_version",
+              "state",
+              "target_ad_unit_ids"
+            ],
+            "type": "object"
           }
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -148,6 +288,15 @@
               "integer",
               "null"
             ]
+          },
+          "evidence": {
+            "default": [],
+            "description": "Freshness-bound external proof receipts. Raw reports and telemetry are not accepted.",
+            "items": {
+              "$ref": "#/$defs/RetirementEvidenceReceipt"
+            },
+            "maxItems": 5,
+            "type": "array"
           },
           "max_ad_units": {
             "description": "Maximum catalog rows to reconcile before hierarchy proof fails closed. Defaults to 5000.",

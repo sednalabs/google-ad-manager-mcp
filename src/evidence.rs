@@ -4,6 +4,8 @@ use std::collections::BTreeSet;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use mcp_toolkit::rmcp::model::CallToolResult;
+use schemars::JsonSchema;
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Value, json};
 
 use crate::{AdManagerError, contract, fingerprint::stable_fingerprint};
@@ -14,22 +16,48 @@ pub(crate) const MAX_CONTRACT_ENVELOPE_BYTES: usize = 8 * 1024;
 pub(crate) const MAX_RMCP_TRANSPORT_BYTES: usize = 20 * 1024;
 const DEFAULT_EVIDENCE_TTL_SECONDS: u64 = 3_600;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum EvidenceSource {
     DependencyProbe,
+    DeliveryReport,
     ExchangeProtectionReview,
+    SiteContract,
+    Telemetry,
+}
+
+impl<'de> Deserialize<'de> for EvidenceSource {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        match String::deserialize(deserializer)?.as_str() {
+            "dependency_probe" => Ok(Self::DependencyProbe),
+            "delivery_report" => Ok(Self::DeliveryReport),
+            "exchange_protection_review" => Ok(Self::ExchangeProtectionReview),
+            "site_contract" => Ok(Self::SiteContract),
+            "telemetry" => Ok(Self::Telemetry),
+            _ => Err(serde::de::Error::custom(
+                "unsupported retirement evidence source",
+            )),
+        }
+    }
 }
 
 impl EvidenceSource {
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::DependencyProbe => "dependency_probe",
+            Self::DeliveryReport => "delivery_report",
             Self::ExchangeProtectionReview => "exchange_protection_review",
+            Self::SiteContract => "site_contract",
+            Self::Telemetry => "telemetry",
         }
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum EvidenceState {
     CompleteClear,
     CompleteBlocked,
@@ -37,8 +65,31 @@ pub(crate) enum EvidenceState {
     PartialCapped,
     BlockedPermission,
     BlockedRead,
+    UnsupportedSurface,
     ManualUiProofRequired,
     NotRun,
+}
+
+impl<'de> Deserialize<'de> for EvidenceState {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        match String::deserialize(deserializer)?.as_str() {
+            "complete_clear" => Ok(Self::CompleteClear),
+            "complete_blocked" => Ok(Self::CompleteBlocked),
+            "partial_blocked" => Ok(Self::PartialBlocked),
+            "partial_capped" => Ok(Self::PartialCapped),
+            "blocked_permission" => Ok(Self::BlockedPermission),
+            "blocked_read" => Ok(Self::BlockedRead),
+            "unsupported_surface" => Ok(Self::UnsupportedSurface),
+            "manual_ui_proof_required" => Ok(Self::ManualUiProofRequired),
+            "not_run" => Ok(Self::NotRun),
+            _ => Err(serde::de::Error::custom(
+                "unsupported retirement evidence state",
+            )),
+        }
+    }
 }
 
 impl EvidenceState {
@@ -50,6 +101,7 @@ impl EvidenceState {
             Self::PartialCapped => "partial_capped",
             Self::BlockedPermission => "blocked_permission",
             Self::BlockedRead => "blocked_read",
+            Self::UnsupportedSurface => "unsupported_surface",
             Self::ManualUiProofRequired => "manual_ui_proof_required",
             Self::NotRun => "not_run",
         }
