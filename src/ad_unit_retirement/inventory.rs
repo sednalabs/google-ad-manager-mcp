@@ -200,10 +200,15 @@ pub(super) fn blocked_identity(
 }
 
 pub(super) fn summarize_identities(identities: &[Value]) -> Value {
-    let proof_state = if identities
+    let has_complete_blocked = identities
         .iter()
-        .any(|value| state(value) == "complete_blocked")
-    {
+        .any(|value| state(value) == "complete_blocked");
+    let has_incomplete = identities
+        .iter()
+        .any(|value| !matches!(state(value), "complete_clear" | "complete_blocked"));
+    let proof_state = if has_complete_blocked && has_incomplete {
+        "partial_blocked"
+    } else if has_complete_blocked {
         "complete_blocked"
     } else if identities
         .iter()
@@ -295,14 +300,15 @@ fn compact_sizes(value: Option<&Value>, shape_issues: &mut Vec<&'static str>) ->
         if width.is_none() || height.is_none() {
             shape_issues.push("ad_unit_size_dimensions_invalid");
         }
-        let environment_type = match entry.get("environmentType") {
-            None | Some(Value::Null) => Value::Null,
-            Some(Value::String(value)) if !value.is_empty() && value.chars().count() <= 32 => {
-                Value::String(value.clone())
-            }
+        let environment_type = match entry.get("environmentType").and_then(Value::as_str) {
+            Some(value) if matches!(value, "BROWSER" | "VIDEO_PLAYER") => Some(value),
             Some(_) => {
                 shape_issues.push("ad_unit_size_environment_invalid");
-                Value::Null
+                None
+            }
+            None => {
+                shape_issues.push("ad_unit_size_environment_missing");
+                None
             }
         };
         let companion_count = match entry.get("companions") {
@@ -324,6 +330,9 @@ fn compact_sizes(value: Option<&Value>, shape_issues: &mut Vec<&'static str>) ->
                 0
             }
         };
+        if environment_type != Some("VIDEO_PLAYER") && companion_count > 0 {
+            shape_issues.push("ad_unit_size_companions_require_video_player");
+        }
         if index < 20 {
             items.push(json!({
                 "width": width,

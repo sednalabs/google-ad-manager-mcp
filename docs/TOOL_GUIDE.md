@@ -231,10 +231,13 @@ is validated before identity can be clear. Parent resources must be canonical
 ad-unit resources in the requested network. Size output includes source and
 retained counts, a truncation flag, and a fingerprint over the complete source
 array so environment, companion, and tail changes remain bound even when only
-20 items are returned. Provider errors are classified without returning
-provider error text. A missing target or identity mismatch blocks the identity
-surface; permission and pre-authentication failures remain distinct. Request
-metadata reports whether provider calls were actually attempted.
+20 items are returned. Every size must declare the official `BROWSER` or
+`VIDEO_PLAYER` environment; companions are accepted only for `VIDEO_PLAYER`.
+Provider errors are classified without returning provider error text. A
+missing target or identity mismatch blocks the identity surface; permission
+and pre-authentication failures remain distinct. A confirmed blocker combined
+with any unread or incomplete target is `partial_blocked`, not complete batch
+proof. Request metadata reports whether provider calls were actually attempted.
 
 The `descendants`, `evidence`, and `recommendation` surfaces are intentionally
 returned as `not_run`. Exact identity alone is not retirement eligibility. The

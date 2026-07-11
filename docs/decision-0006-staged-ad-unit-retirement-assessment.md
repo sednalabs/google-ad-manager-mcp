@@ -34,6 +34,13 @@ descriptions and display text. Provider errors are mapped to bounded proof
 states without echoing raw provider details. Request metadata distinguishes
 pre-authentication failures from attempted provider reads.
 
+Ad-unit sizes require the official `BROWSER` or `VIDEO_PLAYER` environment;
+companions are valid only for `VIDEO_PLAYER`. The full size source, including
+tail entries omitted from the compact projection, remains fingerprint-bound.
+A batch with a confirmed blocker plus any unread or incomplete target is
+`partial_blocked`; `complete_blocked` requires every other target to be fully
+read as clear or blocked.
+
 The inner response is capped at 7 KiB. The adapter also measures the complete
 Contract V1 model-visible content and serialized RMCP result against their
 advertised 8 KiB and 20 KiB limits. It always reports no mutation, no

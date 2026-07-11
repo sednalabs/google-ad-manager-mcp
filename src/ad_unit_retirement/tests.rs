@@ -73,9 +73,9 @@ fn identity_summary_is_compact_exact_and_fingerprinted() {
             "description": "not returned",
             "status": "ACTIVE",
             "adUnitSizes": [
-                {"size":{"width":160,"height":600}},
-                {"size":{"width":160,"height":600}},
-                {"size":{"width":160,"height":1200}}
+                {"size":{"width":160,"height":600},"environmentType":"BROWSER"},
+                {"size":{"width":160,"height":600},"environmentType":"BROWSER"},
+                {"size":{"width":160,"height":1200},"environmentType":"BROWSER"}
             ],
             "hasChildren": false,
             "updateTime": "2026-07-10T00:00:00Z"
@@ -159,6 +159,26 @@ fn malformed_identity_and_cross_network_parent_never_clear() {
                 .iter()
                 .any(|issue| issue == "parent_ad_unit_invalid_or_cross_network"))
     );
+
+    let invalid_environment = summarize_identity(
+        &target,
+        &json!({
+            "name":"networks/1234567/adUnits/200",
+            "adUnitCode":"fixture_unit",
+            "status":"ACTIVE",
+            "adUnitSizes":[{"size":{"width":160,"height":600},"environmentType":"INVALID"}],
+            "hasChildren":false,
+            "updateTime":"2026-07-10T00:00:00Z"
+        }),
+    );
+    assert_eq!(invalid_environment["proof_state"], "not_run");
+    assert!(
+        invalid_environment["shape_issues"]
+            .as_array()
+            .is_some_and(|issues| issues
+                .iter()
+                .any(|issue| issue == "ad_unit_size_environment_invalid"))
+    );
 }
 
 #[test]
@@ -172,13 +192,13 @@ fn size_fingerprint_covers_environment_companions_and_truncated_tail() {
         .map(|index| {
             json!({
                 "size":{"width":160,"height":600 + index},
-                "environmentType":"BROWSER",
+                "environmentType":"VIDEO_PLAYER",
                 "companions":[{"width":320,"height":50}]
             })
         })
         .collect::<Vec<_>>();
     let mut changed = sizes.clone();
-    changed[20]["environmentType"] = Value::String("VIDEO_PLAYER".to_string());
+    changed[20]["environmentType"] = Value::String("INVALID".to_string());
     let row = |ad_unit_sizes: Vec<Value>| {
         json!({
             "name":"networks/1234567/adUnits/200",
@@ -194,10 +214,27 @@ fn size_fingerprint_covers_environment_companions_and_truncated_tail() {
     assert_eq!(first["current"]["sizes"]["source_count"], 21);
     assert_eq!(first["current"]["sizes"]["retained_count"], 20);
     assert_eq!(first["current"]["sizes"]["truncated"], true);
+    assert_eq!(first["proof_state"], "complete_clear");
+    assert_eq!(second["proof_state"], "not_run");
     assert_ne!(
         first["identity_fingerprint"],
         second["identity_fingerprint"]
     );
+}
+
+#[test]
+fn confirmed_blocker_plus_incomplete_target_is_partial_blocked() {
+    let partial = summarize_identities(&[
+        json!({"proof_state":"complete_blocked"}),
+        json!({"proof_state":"blocked_auth"}),
+    ]);
+    assert_eq!(partial["proof_state"], "partial_blocked");
+
+    let complete = summarize_identities(&[
+        json!({"proof_state":"complete_blocked"}),
+        json!({"proof_state":"complete_clear"}),
+    ]);
+    assert_eq!(complete["proof_state"], "complete_blocked");
 }
 
 #[test]
@@ -229,7 +266,7 @@ async fn successful_preflight_keeps_later_surfaces_not_run() {
                     "name": resource_name,
                     "adUnitCode": "fixture_unit",
                     "status": "ACTIVE",
-                    "adUnitSizes": [{"size":{"width":300,"height":250}}],
+                    "adUnitSizes": [{"size":{"width":300,"height":250},"environmentType":"BROWSER"}],
                     "hasChildren": false,
                     "updateTime": "2026-07-10T00:00:00Z"
                 })),

@@ -7711,7 +7711,7 @@ mod tests {
                         "name": resource_name,
                         "adUnitCode": "fixture_unit",
                         "status": "ACTIVE",
-                        "adUnitSizes": [{"size":{"width":300,"height":250}}],
+                        "adUnitSizes": [{"size":{"width":300,"height":250},"environmentType":"BROWSER"}],
                         "hasChildren": false,
                         "updateTime": "2026-07-10T00:00:00Z"
                     })),
