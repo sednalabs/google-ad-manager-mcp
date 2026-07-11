@@ -3072,20 +3072,27 @@ fn apply_yield_group_decision(
     attention_reasons: &mut Vec<String>,
     partial_reasons: &mut Vec<String>,
 ) {
-    match summary.get("decision").and_then(Value::as_str) {
-        Some("targeted_exposed") => {
-            attention_reasons.push(
-                "one or more active yield groups target a requested ad unit without a covering exclusion"
-                    .to_string(),
-            );
-        }
-        Some("targeted_activity_unknown") => {
-            partial_reasons.push(
-                "one or more yield groups target a requested ad unit but activity status was not proven"
-                    .to_string(),
-            );
-        }
-        _ => {}
+    if summary
+        .get("targeted_exposed")
+        .and_then(Value::as_array)
+        .is_some_and(|matches| !matches.is_empty())
+        || summary.get("decision").and_then(Value::as_str) == Some("targeted_exposed")
+    {
+        attention_reasons.push(
+            "one or more active yield groups target a requested ad unit without a covering exclusion"
+                .to_string(),
+        );
+    }
+    if summary
+        .get("targeted_activity_unknown")
+        .and_then(Value::as_array)
+        .is_some_and(|matches| !matches.is_empty())
+        || summary.get("decision").and_then(Value::as_str) == Some("targeted_activity_unknown")
+    {
+        partial_reasons.push(
+            "one or more yield groups target a requested ad unit but activity status was not proven"
+                .to_string(),
+        );
     }
     if summary.get("proof_state").and_then(Value::as_str) != Some("complete") {
         partial_reasons.push("yield group proof is unavailable or incomplete".to_string());
@@ -3319,10 +3326,10 @@ fn summarize_yield_groups(
         || total_result_set_size.is_none_or(|total| total != results.len() as u64);
     let decision = if !targeted_exposed.is_empty() {
         "targeted_exposed"
-    } else if !targeted_and_excluded.is_empty() {
-        "targeted_and_excluded"
     } else if !targeted_activity_unknown.is_empty() {
         "targeted_activity_unknown"
+    } else if !targeted_and_excluded.is_empty() {
+        "targeted_and_excluded"
     } else if !targeted_inactive.is_empty() {
         "targeted_inactive"
     } else if sample_only {
@@ -7250,6 +7257,76 @@ mod tests {
     }
 
     #[test]
+    fn exchange_probe_marks_both_yield_total_mismatch_directions_as_sample_only() {
+        for total in [0, 2] {
+            let xml = format!(
+                "<rval><totalResultSetSize>{total}</totalResultSetSize><results><yieldGroupId>10</yieldGroupId></results></rval>"
+            );
+            let summary = summarize_yield_groups(
+                &xml,
+                false,
+                Some("req".to_string()),
+                None,
+                &probe_targets(&["999"]),
+                false,
+            );
+
+            assert_eq!(summary["proof_state"], "sample_only");
+            assert_eq!(summary["decision"], "sample_only");
+        }
+    }
+
+    #[test]
+    fn exchange_probe_unknown_activity_outranks_excluded_yield_evidence() {
+        let xml = r#"
+        <rval>
+          <totalResultSetSize>2</totalResultSetSize>
+          <results>
+            <yieldGroupId>10</yieldGroupId>
+            <exchangeStatus>ACTIVE</exchangeStatus>
+            <targeting><inventoryTargeting>
+              <targetedAdUnits><adUnitId>999</adUnitId></targetedAdUnits>
+              <excludedAdUnits><adUnitId>999</adUnitId></excludedAdUnits>
+            </inventoryTargeting></targeting>
+          </results>
+          <results>
+            <yieldGroupId>11</yieldGroupId>
+            <targeting><inventoryTargeting>
+              <targetedAdUnits><adUnitId>999</adUnitId></targetedAdUnits>
+            </inventoryTargeting></targeting>
+          </results>
+        </rval>
+        "#;
+        let summary = summarize_yield_groups(
+            xml,
+            false,
+            Some("req".to_string()),
+            None,
+            &probe_targets(&["999"]),
+            false,
+        );
+        let mut attention_reasons = Vec::new();
+        let mut partial_reasons = Vec::new();
+
+        apply_yield_group_decision(&summary, &mut attention_reasons, &mut partial_reasons);
+
+        assert_eq!(summary["decision"], "targeted_activity_unknown");
+        assert_eq!(
+            summary["targeted_and_excluded"].as_array().unwrap().len(),
+            1
+        );
+        assert_eq!(
+            summary["targeted_activity_unknown"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(attention_reasons.is_empty());
+        assert_eq!(partial_reasons.len(), 1);
+    }
+
+    #[test]
     fn soap_line_item_rows_parse_delivery_fields_for_scratchpad() {
         let xml = r#"
         <getLineItemsByStatementResponse>
@@ -8284,7 +8361,7 @@ mod tests {
                 response["evidence_receipt_template"],
                 json!({
                     "source": "dependency_probe",
-                    "source_version": "gam-evidence-producer-v2",
+                    "source_version": "gam-evidence-producer-v3",
                     "state": "not_generated",
                     "reason": "evidence receipts require a canonical network, result fingerprint, and one to ten fully resolved exact ad-unit ids"
                 })

@@ -68,6 +68,9 @@ unparseable, or inconsistent total is explicit sample-only evidence and cannot
 support a complete targeting claim. A capped private-auction or private-deal
 surface with observed rows preserves both facts: the observed rows require
 attention, while the cap also keeps absence/presence certainty partial.
+Evidence receipts encode that dual state as `partial_blocked`; `complete_blocked`
+is reserved for a confirmed target exposure with complete exposed-API proof.
+The producer contract version is `gam-evidence-producer-v3`.
 
 The projection contract is visible at `data.result_projection`.
 `source_result_fingerprint` is an audit link to the full producer result, while
