@@ -7865,9 +7865,13 @@ mod tests {
         assert_eq!(
             dependency_evidence_state(
                 "dependencies_found",
-                &json!({"line_items": blocked.clone()})
+                &json!({
+                    "target_resolution_issues": [],
+                    "placements": placement_summary,
+                    "line_items": blocked.clone()
+                })
             ),
-            EvidenceState::CompleteBlocked
+            EvidenceState::PartialBlocked
         );
     }
 

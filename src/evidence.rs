@@ -142,7 +142,13 @@ pub(crate) fn exact_resource_id_from_name(
 
 pub(crate) fn dependency_evidence_state(decision: &str, response: &Value) -> EvidenceState {
     match decision {
-        "dependencies_found" => EvidenceState::CompleteBlocked,
+        "dependencies_found" => {
+            if dependency_receipt_proof_incomplete(response) {
+                EvidenceState::PartialBlocked
+            } else {
+                EvidenceState::CompleteBlocked
+            }
+        }
         "no_dependencies_observed" => EvidenceState::CompleteClear,
         "incomplete_no_dependencies_observed" | "missing_or_ambiguous_targets" => {
             EvidenceState::PartialCapped
@@ -150,6 +156,23 @@ pub(crate) fn dependency_evidence_state(decision: &str, response: &Value) -> Evi
         "blocked" => blocked_evidence_state(response),
         _ => EvidenceState::NotRun,
     }
+}
+
+fn dependency_receipt_proof_incomplete(response: &Value) -> bool {
+    if response
+        .get("target_resolution_issues")
+        .and_then(Value::as_array)
+        .is_some_and(|issues| !issues.is_empty())
+    {
+        return true;
+    }
+    let Some(placements) = response.get("placements") else {
+        return true;
+    };
+    let Some(line_items) = response.get("line_items") else {
+        return true;
+    };
+    dependency_proof_incomplete(placements, line_items)
 }
 
 pub(crate) fn dependency_probe_decision(
@@ -547,7 +570,29 @@ mod tests {
     fn shared_evidence_state_preserves_block_and_completeness_policy() {
         assert_eq!(
             dependency_evidence_state("dependencies_found", &json!({})),
+            EvidenceState::PartialBlocked
+        );
+        assert_eq!(
+            dependency_evidence_state(
+                "dependencies_found",
+                &json!({
+                    "target_resolution_issues": [],
+                    "placements": {"proof_state": "complete_for_page"},
+                    "line_items": {"proof_state": "complete"}
+                })
+            ),
             EvidenceState::CompleteBlocked
+        );
+        assert_eq!(
+            dependency_evidence_state(
+                "dependencies_found",
+                &json!({
+                    "target_resolution_issues": [],
+                    "placements": {"proof_state": "complete_for_page"},
+                    "line_items": {"proof_state": "blocked"}
+                })
+            ),
+            EvidenceState::PartialBlocked
         );
         assert_eq!(
             dependency_evidence_state(

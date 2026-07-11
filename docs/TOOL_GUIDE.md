@@ -170,6 +170,9 @@ approval. Any capped line-item read, truncated SOAP response, id-only target,
 unknown placement membership shape, or blocked SOAP scope remains incomplete
 evidence. Do not archive, deactivate, or retarget inventory solely because this
 tool returns `no_dependencies_observed` or `incomplete_no_dependencies_observed`.
+When a dependency is observed during an incomplete scan, the v3 receipt uses
+`partial_blocked`; `complete_blocked` requires complete placement and line-item
+proof.
 The response includes a stable `result_fingerprint` and emits the same
 versioned receipt template only for one to ten fully resolved, exact,
 network-bound target rows. Unresolved, ambiguous, id-only, or cross-network

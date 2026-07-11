@@ -47,6 +47,10 @@ capped or blocked proof state. For one to ten resolved exact targets in the
 requested network, the probe also returns a canonical caller-supplied receipt
 template under the explicit `gam-evidence-producer-v3` source contract. An
 operator must still review the underlying result before using it.
+Known dependencies produce `complete_blocked` only when placement and line-item
+proof is complete. A retained dependency combined with capped, blocked, or
+otherwise incomplete scanning produces `partial_blocked`, preserving both the
+stop condition and the incomplete evidence state.
 
 Target rows contribute dependency evidence only when their resource names bind
 exactly to the canonical requested network and positive numeric ad-unit ID.
