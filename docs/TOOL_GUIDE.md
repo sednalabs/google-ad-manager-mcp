@@ -244,6 +244,9 @@ and pre-authentication failures remain distinct. A confirmed blocker combined
 with any unread or incomplete target is `partial_blocked`, not complete batch
 proof. Request metadata reports whether identity and catalog calls were
 actually attempted.
+Target ids are not repeated inside each compact `current` object, and derived
+resource names are omitted; the target id plus exact-match flag remain the
+identity binding.
 
 The hierarchy scan is strictly ordered and bounded by page, row, per-page byte,
 and total byte limits. It validates every row's exact network resource,

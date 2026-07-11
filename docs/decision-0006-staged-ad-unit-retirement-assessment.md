@@ -33,6 +33,9 @@ source fingerprint, child flag, parent id, and update time, but omits
 descriptions and display text. Provider errors are mapped to bounded proof
 states without echoing raw provider details. Request metadata distinguishes
 pre-authentication failures from attempted provider reads.
+Canonical target ids are carried once per target and in the aggregate target
+list; the derived resource name and duplicate id are omitted from each compact
+current-identity object.
 
 Ad-unit sizes require the official `BROWSER` or `VIDEO_PLAYER` environment;
 companions are valid only for `VIDEO_PLAYER`. The full size source, including

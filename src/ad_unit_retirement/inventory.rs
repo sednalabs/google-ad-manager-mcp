@@ -138,7 +138,6 @@ pub(super) fn summarize_identity(target: &RetirementTarget, row: &Value) -> Valu
     }
     let shape_complete = shape_issues.is_empty();
     let current = json!({
-        "ad_unit_id": resolved_id,
         "ad_unit_code": ad_unit_code,
         "ad_unit_code_source_fingerprint": ad_unit_code_source_fingerprint,
         "status": status,
@@ -156,7 +155,6 @@ pub(super) fn summarize_identity(target: &RetirementTarget, row: &Value) -> Valu
     };
     json!({
         "ad_unit_id": target.ad_unit_id,
-        "resource_name": target.resource_name,
         "proof_state": proof_state,
         "identity_matches_request": identity_matches_request,
         "shape_complete": shape_complete,
@@ -195,7 +193,6 @@ pub(super) fn blocked_identity(
     };
     json!({
         "ad_unit_id": target.ad_unit_id,
-        "resource_name": target.resource_name,
         "proof_state": proof_state,
         "identity_matches_request": false,
         "shape_complete": false,

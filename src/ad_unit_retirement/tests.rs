@@ -128,6 +128,8 @@ fn identity_summary_is_compact_exact_and_fingerprinted() {
     );
     assert!(summary["current"].get("display_name").is_none());
     assert!(summary["current"].get("description").is_none());
+    assert!(summary["current"].get("ad_unit_id").is_none());
+    assert!(summary.get("resource_name").is_none());
 }
 
 #[test]
