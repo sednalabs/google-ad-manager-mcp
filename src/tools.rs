@@ -982,23 +982,7 @@ impl AdManagerServer {
         .await
         {
             Ok(summary) => {
-                match summary.get("decision").and_then(Value::as_str) {
-                    Some("targeted_exposed") => {
-                        attention_reasons.push(
-                            "one or more active yield groups target a requested ad unit without a covering exclusion".to_string(),
-                        );
-                    }
-                    Some("targeted_activity_unknown") => {
-                        partial_reasons.push(
-                            "one or more yield groups target a requested ad unit but activity status was not proven".to_string(),
-                        );
-                    }
-                    Some("blocked") | Some("sample_only") | Some("skipped") => {
-                        partial_reasons
-                            .push("yield group proof is unavailable or incomplete".to_string());
-                    }
-                    _ => {}
-                }
+                apply_yield_group_decision(&summary, &mut attention_reasons, &mut partial_reasons);
                 summary
             }
             Err(err) => {
@@ -3065,15 +3049,53 @@ fn apply_probe_collection_decision(
     attention_reasons: &mut Vec<String>,
     partial_reasons: &mut Vec<String>,
 ) {
-    match summary.get("proof_state").and_then(Value::as_str) {
-        Some("complete_present") => attention_reasons.push(format!(
+    if summary
+        .get("row_count_in_page")
+        .and_then(Value::as_u64)
+        .is_some_and(|count| count > 0)
+    {
+        attention_reasons.push(format!(
             "{label} are present; review whether they can target the requested inventory"
-        )),
+        ));
+    }
+    match summary.get("proof_state").and_then(Value::as_str) {
         Some("sample_only") => partial_reasons.push(format!(
             "{label} read is capped or paginated; full absence/presence is not proven"
         )),
         Some("blocked") => partial_reasons.push(format!("{label} read is blocked")),
         _ => {}
+    }
+}
+
+fn apply_yield_group_decision(
+    summary: &Value,
+    attention_reasons: &mut Vec<String>,
+    partial_reasons: &mut Vec<String>,
+) {
+    if summary
+        .get("targeted_exposed")
+        .and_then(Value::as_array)
+        .is_some_and(|matches| !matches.is_empty())
+        || summary.get("decision").and_then(Value::as_str) == Some("targeted_exposed")
+    {
+        attention_reasons.push(
+            "one or more active yield groups target a requested ad unit without a covering exclusion"
+                .to_string(),
+        );
+    }
+    if summary
+        .get("targeted_activity_unknown")
+        .and_then(Value::as_array)
+        .is_some_and(|matches| !matches.is_empty())
+        || summary.get("decision").and_then(Value::as_str) == Some("targeted_activity_unknown")
+    {
+        partial_reasons.push(
+            "one or more yield groups target a requested ad unit but activity status was not proven"
+                .to_string(),
+        );
+    }
+    if summary.get("proof_state").and_then(Value::as_str) != Some("complete") {
+        partial_reasons.push("yield group proof is unavailable or incomplete".to_string());
     }
 }
 
@@ -3301,15 +3323,13 @@ fn summarize_yield_groups(
         }));
     }
     let sample_only = response_truncated
-        || total_result_set_size
-            .map(|total| total > results.len() as u64)
-            .unwrap_or(false);
+        || total_result_set_size.is_none_or(|total| total != results.len() as u64);
     let decision = if !targeted_exposed.is_empty() {
         "targeted_exposed"
-    } else if !targeted_and_excluded.is_empty() {
-        "targeted_and_excluded"
     } else if !targeted_activity_unknown.is_empty() {
         "targeted_activity_unknown"
+    } else if !targeted_and_excluded.is_empty() {
+        "targeted_and_excluded"
     } else if !targeted_inactive.is_empty() {
         "targeted_inactive"
     } else if sample_only {
@@ -3636,7 +3656,7 @@ impl LineItemDependencyScanState {
             || self.missing_total_result_set_size
             || self
                 .total_result_set_size
-                .map(|total| total > u64::from(self.inspected_results))
+                .map(|total| total != u64::from(self.inspected_results))
                 .unwrap_or(self.inspected_results >= options.max_line_items);
         let proof_state = if capped { "sample_only" } else { "complete" };
         let decision = if self.dependency_match_count > 0 {
@@ -4131,7 +4151,7 @@ fn dependency_proof_flags(
                 .get("inspected_results")
                 .and_then(Value::as_u64),
         )
-        .is_some_and(|(total, inspected)| total > inspected);
+        .is_some_and(|(total, inspected)| total != inspected);
     let line_items_capped_or_truncated = line_item_state == "sample_only"
         || line_item_summary
             .get("response_truncated")
@@ -7161,6 +7181,152 @@ mod tests {
     }
 
     #[test]
+    fn exchange_probe_keeps_positive_capped_private_market_evidence_as_attention() {
+        let payload = json!({
+            "privateAuctions": [{
+                "name": "networks/1234567/privateAuctions/1",
+                "displayName": "Fixture private auction",
+                "status": "ACTIVE"
+            }],
+            "nextPageToken": "next-page"
+        });
+        let summary = summarize_probe_collection(&payload, CatalogCollection::PrivateAuctions, 100);
+        let mut attention_reasons = Vec::new();
+        let mut partial_reasons = Vec::new();
+
+        apply_probe_collection_decision(
+            "private auctions",
+            &summary,
+            &mut attention_reasons,
+            &mut partial_reasons,
+        );
+
+        assert_eq!(summary["proof_state"], "sample_only");
+        assert_eq!(attention_reasons.len(), 1);
+        assert_eq!(partial_reasons.len(), 1);
+    }
+
+    #[test]
+    fn exchange_probe_marks_missing_yield_total_as_sample_only() {
+        let summary = summarize_yield_groups(
+            "<rval></rval>",
+            false,
+            Some("req".to_string()),
+            None,
+            &probe_targets(&["999"]),
+            false,
+        );
+
+        assert_eq!(summary["total_result_set_size"], Value::Null);
+        assert_eq!(summary["decision"], "sample_only");
+        assert_eq!(summary["proof_state"], "sample_only");
+    }
+
+    #[test]
+    fn exchange_probe_keeps_exposed_missing_total_as_attention_and_partial() {
+        let xml = r#"
+        <rval>
+          <results>
+            <yieldGroupId>10</yieldGroupId>
+            <exchangeStatus>ACTIVE</exchangeStatus>
+            <targeting>
+              <inventoryTargeting>
+                <targetedAdUnits><adUnitId>999</adUnitId></targetedAdUnits>
+              </inventoryTargeting>
+            </targeting>
+          </results>
+        </rval>
+        "#;
+        let summary = summarize_yield_groups(
+            xml,
+            false,
+            Some("req".to_string()),
+            None,
+            &probe_targets(&["999"]),
+            false,
+        );
+        let mut attention_reasons = Vec::new();
+        let mut partial_reasons = Vec::new();
+
+        apply_yield_group_decision(&summary, &mut attention_reasons, &mut partial_reasons);
+
+        assert_eq!(summary["decision"], "targeted_exposed");
+        assert_eq!(summary["proof_state"], "sample_only");
+        assert_eq!(attention_reasons.len(), 1);
+        assert_eq!(partial_reasons.len(), 1);
+    }
+
+    #[test]
+    fn exchange_probe_marks_both_yield_total_mismatch_directions_as_sample_only() {
+        for total in [0, 2] {
+            let xml = format!(
+                "<rval><totalResultSetSize>{total}</totalResultSetSize><results><yieldGroupId>10</yieldGroupId></results></rval>"
+            );
+            let summary = summarize_yield_groups(
+                &xml,
+                false,
+                Some("req".to_string()),
+                None,
+                &probe_targets(&["999"]),
+                false,
+            );
+
+            assert_eq!(summary["proof_state"], "sample_only");
+            assert_eq!(summary["decision"], "sample_only");
+        }
+    }
+
+    #[test]
+    fn exchange_probe_unknown_activity_outranks_excluded_yield_evidence() {
+        let xml = r#"
+        <rval>
+          <totalResultSetSize>2</totalResultSetSize>
+          <results>
+            <yieldGroupId>10</yieldGroupId>
+            <exchangeStatus>ACTIVE</exchangeStatus>
+            <targeting><inventoryTargeting>
+              <targetedAdUnits><adUnitId>999</adUnitId></targetedAdUnits>
+              <excludedAdUnits><adUnitId>999</adUnitId></excludedAdUnits>
+            </inventoryTargeting></targeting>
+          </results>
+          <results>
+            <yieldGroupId>11</yieldGroupId>
+            <targeting><inventoryTargeting>
+              <targetedAdUnits><adUnitId>999</adUnitId></targetedAdUnits>
+            </inventoryTargeting></targeting>
+          </results>
+        </rval>
+        "#;
+        let summary = summarize_yield_groups(
+            xml,
+            false,
+            Some("req".to_string()),
+            None,
+            &probe_targets(&["999"]),
+            false,
+        );
+        let mut attention_reasons = Vec::new();
+        let mut partial_reasons = Vec::new();
+
+        apply_yield_group_decision(&summary, &mut attention_reasons, &mut partial_reasons);
+
+        assert_eq!(summary["decision"], "targeted_activity_unknown");
+        assert_eq!(
+            summary["targeted_and_excluded"].as_array().unwrap().len(),
+            1
+        );
+        assert_eq!(
+            summary["targeted_activity_unknown"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(attention_reasons.is_empty());
+        assert_eq!(partial_reasons.len(), 1);
+    }
+
+    #[test]
     fn soap_line_item_rows_parse_delivery_fields_for_scratchpad() {
         let xml = r#"
         <getLineItemsByStatementResponse>
@@ -7699,9 +7865,13 @@ mod tests {
         assert_eq!(
             dependency_evidence_state(
                 "dependencies_found",
-                &json!({"line_items": blocked.clone()})
+                &json!({
+                    "target_resolution_issues": [],
+                    "placements": placement_summary,
+                    "line_items": blocked.clone()
+                })
             ),
-            EvidenceState::CompleteBlocked
+            EvidenceState::PartialBlocked
         );
     }
 
@@ -7883,9 +8053,11 @@ mod tests {
             "target_placement_match_count":0,
             "target_placement_ids_by_ad_unit_id":{"200":[]}
         });
-        let page = r#"
+        for total in [0, 2] {
+            let page = format!(
+                r#"
         <rval>
-          <totalResultSetSize>2</totalResultSetSize>
+          <totalResultSetSize>{total}</totalResultSetSize>
           <results>
             <id>1</id>
             <status>PAUSED</status>
@@ -7895,30 +8067,39 @@ mod tests {
             </inventoryTargeting></targeting>
           </results>
         </rval>
-        "#;
-        let mut state = LineItemDependencyScanState::default();
-        assert_eq!(
-            state.record_successful_page(
-                SuccessfulLineItemPage {
-                    upstream_response_xml: page,
-                    response_truncated: false,
-                    request_id: Some("request-1".to_string()),
-                    response_time: Some("42".to_string()),
-                },
+        "#
+            );
+            let mut state = LineItemDependencyScanState::default();
+            assert_eq!(
+                state.record_successful_page(
+                    SuccessfulLineItemPage {
+                        upstream_response_xml: &page,
+                        response_truncated: false,
+                        request_id: Some("request-1".to_string()),
+                        response_time: Some("42".to_string()),
+                    },
+                    std::slice::from_ref(&target),
+                    &placement_summary,
+                    false,
+                ),
+                1
+            );
+
+            let completed = state.into_completed_response(&options);
+            assert_eq!(completed["decision"], "no_dependencies_in_sample");
+            assert_eq!(completed["proof_state"], "sample_only");
+            assert_eq!(completed["total_result_set_size"], total);
+            assert_eq!(completed["inspected_results"], 1);
+            assert_eq!(completed["dependency_match_count"], 0);
+            assert_eq!(completed["status_counts"]["PAUSED"], 1);
+            let flags = dependency_proof_flags(
                 std::slice::from_ref(&target),
                 &placement_summary,
+                &completed,
                 false,
-            ),
-            1
-        );
-
-        let completed = state.into_completed_response(&options);
-        assert_eq!(completed["decision"], "no_dependencies_in_sample");
-        assert_eq!(completed["proof_state"], "sample_only");
-        assert_eq!(completed["total_result_set_size"], 2);
-        assert_eq!(completed["inspected_results"], 1);
-        assert_eq!(completed["dependency_match_count"], 0);
-        assert_eq!(completed["status_counts"]["PAUSED"], 1);
+            );
+            assert_eq!(flags["line_items_capped_or_truncated"], true);
+        }
     }
 
     #[test]
@@ -8195,7 +8376,7 @@ mod tests {
                 response["evidence_receipt_template"],
                 json!({
                     "source": "dependency_probe",
-                    "source_version": "gam-evidence-producer-v2",
+                    "source_version": "gam-evidence-producer-v3",
                     "state": "not_generated",
                     "reason": "evidence receipts require a canonical network, result fingerprint, and one to ten fully resolved exact ad-unit ids"
                 })

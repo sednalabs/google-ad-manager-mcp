@@ -45,8 +45,15 @@ The response includes a stable `result_fingerprint` over the bounded proof
 payload. It can bind a later evidence-grading receipt, but it does not upgrade a
 capped or blocked proof state. For one to ten resolved exact targets in the
 requested network, the probe also returns a canonical caller-supplied receipt
-template under the explicit `gam-evidence-producer-v2` source contract. An
+template under the explicit `gam-evidence-producer-v3` source contract. An
 operator must still review the underlying result before using it.
+Known dependencies produce `complete_blocked` only when placement and line-item
+proof is complete. A retained dependency combined with capped, blocked, or
+otherwise incomplete scanning produces `partial_blocked`, preserving both the
+stop condition and the incomplete evidence state.
+For line-item progress, any mismatch between the reported total and inspected
+row count is sample-only evidence, regardless of mismatch direction. Native and
+compact results apply the same rule.
 
 Target rows contribute dependency evidence only when their resource names bind
 exactly to the canonical requested network and positive numeric ad-unit ID.

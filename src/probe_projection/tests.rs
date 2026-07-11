@@ -920,9 +920,6 @@ fn completed_line_item_outcomes_are_rederived_from_scan_progress() {
     let mut matched_wrong_decision = complete_with_match;
     matched_wrong_decision["line_items"]["decision"] = json!("no_dependencies_observed");
 
-    let mut impossible_progress = completed_dependency(false);
-    impossible_progress["line_items"]["total_result_set_size"] = json!(0);
-
     let mut invalid_page_size = completed_dependency(false);
     invalid_page_size["line_items"]["line_item_page_size"] = json!(0);
 
@@ -941,7 +938,6 @@ fn completed_line_item_outcomes_are_rederived_from_scan_progress() {
         complete_wrong_decision,
         sample_wrong_decision,
         matched_wrong_decision,
-        impossible_progress,
         invalid_page_size,
         invalid_scan_max,
         changed_transport_limit,
@@ -957,6 +953,25 @@ fn completed_line_item_outcomes_are_rederived_from_scan_progress() {
             .is_err()
         );
     }
+
+    let mut lower_total = completed_dependency(false);
+    lower_total["line_items"]["total_result_set_size"] = json!(0);
+    lower_total["line_items"]["proof_state"] = json!("sample_only");
+    lower_total["line_items"]["decision"] = json!("no_dependencies_in_sample");
+    lower_total["proof_flags"]["line_items_capped_or_truncated"] = json!(true);
+    lower_total["dependency_decision"] = json!("incomplete_no_dependencies_observed");
+    lower_total = reseal(lower_total, ProbeKind::AdUnitDependency, true);
+    let compact = compact_success(
+        ProbeKind::AdUnitDependency,
+        &lower_total,
+        &json!({"mutation_performed":false}),
+    )
+    .expect("lower-than-inspected total remains bounded incomplete evidence");
+    assert_eq!(compact["line_items"]["proof_state"], "sample_only");
+    assert_eq!(
+        compact["proof_flags"]["line_items_capped_or_truncated"],
+        true
+    );
 }
 
 #[test]

@@ -670,7 +670,7 @@ fn exchange_private_market_proof_state_is_derived_from_page_evidence() {
 }
 
 #[test]
-fn exchange_projection_rejects_capped_private_market_rows_without_attention_semantics() {
+fn exchange_projection_accepts_capped_private_market_rows_with_attention_semantics() {
     for field in ["private_auctions", "private_auction_deals"] {
         let mut full = producer_exchange(true, 9_000);
         full[field] = json!({
@@ -692,17 +692,160 @@ fn exchange_projection_rejects_capped_private_market_rows_without_attention_sema
         } else {
             full["certainty"]["can_prove_private_deal_absence_or_presence"] = json!(false);
         }
+        full["attention_reasons"] = json!(["private market inventory is present"]);
+        full["overall_decision"] = json!("attention_required");
         full = reseal(full, ProbeKind::ExchangeProtection, true);
 
-        assert!(
-            compact_success(
-                ProbeKind::ExchangeProtection,
-                &full,
-                &json!({"mutation_performed":false})
-            )
-            .is_err()
+        let compact = compact_success(
+            ProbeKind::ExchangeProtection,
+            &full,
+            &json!({"mutation_performed":false}),
+        )
+        .expect("capped positive private-market evidence keeps attention precedence");
+        assert_eq!(compact["overall_decision"], "attention_required");
+        assert_eq!(compact[field]["proof_state"], "sample_only");
+        assert_eq!(
+            compact["evidence_receipt_template"]["state"],
+            "partial_blocked"
         );
     }
+}
+
+#[test]
+fn exchange_projection_accepts_missing_yield_total_as_incomplete() {
+    let mut full = producer_exchange(true, 9_000);
+    full["yield_groups"]["total_result_set_size"] = Value::Null;
+    full["yield_groups"]["proof_state"] = json!("sample_only");
+    full["yield_groups"]["decision"] = json!("sample_only");
+    full["certainty"]["can_prove_yield_group_targeting"] = json!(false);
+    full = reseal(full, ProbeKind::ExchangeProtection, true);
+
+    let compact = compact_success(
+        ProbeKind::ExchangeProtection,
+        &full,
+        &json!({"mutation_performed":false}),
+    )
+    .expect("missing yield total remains explicit sample-only evidence");
+    assert_eq!(compact["yield_groups"]["proof_state"], "sample_only");
+    assert_eq!(compact["yield_groups"]["decision"], "sample_only");
+    assert_eq!(
+        compact["certainty"]["can_prove_yield_group_targeting"],
+        false
+    );
+}
+
+#[test]
+fn exchange_projection_preserves_partial_blocked_target_exposure() {
+    let mut full = exchange_with_yield_classification("targeted_exposed");
+    full["yield_groups"]["total_result_set_size"] = Value::Null;
+    full["yield_groups"]["proof_state"] = json!("sample_only");
+    full["certainty"]["can_prove_yield_group_targeting"] = json!(false);
+    full = reseal(full, ProbeKind::ExchangeProtection, true);
+    assert_eq!(
+        full["evidence_receipt_template"]["state"],
+        "partial_blocked"
+    );
+
+    let compact = compact_success(
+        ProbeKind::ExchangeProtection,
+        &full,
+        &json!({"mutation_performed":false}),
+    )
+    .expect("target exposure plus incomplete total remains a bounded stop state");
+    assert_eq!(compact["overall_decision"], "attention_required");
+    assert_eq!(compact["yield_groups"]["decision"], "targeted_exposed");
+    assert_eq!(compact["yield_groups"]["proof_state"], "sample_only");
+    assert_eq!(
+        compact["evidence_receipt_template"]["state"],
+        "partial_blocked"
+    );
+}
+
+#[test]
+fn exchange_projection_accepts_both_yield_total_mismatch_directions_as_incomplete() {
+    for total in [0, 2] {
+        let mut full = producer_exchange(true, 9_000);
+        full["yield_groups"]["total_result_set_size"] = json!(total);
+        full["yield_groups"]["inspected_results"] = json!(1);
+        full["yield_groups"]["proof_state"] = json!("sample_only");
+        full["yield_groups"]["decision"] = json!("sample_only");
+        full["certainty"]["can_prove_yield_group_targeting"] = json!(false);
+        full = reseal(full, ProbeKind::ExchangeProtection, true);
+
+        let compact = compact_success(
+            ProbeKind::ExchangeProtection,
+            &full,
+            &json!({"mutation_performed":false}),
+        )
+        .expect("yield total mismatch remains bounded sample-only evidence");
+        assert_eq!(compact["yield_groups"]["proof_state"], "sample_only");
+        assert_eq!(compact["yield_groups"]["decision"], "sample_only");
+    }
+}
+
+#[test]
+fn exchange_projection_preserves_unknown_activity_with_excluded_yield_evidence() {
+    let mut full = exchange_with_yield_classification("targeted_activity_unknown");
+    let coverage = json!({
+        "ad_unit_id": "1",
+        "include_descendants": false,
+        "match_type": "exact",
+    });
+    full["yield_groups"]["target_ad_unit_matches"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({
+            "yield_group_id": "11",
+            "yield_group_name": "Excluded fixture group",
+            "status": "ACTIVE",
+            "activity_state": "active",
+            "format": "NATIVE",
+            "environment_type": "WEB",
+            "matched_ad_unit_ids": ["1"],
+            "targeted_exposed_ad_unit_ids": [],
+            "targeted_and_excluded_ad_unit_ids": ["1"],
+            "targeted_inactive_ad_unit_ids": [],
+            "targeted_activity_unknown_ad_unit_ids": [],
+            "targeted_ad_units": [{"ad_unit_id": "1", "include_descendants": false}],
+            "excluded_ad_units": [{"ad_unit_id": "1", "include_descendants": false}],
+        }));
+    full["yield_groups"]["targeted_and_excluded"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({
+            "yield_group_id": "11",
+            "yield_group_name": "Excluded fixture group",
+            "status": "ACTIVE",
+            "activity_state": "active",
+            "format": "NATIVE",
+            "environment_type": "WEB",
+            "requested_ad_unit_id": "1",
+            "classification": "targeted_and_excluded",
+            "targeting_match": coverage.clone(),
+            "exclusion_match": coverage,
+        }));
+    full["yield_groups"]["total_result_set_size"] = json!(2);
+    full["yield_groups"]["inspected_results"] = json!(2);
+    full = reseal(full, ProbeKind::ExchangeProtection, true);
+
+    let compact = compact_success(
+        ProbeKind::ExchangeProtection,
+        &full,
+        &json!({"mutation_performed":false}),
+    )
+    .expect("mixed yield evidence preserves unknown-activity precedence");
+    assert_eq!(
+        compact["yield_groups"]["decision"],
+        "targeted_activity_unknown"
+    );
+    assert_eq!(
+        compact["yield_groups"]["targeting_class_counts"]["targeted_and_excluded"],
+        1
+    );
+    assert_eq!(
+        compact["yield_groups"]["targeting_class_counts"]["targeted_activity_unknown"],
+        1
+    );
 }
 
 #[test]

@@ -10,8 +10,8 @@ The tool must not turn partial API coverage into a green-looking answer.
 | Workflow | Tool | Class | Inputs | Data Source | Proof | Redaction | Negative Tests | Docs | Status |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | Prove exact ad-unit flags and sizes | `gam_exchange_protection_probe` plus `gam_network_catalog_list` | read | `network_code`, exact ad-unit codes | REST `adUnits` collection | Exact ad-unit row, size list, status, `appliedAdsenseEnabled`, `effectiveAdsenseEnabled`, `explicitlyTargeted` | Raw OAuth/token data never returned; ad-unit codes are operator-supplied identifiers | Missing unit, duplicate rows, missing boolean fields, capped rows | Tool Guide | implemented |
-| List private-auction and private-auction-deal exposure | `gam_exchange_protection_probe` plus `gam_network_catalog_list` | read | `network_code`, optional page cap | REST `privateAuctions`, `privateAuctionDeals` collections | Row count sample, next-page token/capped flag, status sample | Full rows omitted from the high-level probe; direct catalog list remains explicit | Unsupported upstream collection, permission failure, capped reads | Tool Guide | implemented |
-| Prove open-bidding/yield group targeting | `gam_exchange_protection_probe`; raw read through `gam_soap_trafficking_*` | read | `network_code`, exact ad-unit codes, optional SOAP version | SOAP `YieldGroupService` | `getYieldGroupsByStatement` response status, request id, total result count, inspected result count, ad-unit-id matches | High-level probe returns summary and redacted fault text, not raw SOAP by default | SOAP permission failure, SOAP fault, truncated XML, capped result set, missing ad-unit ids | Tool Guide | implemented |
+| List private-auction and private-auction-deal exposure | `gam_exchange_protection_probe` plus `gam_network_catalog_list` | read | `network_code`, optional page cap | REST `privateAuctions`, `privateAuctionDeals` collections | Row count sample, next-page token/capped flag, status sample; any observed row keeps attention precedence even when the page is capped | Full rows omitted from the high-level probe; direct catalog list remains explicit | Unsupported upstream collection, permission failure, capped empty reads, capped reads with positive rows | Tool Guide | implemented |
+| Prove open-bidding/yield group targeting | `gam_exchange_protection_probe`; raw read through `gam_soap_trafficking_*` | read | `network_code`, exact ad-unit codes, optional SOAP version | SOAP `YieldGroupService` | `getYieldGroupsByStatement` response status, request id, usable total result count, inspected result count, ad-unit-id matches; missing or inconsistent totals remain sample-only | High-level probe returns summary and redacted fault text, not raw SOAP by default | SOAP permission failure, SOAP fault, truncated XML, capped result set, missing total result count, missing ad-unit ids | Tool Guide | implemented |
 | Add descendant-safe ad-unit exclusions to an existing yield group | `gam_yield_group_exclusions_preview`, `gam_yield_group_exclusions_apply` | preview/apply | `network_code`, `yield_group_id`, ad-unit ids, optional SOAP version, reason, expected impact, rollback note, confirmation token | SOAP `YieldGroupService` | Preview readback fingerprint, generated `updateYieldGroups` payload hash, no-op detection, post-apply `getYieldGroupsByStatement` proof that every requested id is in `excludedAdUnits` with `includeDescendants=true` | Payload XML is omitted by default; tool returns ids, include-descendant policy, hashes, byte counts, request ids, and bounded fault text | Missing manage scope, write-mode disabled, token mismatch after stale readback, missing targeting, target/exclude conflict, no-op duplicate, self-only readback, post-apply readback mismatch | Tool Guide, Security Model | implemented |
 | Read yield partners | `gam_soap_payload_build` plus `gam_soap_trafficking_*` | read | `network_code`, optional SOAP version, empty payload from `yield_partners` | SOAP `YieldGroupService` | `getYieldPartners` response status and raw SOAP response through explicit SOAP apply | Raw SOAP only returned by explicit SOAP tool call | SOAP permission failure, SOAP fault, accidental non-empty payload dependency | Tool Guide | implemented |
 | Confirm whether current REST API exposes protection, inventory-rule, or unified-pricing resources | `gam_exchange_protection_probe` | read | none beyond network context | REST discovery document | Observed discovery resource names and unsupported-surface list | Discovery document is public API metadata; no account data | Discovery fetch failure, unexpected resource names | Tool Guide | implemented |
@@ -22,7 +22,8 @@ The tool must not turn partial API coverage into a green-looking answer.
 `gam_exchange_protection_probe` returns an `overall_decision`:
 
 - `attention_required`: a requested ad unit is missing, a direct flag indicates
-  AdSense/open eligibility, private auction/deal rows are present, or an active
+  AdSense/open eligibility, private auction/deal rows are observed even on a
+  capped page, or an active
   yield group reports `targeted_exposed` for one of the requested units.
 - `partial_api_proof`: exposed API surfaces were checked, but at least one
   relevant surface is capped, unsupported, or unavailable.
@@ -62,11 +63,14 @@ accounting, receipt, or compact-size mismatch fails closed.
 The projection independently re-derives the root decision, certainty claims,
 yield-group proof state, yield decision, and target-classification accounting
 from the retained source surfaces before a compact receipt can bind.
-Normal yield-group evidence must include a usable total result count or an
-explicit incomplete-response signal. A capped private-auction or private-deal
-surface with observed rows currently fails compact projection closed because
-the native producer reports that state as partial rather than attention
-required; projection does not silently change the native decision contract.
+Normal yield-group evidence must include a usable total result count. A missing,
+unparseable, or inconsistent total is explicit sample-only evidence and cannot
+support a complete targeting claim. A capped private-auction or private-deal
+surface with observed rows preserves both facts: the observed rows require
+attention, while the cap also keeps absence/presence certainty partial.
+Evidence receipts encode that dual state as `partial_blocked`; `complete_blocked`
+is reserved for a confirmed target exposure with complete exposed-API proof.
+The producer contract version is `gam-evidence-producer-v3`.
 
 The projection contract is visible at `data.result_projection`.
 `source_result_fingerprint` is an audit link to the full producer result, while

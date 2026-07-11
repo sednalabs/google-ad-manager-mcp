@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 
 use crate::{AdManagerError, contract, fingerprint::stable_fingerprint};
 
-pub(crate) const EVIDENCE_PRODUCER_CONTRACT_VERSION: &str = "gam-evidence-producer-v2";
+pub(crate) const EVIDENCE_PRODUCER_CONTRACT_VERSION: &str = "gam-evidence-producer-v3";
 pub(crate) const MAX_EVIDENCE_TARGETS: usize = 10;
 pub(crate) const MAX_CONTRACT_ENVELOPE_BYTES: usize = 8 * 1024;
 pub(crate) const MAX_RMCP_TRANSPORT_BYTES: usize = 20 * 1024;
@@ -33,6 +33,7 @@ impl EvidenceSource {
 pub(crate) enum EvidenceState {
     CompleteClear,
     CompleteBlocked,
+    PartialBlocked,
     PartialCapped,
     BlockedPermission,
     BlockedRead,
@@ -45,6 +46,7 @@ impl EvidenceState {
         match self {
             Self::CompleteClear => "complete_clear",
             Self::CompleteBlocked => "complete_blocked",
+            Self::PartialBlocked => "partial_blocked",
             Self::PartialCapped => "partial_capped",
             Self::BlockedPermission => "blocked_permission",
             Self::BlockedRead => "blocked_read",
@@ -140,7 +142,13 @@ pub(crate) fn exact_resource_id_from_name(
 
 pub(crate) fn dependency_evidence_state(decision: &str, response: &Value) -> EvidenceState {
     match decision {
-        "dependencies_found" => EvidenceState::CompleteBlocked,
+        "dependencies_found" => {
+            if dependency_receipt_proof_incomplete(response) {
+                EvidenceState::PartialBlocked
+            } else {
+                EvidenceState::CompleteBlocked
+            }
+        }
         "no_dependencies_observed" => EvidenceState::CompleteClear,
         "incomplete_no_dependencies_observed" | "missing_or_ambiguous_targets" => {
             EvidenceState::PartialCapped
@@ -148,6 +156,23 @@ pub(crate) fn dependency_evidence_state(decision: &str, response: &Value) -> Evi
         "blocked" => blocked_evidence_state(response),
         _ => EvidenceState::NotRun,
     }
+}
+
+fn dependency_receipt_proof_incomplete(response: &Value) -> bool {
+    if response
+        .get("target_resolution_issues")
+        .and_then(Value::as_array)
+        .is_some_and(|issues| !issues.is_empty())
+    {
+        return true;
+    }
+    let Some(placements) = response.get("placements") else {
+        return true;
+    };
+    let Some(line_items) = response.get("line_items") else {
+        return true;
+    };
+    dependency_proof_incomplete(placements, line_items)
 }
 
 pub(crate) fn dependency_probe_decision(
@@ -200,7 +225,7 @@ fn dependency_proof_incomplete(placement_summary: &Value, line_item_summary: &Va
 }
 
 pub(crate) fn exchange_evidence_state(response: &Value) -> EvidenceState {
-    let target_exposed = response
+    let confirmed_target_exposure = response
         .get("ad_units")
         .and_then(Value::as_array)
         .into_iter()
@@ -211,10 +236,6 @@ pub(crate) fn exchange_evidence_state(response: &Value) -> EvidenceState {
             .and_then(|value| value.get("decision"))
             .and_then(Value::as_str)
             == Some("targeted_exposed");
-    if target_exposed {
-        return EvidenceState::CompleteBlocked;
-    }
-
     let blocked = [
         "private_auctions",
         "private_auction_deals",
@@ -229,20 +250,7 @@ pub(crate) fn exchange_evidence_state(response: &Value) -> EvidenceState {
             .and_then(Value::as_str)
             == Some("blocked")
     });
-    if blocked {
-        return blocked_evidence_state(response);
-    }
-
-    let yield_group_activity_unknown = response.get("yield_groups").is_some_and(|yield_groups| {
-        yield_groups.get("decision").and_then(Value::as_str) == Some("targeted_activity_unknown")
-            || yield_groups
-                .get("targeted_activity_unknown")
-                .and_then(Value::as_array)
-                .is_some_and(|matches| !matches.is_empty())
-    });
-    if yield_group_activity_unknown {
-        return EvidenceState::PartialCapped;
-    }
+    let yield_group_activity_unknown = exchange_yield_activity_unknown(response);
 
     let api_complete = response
         .get("certainty")
@@ -257,11 +265,51 @@ pub(crate) fn exchange_evidence_state(response: &Value) -> EvidenceState {
             .into_iter()
             .all(|field| certainty.get(field).and_then(Value::as_bool) == Some(true))
         });
+    let private_market_attention = ["private_auctions", "private_auction_deals"]
+        .into_iter()
+        .any(|surface| {
+            response
+                .get(surface)
+                .and_then(|value| value.get("row_count_in_page"))
+                .and_then(Value::as_u64)
+                .is_some_and(|count| count > 0)
+        });
+    if confirmed_target_exposure {
+        return if api_complete && !yield_group_activity_unknown && !blocked {
+            EvidenceState::CompleteBlocked
+        } else {
+            EvidenceState::PartialBlocked
+        };
+    }
+    if private_market_attention {
+        return EvidenceState::PartialBlocked;
+    }
+    if blocked {
+        return blocked_evidence_state(response);
+    }
+    if yield_group_activity_unknown {
+        return EvidenceState::PartialCapped;
+    }
     if api_complete {
         EvidenceState::ManualUiProofRequired
     } else {
         EvidenceState::PartialCapped
     }
+}
+
+fn exchange_yield_activity_unknown(response: &Value) -> bool {
+    response.get("yield_groups").is_some_and(|yield_groups| {
+        yield_groups.get("decision").and_then(Value::as_str) == Some("targeted_activity_unknown")
+            || yield_groups
+                .get("targeted_activity_unknown")
+                .and_then(Value::as_array)
+                .is_some_and(|matches| !matches.is_empty())
+            || yield_groups
+                .get("targeting_class_counts")
+                .and_then(|counts| counts.get("targeted_activity_unknown"))
+                .and_then(Value::as_u64)
+                .is_some_and(|count| count > 0)
+    })
 }
 
 fn exact_target_row(row: &Value, network_code: &str) -> bool {
@@ -452,7 +500,7 @@ mod tests {
 
         assert_eq!(receipt["network_code"], "1234567");
         assert_eq!(receipt["source"], "dependency_probe");
-        assert_eq!(receipt["source_version"], "gam-evidence-producer-v2");
+        assert_eq!(receipt["source_version"], "gam-evidence-producer-v3");
         assert_eq!(
             receipt["source_version"],
             EVIDENCE_PRODUCER_CONTRACT_VERSION
@@ -522,7 +570,29 @@ mod tests {
     fn shared_evidence_state_preserves_block_and_completeness_policy() {
         assert_eq!(
             dependency_evidence_state("dependencies_found", &json!({})),
+            EvidenceState::PartialBlocked
+        );
+        assert_eq!(
+            dependency_evidence_state(
+                "dependencies_found",
+                &json!({
+                    "target_resolution_issues": [],
+                    "placements": {"proof_state": "complete_for_page"},
+                    "line_items": {"proof_state": "complete"}
+                })
+            ),
             EvidenceState::CompleteBlocked
+        );
+        assert_eq!(
+            dependency_evidence_state(
+                "dependencies_found",
+                &json!({
+                    "target_resolution_issues": [],
+                    "placements": {"proof_state": "complete_for_page"},
+                    "line_items": {"proof_state": "blocked"}
+                })
+            ),
+            EvidenceState::PartialBlocked
         );
         assert_eq!(
             dependency_evidence_state(
@@ -546,6 +616,48 @@ mod tests {
                 }
             })),
             EvidenceState::ManualUiProofRequired
+        );
+
+        let partial_private_market = json!({
+            "ad_units": [{"decision": "clear_on_exposed_flags"}],
+            "private_auctions": {"proof_state": "sample_only", "row_count_in_page": 1},
+            "private_auction_deals": {"proof_state": "complete_empty", "row_count_in_page": 0},
+            "yield_groups": {"proof_state": "complete", "decision": "no_target_matches"},
+            "rest_discovery": {"proof_state": "metadata_read"},
+            "certainty": {
+                "can_prove_requested_ad_unit_flags": true,
+                "can_prove_private_auction_absence_or_presence": false,
+                "can_prove_private_deal_absence_or_presence": true,
+                "can_prove_yield_group_targeting": true
+            }
+        });
+        assert_eq!(
+            exchange_evidence_state(&partial_private_market),
+            EvidenceState::PartialBlocked
+        );
+
+        let mut complete_target_exposure = json!({
+            "ad_units": [{"decision": "attention_required"}],
+            "private_auctions": {"proof_state": "complete_empty", "row_count_in_page": 0},
+            "private_auction_deals": {"proof_state": "complete_empty", "row_count_in_page": 0},
+            "yield_groups": {"proof_state": "complete", "decision": "no_target_matches"},
+            "rest_discovery": {"proof_state": "metadata_read"},
+            "certainty": {
+                "can_prove_requested_ad_unit_flags": true,
+                "can_prove_private_auction_absence_or_presence": true,
+                "can_prove_private_deal_absence_or_presence": true,
+                "can_prove_yield_group_targeting": true
+            }
+        });
+        assert_eq!(
+            exchange_evidence_state(&complete_target_exposure),
+            EvidenceState::CompleteBlocked
+        );
+
+        complete_target_exposure["certainty"]["can_prove_yield_group_targeting"] = json!(false);
+        assert_eq!(
+            exchange_evidence_state(&complete_target_exposure),
+            EvidenceState::PartialBlocked
         );
     }
 

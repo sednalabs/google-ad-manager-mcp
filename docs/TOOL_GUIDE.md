@@ -94,7 +94,7 @@ adds authoritative coverage. Do not interpret their absence from the probe as
 proof that those settings are clean in the GAM UI. The response includes a
 stable `result_fingerprint`. For one to ten exact targets resolved to resource
 names in the requested network, it also includes a canonical receipt template
-with `source_version=gam-evidence-producer-v2`. Complete API proof remains
+with `source_version=gam-evidence-producer-v3`. Complete API proof remains
 `manual_ui_proof_required` until the unsupported GAM UI surfaces are reviewed.
 Unknown yield-group activity remains partial. Probe network codes are
 canonicalized once, and foreign-network or malformed resource rows cannot
@@ -102,6 +102,18 @@ contribute targets or exposure decisions. Nested ancestor identities use the
 same network and canonical-ID rule; malformed hierarchy data makes the proof
 partial instead of being treated as a clear hierarchy read. Invalid SOAP API
 versions fail input validation before any provider read.
+
+Observed private-auction or private-deal rows require attention even when the
+REST page is capped; the cap separately keeps certainty partial. Yield-group
+proof is complete only when the SOAP response supplies a usable total matching
+the inspected result set. Missing, malformed, or inconsistent totals remain
+sample-only evidence.
+
+Receipt state `partial_blocked` means the producer observed a stop condition
+while one or more exposed-API surfaces remained incomplete. It prevents a
+retirement consumer from losing either half of that evidence. State
+`complete_blocked` is reserved for confirmed target exposure with complete
+exposed-API proof.
 
 Small results keep the native response shape. If the full response would exceed
 the Contract V1 or RMCP transport limit, the adapter returns a validated compact
@@ -148,15 +160,19 @@ not authoritative totals. Consumers must use `request_id_count` and
 `response_times_truncated`, and honor `transport_metadata_sample_limit`. A
 sample is complete only when its truncation flag is false and its length equals
 the corresponding count. Results using this sampling contract identify
-`source_version=gam-evidence-producer-v2`; consumers that only understand v1
-must reject the result rather than treat a prefix sample as complete. Generated
-and `not_generated` receipt templates both expose this producer version.
+`source_version=gam-evidence-producer-v3`; consumers that only understand older
+producer versions must reject the result rather than treat a prefix sample as
+complete. Generated and `not_generated` receipt templates both expose this
+producer version.
 
 The response uses `dependency_decision` plus `proof_flags`, not a cleanup
 approval. Any capped line-item read, truncated SOAP response, id-only target,
 unknown placement membership shape, or blocked SOAP scope remains incomplete
 evidence. Do not archive, deactivate, or retarget inventory solely because this
 tool returns `no_dependencies_observed` or `incomplete_no_dependencies_observed`.
+When a dependency is observed during an incomplete scan, the v3 receipt uses
+`partial_blocked`; `complete_blocked` requires complete placement and line-item
+proof.
 The response includes a stable `result_fingerprint` and emits the same
 versioned receipt template only for one to ten fully resolved, exact,
 network-bound target rows. Unresolved, ambiguous, id-only, or cross-network
