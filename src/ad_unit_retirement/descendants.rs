@@ -307,7 +307,10 @@ impl DescendantScan {
                 self.issues.insert("catalog_child_flag_mismatch");
             }
             if self.target_ids.contains(id)
-                && self.expected_has_children.get(id).copied() != row.has_children
+                && self
+                    .expected_has_children
+                    .get(id)
+                    .is_some_and(|expected| Some(*expected) != row.has_children)
             {
                 self.issues.insert("identity_catalog_child_flag_mismatch");
             }
@@ -527,7 +530,11 @@ fn ancestor_ids(
     network_code: &str,
     direct_parent_id: Option<&str>,
 ) -> Result<Vec<String>, ()> {
-    let entries = parent_path.and_then(Value::as_array).ok_or(())?;
+    let entries = match parent_path {
+        None | Some(Value::Null) if direct_parent_id.is_none() => return Ok(Vec::new()),
+        Some(value) => value.as_array().ok_or(())?,
+        None => return Err(()),
+    };
     let mut ids = Vec::with_capacity(entries.len());
     let mut seen = BTreeSet::new();
     for entry in entries {

@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use serde_json::json;
+use serde_json::{Value, json};
 
 use super::descendants::*;
 use super::inventory::*;
@@ -485,6 +485,43 @@ fn hierarchy_scan_requires_one_root_and_reconciles_target_parent_identity() {
             .any(|issue| issue == "identity_catalog_parent_mismatch")
     }));
     assert_eq!(summary["proof_state"], "partial_capped");
+}
+
+#[test]
+fn root_catalog_rows_may_omit_or_null_parent_path() {
+    for parent_path in [None, Some(Value::Null)] {
+        let mut row = catalog_row("200", None, false, "ACTIVE");
+        let object = row.as_object_mut().expect("catalog row object");
+        match &parent_path {
+            Some(value) => {
+                object.insert("parentPath".to_string(), value.clone());
+            }
+            None => {
+                object.remove("parentPath");
+            }
+        }
+        let mut scan = DescendantScan::new(
+            "1234567",
+            &["200".to_string()],
+            &child_claims(&[("200", false)]),
+            100,
+        );
+        let page = json!({"adUnits":[row]});
+        scan.consume_page(&page, page.to_string().len());
+        let summary = scan.finish(100);
+        assert_eq!(summary["proof_state"], "complete_clear");
+        assert_eq!(summary["issues"], json!([]));
+    }
+}
+
+#[test]
+fn unavailable_identity_child_flag_does_not_create_a_false_mismatch() {
+    let mut scan = DescendantScan::new("1234567", &["200".to_string()], &BTreeMap::new(), 100);
+    let page = json!({"adUnits":[catalog_row("200", None, false, "ACTIVE")]});
+    scan.consume_page(&page, page.to_string().len());
+    let summary = scan.finish(100);
+    assert_eq!(summary["proof_state"], "complete_clear");
+    assert_eq!(summary["issues"], json!([]));
 }
 
 #[test]
