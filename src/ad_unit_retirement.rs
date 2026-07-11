@@ -15,7 +15,10 @@ use crate::{AdManagerError, fingerprint::stable_fingerprint};
 
 use descendants::{DescendantScanInput, scan_descendants_with_reader, scoped_numeric_id};
 use inventory::{blocked_identity, summarize_identities, summarize_identity, validate_targets};
-use receipt::{RetirementEvidenceReceipt, current_unix_seconds, grade_evidence_bundle};
+use receipt::{
+    RetirementEvidenceReceipt, current_unix_seconds, grade_evidence_bundle,
+    validate_evidence_bundle_structure,
+};
 
 pub(crate) use descendants::MAX_DESCENDANT_PAGE_BYTES;
 
@@ -81,12 +84,7 @@ where
         .iter()
         .map(|target| target.ad_unit_id.clone())
         .collect::<Vec<_>>();
-    let evidence = grade_evidence_bundle(
-        &args.evidence,
-        &network_code,
-        &target_ids,
-        current_unix_seconds()?,
-    )?;
+    validate_evidence_bundle_structure(&args.evidence)?;
 
     let (network_result, network_request_attempted) = read_network(network_code.clone()).await;
     let effective_root_id = network_result
@@ -156,6 +154,12 @@ where
         read_ad_unit_page,
     )
     .await;
+    let evidence = grade_evidence_bundle(
+        &args.evidence,
+        &network_code,
+        &target_ids,
+        current_unix_seconds()?,
+    )?;
     build_preflight_response(
         network_code,
         target_ids,
@@ -198,7 +202,14 @@ fn build_preflight_response(
 ) -> Result<Value, AdManagerError> {
     let target_count = target_ids.len();
     let assessment_fingerprint = stable_fingerprint(
-        &json!({"identity":&identity,"descendants":&descendants,"evidence":&evidence}).to_string(),
+        &json!({
+            "network_code":&network_code,
+            "target_ad_unit_ids":&target_ids,
+            "identity":&identity,
+            "descendants":&descendants,
+            "evidence":&evidence
+        })
+        .to_string(),
     );
     let total_request_attempted_count = provider_requests.identity_attempted_count
         + provider_requests.network_attempted_count

@@ -561,7 +561,7 @@ impl AdManagerServer {
                     "Call gam_network_catalog_list for ad_units, orders, line_items, placements, private_auctions, private_auction_deals, or reports.",
                     "Call gam_exchange_protection_probe when you need explicit partial-proof states for Exchange, private auction, private deal, or yield-group exposure.",
                     "Call gam_ad_unit_dependency_probe before ad-unit cleanup, archive, or retargeting work so placement and line-item dependencies are explicit.",
-                    "Call gam_ad_unit_retirement_assessment to bind one to ten exact canonical ad-unit ids to current REST identity and a bounded ordered hierarchy/descendant scan. External evidence grading and recommendations remain explicitly not_run in the current stage.",
+                    "Call gam_ad_unit_retirement_assessment to bind one to ten exact canonical ad-unit ids to current REST identity and a bounded ordered hierarchy/descendant scan, then grade optional freshness-bound evidence receipts. The final recommendation remains explicitly not_run in the current stage.",
                     "Call gam_report_run for saved reports and gam_report_result_rows for large paginated results.",
                     "Call gam_trafficking_tool_matrix before planning writes so the REST and SOAP trafficking surfaces are explicit.",
                     "Use gam_rest_write_plan for dry-run write plans; gam_rest_write_apply only works when the server is explicitly started with GOOGLE_AD_MANAGER_MCP_WRITE_MODE=enabled and the manage scope.",

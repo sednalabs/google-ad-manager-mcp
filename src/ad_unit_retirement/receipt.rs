@@ -5,7 +5,10 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::evidence::{EVIDENCE_PRODUCER_CONTRACT_VERSION, EvidenceSource, EvidenceState};
+use crate::evidence::{
+    DEFAULT_EVIDENCE_TTL_SECONDS, EVIDENCE_PRODUCER_CONTRACT_VERSION, EvidenceSource,
+    EvidenceState, valid_result_hash as valid_producer_result_hash,
+};
 use crate::{AdManagerError, fingerprint::stable_fingerprint};
 
 use super::inventory::validate_canonical_positive_id;
@@ -26,6 +29,7 @@ struct RetirementEvidenceHashSchema(
 struct RetirementEvidenceNoteSchema(#[schemars(length(max = 500))] String);
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct RetirementEvidenceReceipt {
     /// Network code covered by this evidence receipt.
     #[schemars(
@@ -48,6 +52,7 @@ pub(crate) struct RetirementEvidenceReceipt {
     /// Unix epoch seconds when the source proof completed.
     pub observed_at_unix_seconds: Option<u64>,
     /// Maximum age accepted for this proof. Maximum 31 days.
+    #[schemars(range(min = 1, max = 2678400))]
     pub ttl_seconds: Option<u64>,
     /// Exact canonical ad-unit ids covered by the source proof.
     #[schemars(with = "Vec<RetirementAdUnitIdSchema>", length(min = 1, max = 10))]
@@ -82,31 +87,38 @@ pub(super) fn grade_evidence_bundle(
     target_ids: &[String],
     now: u64,
 ) -> Result<Value, AdManagerError> {
+    validate_evidence_bundle_structure(receipts)?;
+    let receipt_for =
+        |source: EvidenceSource| receipts.iter().find(|receipt| receipt.source == source);
+    Ok(json!({
+        "dependency": grade_evidence("dependency", EvidenceSource::DependencyProbe, receipt_for(EvidenceSource::DependencyProbe), network_code, target_ids, now, false)?,
+        "delivery": grade_evidence("delivery", EvidenceSource::DeliveryReport, receipt_for(EvidenceSource::DeliveryReport), network_code, target_ids, now, false)?,
+        "exchange_protection": grade_evidence("exchange_protection", EvidenceSource::ExchangeProtectionReview, receipt_for(EvidenceSource::ExchangeProtectionReview), network_code, target_ids, now, true)?,
+        "site_contract": grade_evidence("site_contract", EvidenceSource::SiteContract, receipt_for(EvidenceSource::SiteContract), network_code, target_ids, now, false)?,
+        "telemetry": grade_evidence("telemetry", EvidenceSource::Telemetry, receipt_for(EvidenceSource::Telemetry), network_code, target_ids, now, false)?,
+    }))
+}
+
+pub(super) fn validate_evidence_bundle_structure(
+    receipts: &[RetirementEvidenceReceipt],
+) -> Result<(), AdManagerError> {
     if receipts.len() > 5 {
         return Err(AdManagerError::invalid(
             "evidence",
             "must contain at most one receipt for each of the five evidence sources",
         ));
     }
-    let receipt_for =
-        |source: EvidenceSource| -> Result<Option<&RetirementEvidenceReceipt>, AdManagerError> {
-            let mut matches = receipts.iter().filter(|receipt| receipt.source == source);
-            let first = matches.next();
-            if matches.next().is_some() {
-                return Err(AdManagerError::invalid(
-                    "evidence",
-                    format!("contains duplicate {} receipts", source.as_str()),
-                ));
-            }
-            Ok(first)
-        };
-    Ok(json!({
-        "dependency": grade_evidence("dependency", EvidenceSource::DependencyProbe, receipt_for(EvidenceSource::DependencyProbe)?, network_code, target_ids, now, false)?,
-        "delivery": grade_evidence("delivery", EvidenceSource::DeliveryReport, receipt_for(EvidenceSource::DeliveryReport)?, network_code, target_ids, now, false)?,
-        "exchange_protection": grade_evidence("exchange_protection", EvidenceSource::ExchangeProtectionReview, receipt_for(EvidenceSource::ExchangeProtectionReview)?, network_code, target_ids, now, true)?,
-        "site_contract": grade_evidence("site_contract", EvidenceSource::SiteContract, receipt_for(EvidenceSource::SiteContract)?, network_code, target_ids, now, false)?,
-        "telemetry": grade_evidence("telemetry", EvidenceSource::Telemetry, receipt_for(EvidenceSource::Telemetry)?, network_code, target_ids, now, false)?,
-    }))
+    let mut sources = BTreeSet::new();
+    for receipt in receipts {
+        validate_note(receipt.note.as_deref())?;
+        if !sources.insert(receipt.source.as_str()) {
+            return Err(AdManagerError::invalid(
+                "evidence",
+                format!("contains duplicate {} receipts", receipt.source.as_str()),
+            ));
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn grade_evidence(
@@ -127,7 +139,6 @@ pub(super) fn grade_evidence(
             "reason": "no evidence receipt was supplied",
         }));
     };
-    validate_note(receipt.note.as_deref())?;
     if matches!(receipt.state, EvidenceState::NotRun) {
         return Ok(json!({
             "surface": surface,
@@ -152,13 +163,27 @@ pub(super) fn grade_evidence(
         && supported_source_version(receipt.source, &receipt.source_version);
     let safe_source_version = version_valid.then(|| receipt.source_version.clone());
     let targets_match = receipt_ids.as_ref() == Some(&expected_ids);
+    let producer_contract = matches!(
+        receipt.source,
+        EvidenceSource::DependencyProbe | EvidenceSource::ExchangeProtectionReview
+    );
     let safe_result_hash = receipt.result_hash.as_deref().and_then(|value| {
-        (valid_evidence_hash(value) && value == value.trim()).then(|| value.to_string())
+        let valid = if producer_contract {
+            valid_producer_result_hash(value)
+        } else {
+            valid_evidence_hash(value) && value == value.trim()
+        };
+        valid.then(|| value.to_string())
     });
     let hash_valid = safe_result_hash.is_some();
-    let ttl_valid = receipt
-        .ttl_seconds
-        .is_some_and(|ttl| ttl > 0 && ttl <= EVIDENCE_MAX_TTL_SECONDS);
+    let ttl_valid = if producer_contract {
+        receipt.ttl_seconds == Some(DEFAULT_EVIDENCE_TTL_SECONDS)
+    } else {
+        receipt
+            .ttl_seconds
+            .is_some_and(|ttl| ttl > 0 && ttl <= EVIDENCE_MAX_TTL_SECONDS)
+    };
+    let state_valid = valid_source_state(receipt.source, receipt.state);
     let observed = receipt.observed_at_unix_seconds;
     let timestamp_valid =
         observed.is_some_and(|value| value <= now.saturating_add(EVIDENCE_FUTURE_SKEW_SECONDS));
@@ -179,6 +204,7 @@ pub(super) fn grade_evidence(
     let structurally_complete = network_matches
         && source_matches
         && version_valid
+        && state_valid
         && targets_match
         && hash_valid
         && ttl_valid
@@ -189,6 +215,7 @@ pub(super) fn grade_evidence(
         (network_matches, "network"),
         (source_matches, "source"),
         (version_valid, "source_version"),
+        (state_valid, "source_state"),
         (targets_match, "targets"),
         (hash_valid, "result_hash"),
         (ttl_valid, "ttl"),
@@ -203,7 +230,7 @@ pub(super) fn grade_evidence(
     let (state, reason) = if !structurally_complete {
         (
             "invalid_binding",
-            "the receipt has a network, source, version, target, hash, timestamp, activity-window, or TTL mismatch",
+            "the receipt has a network, source, version, state, target, hash, timestamp, activity-window, or TTL mismatch",
         )
     } else if stale {
         (
@@ -224,14 +251,6 @@ pub(super) fn grade_evidence(
                 "the required GAM UI-only protection review has not been recorded",
             )
         }
-    } else if manual_ui_required_for_clear
-        && matches!(receipt.state, EvidenceState::CompleteClear)
-        && !receipt.manual_ui_proof_included
-    {
-        (
-            "manual_ui_proof_required",
-            "API proof alone cannot clear GAM protections, inventory rules, and unified pricing surfaces",
-        )
     } else {
         (
             receipt.state.as_str(),
@@ -245,10 +264,7 @@ pub(super) fn grade_evidence(
             EvidenceState::CompleteClear | EvidenceState::CompleteBlocked
         ) || (manual_ui_required_for_clear
             && matches!(receipt.state, EvidenceState::ManualUiProofRequired)
-            && receipt.manual_ui_proof_included))
-        && !(manual_ui_required_for_clear
-            && matches!(receipt.state, EvidenceState::CompleteClear)
-            && !receipt.manual_ui_proof_included);
+            && receipt.manual_ui_proof_included));
     let receipt_binding = json!({
         "network_code": canonical_receipt_network,
         "source": receipt.source.as_str(),
@@ -320,6 +336,34 @@ fn supported_source_version(source: EvidenceSource, value: &str) -> bool {
         EvidenceSource::DeliveryReport => value == "gam-report-v1",
         EvidenceSource::SiteContract => value == "site-contract-v1",
         EvidenceSource::Telemetry => value == "telemetry-v1",
+    }
+}
+
+fn valid_source_state(source: EvidenceSource, state: EvidenceState) -> bool {
+    match source {
+        EvidenceSource::DependencyProbe => matches!(
+            state,
+            EvidenceState::CompleteClear
+                | EvidenceState::CompleteBlocked
+                | EvidenceState::PartialBlocked
+                | EvidenceState::PartialCapped
+                | EvidenceState::BlockedPermission
+                | EvidenceState::BlockedRead
+                | EvidenceState::NotRun
+        ),
+        EvidenceSource::ExchangeProtectionReview => matches!(
+            state,
+            EvidenceState::CompleteBlocked
+                | EvidenceState::PartialBlocked
+                | EvidenceState::PartialCapped
+                | EvidenceState::BlockedPermission
+                | EvidenceState::BlockedRead
+                | EvidenceState::ManualUiProofRequired
+                | EvidenceState::NotRun
+        ),
+        EvidenceSource::DeliveryReport
+        | EvidenceSource::SiteContract
+        | EvidenceSource::Telemetry => !matches!(state, EvidenceState::ManualUiProofRequired),
     }
 }
 

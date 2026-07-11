@@ -44,7 +44,17 @@ fn receipt(
         }
         .to_string(),
         state,
-        result_hash: Some("sha256:0123456789abcdef".to_string()),
+        result_hash: Some(
+            if matches!(
+                source,
+                EvidenceSource::DependencyProbe | EvidenceSource::ExchangeProtectionReview
+            ) {
+                "0123456789abcdef"
+            } else {
+                "sha256:0123456789abcdef"
+            }
+            .to_string(),
+        ),
         observed_at_unix_seconds: Some(observed_at),
         ttl_seconds: Some(3_600),
         target_ad_unit_ids: vec!["200".to_string()],
@@ -157,6 +167,78 @@ fn evidence_rejects_unknown_versions_without_echoing_unbounded_enums() {
 }
 
 #[test]
+fn producer_v3_receipts_enforce_hash_ttl_and_source_state_contracts() {
+    let mut dependency = receipt(
+        EvidenceSource::DependencyProbe,
+        EvidenceState::CompleteClear,
+        3_999_900,
+    );
+    dependency.result_hash = Some("sha256:0123456789abcdef".to_string());
+    let bad_hash = grade_evidence(
+        "dependency",
+        EvidenceSource::DependencyProbe,
+        Some(&dependency),
+        "1234567",
+        &["200".to_string()],
+        4_000_000,
+        false,
+    )
+    .expect("producer hash mismatch grades fail-closed");
+    assert_eq!(bad_hash["state"], "invalid_binding");
+    assert!(bad_hash["binding_errors"].as_array().is_some_and(|errors| {
+        errors
+            .iter()
+            .any(|error| error.as_str() == Some("result_hash"))
+    }));
+
+    dependency.result_hash = Some("0123456789abcdef".to_string());
+    dependency.ttl_seconds = Some(7_200);
+    let bad_ttl = grade_evidence(
+        "dependency",
+        EvidenceSource::DependencyProbe,
+        Some(&dependency),
+        "1234567",
+        &["200".to_string()],
+        4_000_000,
+        false,
+    )
+    .expect("producer TTL mismatch grades fail-closed");
+    assert_eq!(bad_ttl["state"], "invalid_binding");
+    assert!(
+        bad_ttl["binding_errors"]
+            .as_array()
+            .is_some_and(|errors| { errors.iter().any(|error| error.as_str() == Some("ttl")) })
+    );
+
+    let mut protection = receipt(
+        EvidenceSource::ExchangeProtectionReview,
+        EvidenceState::CompleteClear,
+        3_999_900,
+    );
+    protection.manual_ui_proof_included = true;
+    let impossible_state = grade_evidence(
+        "exchange_protection",
+        EvidenceSource::ExchangeProtectionReview,
+        Some(&protection),
+        "1234567",
+        &["200".to_string()],
+        4_000_000,
+        true,
+    )
+    .expect("source-impossible state grades fail-closed");
+    assert_eq!(impossible_state["state"], "invalid_binding");
+    assert!(
+        impossible_state["binding_errors"]
+            .as_array()
+            .is_some_and(|errors| {
+                errors
+                    .iter()
+                    .any(|error| error.as_str() == Some("source_state"))
+            })
+    );
+}
+
+#[test]
 fn receipt_target_ids_are_required_and_partial_blockers_remain_incomplete() {
     let payload = json!({
         "network_code":"1234567",
@@ -172,6 +254,23 @@ fn receipt_target_ids_are_required_and_partial_blockers_remain_incomplete() {
         "note":null
     });
     assert!(serde_json::from_value::<RetirementEvidenceReceipt>(payload).is_err());
+
+    let raw_payload = json!({
+        "network_code":"1234567",
+        "source":"dependency_probe",
+        "source_version":EVIDENCE_PRODUCER_CONTRACT_VERSION,
+        "state":"complete_clear",
+        "result_hash":"0123456789abcdef",
+        "observed_at_unix_seconds":3_999_900,
+        "ttl_seconds":3_600,
+        "target_ad_unit_ids":["200"],
+        "window_start_unix_seconds":null,
+        "window_end_unix_seconds":null,
+        "manual_ui_proof_included":false,
+        "note":null,
+        "raw_report":{"rows":[{"sensitive":"payload"}]}
+    });
+    assert!(serde_json::from_value::<RetirementEvidenceReceipt>(raw_payload).is_err());
 
     let partial = receipt(
         EvidenceSource::DependencyProbe,
@@ -329,6 +428,94 @@ async fn invalid_evidence_fails_before_any_provider_request() {
         )
         .await;
     assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn evidence_freshness_is_rechecked_after_provider_reads() {
+    let observed_at = current_unix_seconds().expect("current time");
+    let mut delivery = receipt(
+        EvidenceSource::DeliveryReport,
+        EvidenceState::CompleteClear,
+        observed_at,
+    );
+    delivery.ttl_seconds = Some(1);
+    let mut assessment_args = args("1234567", &["200"]);
+    assessment_args.evidence = vec![delivery];
+
+    let response = assess_ad_unit_retirement_with_readers(
+        &assessment_args,
+        |_network_code| async move { (Ok(network_row("100")), true) },
+        |_network_code, resource_name| async move {
+            if resource_name == "networks/1234567/adUnits/100" {
+                return (Ok(effective_root_row("100", "50")), true);
+            }
+            (
+                Ok(json!({
+                    "name":resource_name,
+                    "adUnitCode":"fixture_unit",
+                    "status":"ACTIVE",
+                    "adUnitSizes":[],
+                    "parentAdUnit":"networks/1234567/adUnits/100",
+                    "hasChildren":false,
+                    "updateTime":"2026-07-10T00:00:00Z"
+                })),
+                true,
+            )
+        },
+        |_network_code, _page_size, _page_token| async move {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            let payload = json!({"adUnits":[
+                catalog_row("50", None, true, "ACTIVE"),
+                catalog_row("100", Some("50"), true, "ACTIVE"),
+                catalog_row("200", Some("100"), false, "ACTIVE")
+            ]});
+            let bytes = payload.to_string().len();
+            (Ok((payload, bytes)), true)
+        },
+    )
+    .await
+    .expect("assessment returns stale grading");
+    assert_eq!(response["evidence"]["delivery"]["state"], "stale");
+    assert_eq!(
+        response["evidence"]["delivery"]["complete_for_summary"],
+        false
+    );
+}
+
+#[test]
+fn assessment_fingerprint_is_network_and_target_bound() {
+    let identity = json!({"proof_state":"complete_clear","result_fingerprint":"identity"});
+    let descendants =
+        json!({"proof_state":"complete_clear","descendant_result_fingerprint":"descendants"});
+    let evidence = json!({"dependency":{"state":"not_run"}});
+    let build = |network_code: &str, target_id: &str| {
+        build_preflight_response(
+            network_code.to_string(),
+            vec![target_id.to_string()],
+            identity.clone(),
+            descendants.clone(),
+            evidence.clone(),
+            ProviderRequestSummary {
+                network_attempted_count: 1,
+                effective_root_attempted_count: 1,
+                identity_attempted_count: 1,
+                descendant_page_attempted_count: 1,
+            },
+            HierarchyScanConfig {
+                page_size: 100,
+                max_ad_units: 100,
+            },
+        )
+        .expect("bounded assessment")
+    };
+    assert_ne!(
+        build("1234567", "200")["assessment_fingerprint"],
+        build("7654321", "200")["assessment_fingerprint"]
+    );
+    assert_ne!(
+        build("1234567", "200")["assessment_fingerprint"],
+        build("1234567", "201")["assessment_fingerprint"]
+    );
 }
 
 fn child_claims(values: &[(&str, bool)]) -> BTreeMap<String, bool> {

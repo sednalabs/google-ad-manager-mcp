@@ -162,6 +162,7 @@
             "type": "string"
           },
           "RetirementEvidenceReceipt": {
+            "additionalProperties": false,
             "properties": {
               "manual_ui_proof_included": {
                 "default": false,
@@ -233,7 +234,8 @@
               "ttl_seconds": {
                 "description": "Maximum age accepted for this proof. Maximum 31 days.",
                 "format": "uint64",
-                "minimum": 0,
+                "maximum": 2678400,
+                "minimum": 1,
                 "type": [
                   "integer",
                   "null"

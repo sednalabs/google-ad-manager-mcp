@@ -218,8 +218,8 @@ the compact result.
 ## `gam_ad_unit_retirement_assessment`
 
 `gam_ad_unit_retirement_assessment` is the staged, read-only retirement review
-surface. The current stage combines exact identity with bounded hierarchy and
-descendant reconciliation. It accepts:
+surface. The current stage combines exact identity, bounded hierarchy and
+descendant reconciliation, and freshness-bound evidence grading. It accepts:
 
 - a canonical positive signed-64-bit numeric `network_code` with no whitespace
   or leading zeroes;
@@ -280,6 +280,14 @@ closed. A protection receipt cannot become clear without
 UI-only. The output exposes bounded grading states and binding fingerprints,
 not raw receipt notes or provider payloads. Receipt provenance is always
 `caller_supplied_unverified`.
+
+Receipts from the built-in dependency and exchange/protection probes must match
+the complete `gam-evidence-producer-v3` contract: a 16-character lowercase
+hexadecimal result fingerprint, the producer's 3600-second TTL, and a state the
+named producer can actually emit. Unknown receipt fields are rejected rather
+than discarded, so callers cannot attach raw reports or telemetry payloads to
+the compact contract. Freshness is evaluated after the live identity and
+hierarchy reads complete.
 
 The `recommendation` surface is intentionally returned as `not_run`. Identity,
 hierarchy, and structurally graded caller-supplied evidence do not yet establish

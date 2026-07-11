@@ -14,7 +14,7 @@ pub(crate) const EVIDENCE_PRODUCER_CONTRACT_VERSION: &str = "gam-evidence-produc
 pub(crate) const MAX_EVIDENCE_TARGETS: usize = 10;
 pub(crate) const MAX_CONTRACT_ENVELOPE_BYTES: usize = 8 * 1024;
 pub(crate) const MAX_RMCP_TRANSPORT_BYTES: usize = 20 * 1024;
-const DEFAULT_EVIDENCE_TTL_SECONDS: u64 = 3_600;
+pub(crate) const DEFAULT_EVIDENCE_TTL_SECONDS: u64 = 3_600;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -506,7 +506,7 @@ fn validate_canonical_numeric_id<'a>(
     }
 }
 
-fn valid_result_hash(value: &str) -> bool {
+pub(crate) fn valid_result_hash(value: &str) -> bool {
     value.len() == 16
         && value
             .bytes()

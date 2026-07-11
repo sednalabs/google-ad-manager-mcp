@@ -98,6 +98,8 @@ an observation timestamp no more than five minutes in the future, and a
 positive TTL no greater than 31 days. Dependency and exchange/protection
 receipts use the current evidence-producer contract version. Delivery,
 site-contract, and telemetry receipts use their explicit V1 contracts.
+Built-in producer receipts must also preserve the producer's exact 16-character
+lowercase hexadecimal fingerprint, 3600-second TTL, and source-possible state.
 Delivery and telemetry additionally require a non-zero activity window of at
 least 30 days whose end does not exceed the observation time. Freshness uses
 the older of the observation and activity-window end.
@@ -109,6 +111,8 @@ Positive partial states remain visible but cannot make the evidence summary
 complete. Exchange/protection clear proof also requires
 `manual_ui_proof_included=true` while relevant protection surfaces remain
 UI-only. Optional notes are bounded, validated, and never echoed.
+Unknown receipt fields are rejected, and freshness is evaluated after all live
+identity and hierarchy reads complete.
 
 Stage 4 does not produce a retirement recommendation. The recommendation stays
 `not_run`, `safe_to_archive_or_retire` stays false, and no mutation is
