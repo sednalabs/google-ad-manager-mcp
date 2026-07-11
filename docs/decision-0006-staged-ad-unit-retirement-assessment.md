@@ -37,6 +37,8 @@ pre-authentication failures from attempted provider reads.
 Ad-unit sizes require the official `BROWSER` or `VIDEO_PLAYER` environment;
 companions are valid only for `VIDEO_PLAYER`. The full size source, including
 tail entries omitted from the compact projection, remains fingerprint-bound.
+A clear identity also requires an official usable status: `ACTIVE`, `INACTIVE`,
+or `ARCHIVED`.
 A batch with a confirmed blocker plus any unread or incomplete target is
 `partial_blocked`; `complete_blocked` requires every other target to be fully
 read as clear or blocked.

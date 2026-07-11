@@ -233,7 +233,9 @@ retained counts, a truncation flag, and a fingerprint over the complete source
 array so environment, companion, and tail changes remain bound even when only
 20 items are returned. Every size must declare the official `BROWSER` or
 `VIDEO_PLAYER` environment; companions are accepted only for `VIDEO_PLAYER`.
-Provider errors are classified without returning provider error text. A
+Status must be one of `ACTIVE`, `INACTIVE`, or `ARCHIVED`; unspecified or
+unknown values keep identity incomplete. Provider errors are classified
+without returning provider error text. A
 missing target or identity mismatch blocks the identity surface; permission
 and pre-authentication failures remain distinct. A confirmed blocker combined
 with any unread or incomplete target is `partial_blocked`, not complete batch

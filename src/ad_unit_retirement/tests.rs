@@ -179,6 +179,26 @@ fn malformed_identity_and_cross_network_parent_never_clear() {
                 .iter()
                 .any(|issue| issue == "ad_unit_size_environment_invalid"))
     );
+
+    let invalid_status = summarize_identity(
+        &target,
+        &json!({
+            "name":"networks/1234567/adUnits/200",
+            "adUnitCode":"fixture_unit",
+            "status":"DELETED",
+            "adUnitSizes":[],
+            "hasChildren":false,
+            "updateTime":"2026-07-10T00:00:00Z"
+        }),
+    );
+    assert_eq!(invalid_status["proof_state"], "not_run");
+    assert!(
+        invalid_status["shape_issues"]
+            .as_array()
+            .is_some_and(|issues| issues
+                .iter()
+                .any(|issue| issue == "status_unknown_or_unspecified"))
+    );
 }
 
 #[test]

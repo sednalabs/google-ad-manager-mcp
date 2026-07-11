@@ -100,6 +100,12 @@ pub(super) fn summarize_identity(target: &RetirementTarget, row: &Value) -> Valu
         .and_then(Value::as_str)
         .map(stable_fingerprint);
     let status = required_bounded_string(row.get("status"), 32, "status", &mut shape_issues);
+    if status
+        .as_str()
+        .is_some_and(|value| !matches!(value, "ACTIVE" | "INACTIVE" | "ARCHIVED"))
+    {
+        shape_issues.push("status_unknown_or_unspecified");
+    }
     let has_children = match row.get("hasChildren").and_then(Value::as_bool) {
         Some(value) => Some(value),
         None => {
