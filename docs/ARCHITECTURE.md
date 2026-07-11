@@ -160,7 +160,12 @@ decision.
 `gam_ad_unit_retirement_assessment` is deliberately staged. The current
 implementation accepts one to ten canonical positive ad-unit ids, calls exact
 REST `adUnits.get` reads, and returns compact current identity plus stable
-fingerprints. Descendant reconciliation, external evidence grading, and the
+fingerprints. It then performs a bounded, byte-capped, strictly ordered REST
+`adUnits.list` scan, reconciles the complete root-to-parent path and child flags
+for every catalog row, reports external descendants, and returns a
+deterministic child-first target order. Malformed pages, pagination drift,
+cross-network paths, catalog gaps, or caps fail closed while already-observed
+positive descendant blockers remain visible. External evidence grading and the
 final recommendation remain explicit `not_run` surfaces. The tool never
 authorizes or applies a GAM mutation.
 

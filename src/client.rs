@@ -706,6 +706,46 @@ impl AdManagerClient {
         .await
     }
 
+    pub(crate) async fn list_ad_units_bounded_with_request_state(
+        &self,
+        network_code: &str,
+        page_size: u32,
+        page_token: Option<String>,
+        max_response_bytes: usize,
+    ) -> (Result<(Value, usize), AdManagerError>, bool) {
+        let network_code = match validate_network_code(network_code) {
+            Ok(value) => value,
+            Err(err) => return (Err(err), false),
+        };
+        let token = match self.access_token().await {
+            Ok(value) => value,
+            Err(err) => return (Err(err), false),
+        };
+        let url = match absolute_api_url(
+            &self.api_base_url,
+            &format!("networks/{network_code}/adUnits"),
+        ) {
+            Ok(value) => value,
+            Err(err) => return (Err(err), false),
+        };
+        let mut query = vec![
+            ("pageSize", page_size.to_string()),
+            ("orderBy", "name".to_string()),
+        ];
+        if let Some(page_token) = non_empty(page_token) {
+            query.push(("pageToken", page_token));
+        }
+        let mut request = self.http.request(Method::GET, url).bearer_auth(token);
+        if let Some(quota_project) = &self.quota_project {
+            request = request.header("x-goog-user-project", quota_project.as_ref());
+        }
+        request = request.query(&query);
+        (
+            self.send_json_bounded(request, max_response_bytes).await,
+            true,
+        )
+    }
+
     pub async fn get_ad_unit(
         &self,
         network_code: &str,
@@ -1156,6 +1196,51 @@ impl AdManagerClient {
         }
 
         Ok(serde_json::from_slice(&bytes)?)
+    }
+
+    async fn send_json_bounded(
+        &self,
+        request: RequestBuilder,
+        max_response_bytes: usize,
+    ) -> Result<(Value, usize), AdManagerError> {
+        let mut response = request.send().await?;
+        let status = response.status();
+        if response
+            .content_length()
+            .is_some_and(|length| length > max_response_bytes as u64)
+        {
+            return Err(AdManagerError::invalid(
+                "upstream_response",
+                format!("response exceeded the {max_response_bytes}-byte hierarchy-page limit"),
+            ));
+        }
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response.chunk().await? {
+            if bytes.len().saturating_add(chunk.len()) > max_response_bytes {
+                return Err(AdManagerError::invalid(
+                    "upstream_response",
+                    format!("response exceeded the {max_response_bytes}-byte hierarchy-page limit"),
+                ));
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        let response_bytes = bytes.len();
+
+        if !status.is_success() {
+            let message = String::from_utf8_lossy(&bytes).trim().to_string();
+            return Err(AdManagerError::UpstreamApi {
+                status: status.as_u16(),
+                message: if message.is_empty() {
+                    "no upstream response body".to_string()
+                } else {
+                    clip_message(message)
+                },
+            });
+        }
+        if bytes.is_empty() {
+            return Ok((Value::Null, 0));
+        }
+        Ok((serde_json::from_slice(&bytes)?, response_bytes))
     }
 
     async fn send_xml(&self, request: RequestBuilder) -> Result<(u16, String), AdManagerError> {

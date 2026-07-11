@@ -11,7 +11,7 @@ later proof surface explicit rather than implying it ran.
 | Workflow | Tool | Class | Inputs | Data source | Proof | Negative cases | Status |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | Resolve exact targets | `gam_ad_unit_retirement_assessment` | read | canonical network and 1-10 canonical exact ad-unit ids | REST `adUnits.get` | compact current identity, exact resource match, stable fingerprints | zero, whitespace, leading zeroes, duplicates, overflow, missing target, identity mismatch, permission or upstream failure | implemented |
-| Reconcile descendants | same | read | bounded hierarchy scan | paginated REST `adUnits.list` | target/list reconciliation and descendant state | cap, pagination drift, sparse or cross-network ancestry | planned Stage 3; returns `not_run` now |
+| Reconcile descendants | same | read | bounded hierarchy scan | paginated REST `adUnits.list` | target/list reconciliation, complete root-to-parent validation, bidirectional child flags, descendant state, and child-first order | byte/row/page cap, pagination or order drift, malformed rows, sparse or cross-network ancestry | implemented |
 | Grade evidence | same | read decisioning | freshness-bound receipts | existing proof tools, reports, site contract, telemetry | source/network/target/version/hash/time binding | stale, capped, blocked, unsupported, duplicate, or mismatched receipts | planned Stage 4; returns `not_run` now |
 | Return recommendation | same | read decisioning | complete identity, hierarchy, and evidence proof | staged assessment | operator-review recommendation only | any incomplete or blocked surface | planned Stage 5; returns `not_run` now |
 | Archive or deactivate | none | mutation | not accepted | none | none | every call | out of scope |
@@ -49,3 +49,29 @@ advertised 8 KiB and 20 KiB limits. It always reports no mutation, no
 authorization, and no safe-to-retire result.
 Identity proof must not be treated as descendant, activity, protection, site,
 telemetry, or operator-approval proof.
+
+## Hierarchy And Descendant Contract
+
+After exact identity reads, the adapter requests the complete ad-unit catalog
+with a fixed page size and `orderBy=name`. The public `ad_unit_page_size` input
+defaults to 1000 and is capped at 1000; `max_ad_units` defaults to 5000 and is
+capped at 10000. The scan also caps pages at 100, each upstream response at
+2 MiB before JSON decoding, and the aggregate response budget at 16 MiB.
+
+Every page must contain an `adUnits` array and a valid optional continuation
+token. Every row must contain an exact same-network canonical resource name,
+an official status, a boolean `hasChildren`, and a complete `parentPath` from
+root through the direct parent. Rows must remain strictly ordered across page
+boundaries. Missing or malformed final pages, repeated tokens, zero-progress
+pages, duplicate ids, catalog gaps, cycles, cross-network parents, incomplete
+paths, or exceeded caps keep proof incomplete.
+
+The adapter reconstructs direct children from the catalog and compares that
+state bidirectionally with each listed `hasChildren` flag. Target flags are
+also reconciled against the exact GET responses. External active or inactive
+descendants are positive blockers even when a later page or request fails;
+that state is `partial_blocked`, not a lost or falsely clear result. Archived
+external descendants are reported but do not block. When assessed targets are
+ancestors of other assessed targets, the response returns a deterministic
+child-first order. Output contains only counts, a bounded sample, issue codes,
+and fingerprints rather than the complete catalog.

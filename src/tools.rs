@@ -16,7 +16,8 @@ use serde_json::{Map, Value, json};
 use tokio::process::Command;
 
 use crate::ad_unit_retirement::{
-    AdUnitRetirementAssessmentArgs, assess_ad_unit_retirement_with_reader, response_bytes,
+    AdUnitRetirementAssessmentArgs, MAX_DESCENDANT_PAGE_BYTES,
+    assess_ad_unit_retirement_with_readers, response_bytes,
 };
 use crate::auth_ux::{gcloud_adc_login_command, shell_join_with_cloudsdk_config};
 use crate::client::{
@@ -1240,13 +1241,14 @@ impl AdManagerServer {
 
     #[tool(
         name = "gam_ad_unit_retirement_assessment",
-        description = "Read-only exact-identity preflight for one to ten canonical Ad Manager ad-unit ids; descendant, evidence, and recommendation stages remain not_run."
+        description = "Read-only exact-identity and bounded hierarchy preflight for one to ten canonical Ad Manager ad-unit ids; external evidence and recommendation stages remain not_run."
     )]
     async fn gam_ad_unit_retirement_assessment(
         &self,
         Parameters(args): Parameters<AdUnitRetirementAssessmentArgs>,
     ) -> Result<CallToolResult, McpError> {
         let client = self.client().clone();
+        let catalog_client = client.clone();
         Ok(ad_unit_retirement_tool_result(
             args,
             Instant::now(),
@@ -1255,6 +1257,19 @@ impl AdManagerServer {
                 async move {
                     client
                         .get_ad_unit_with_request_state(&network_code, &resource_name)
+                        .await
+                }
+            },
+            move |network_code, page_size, page_token| {
+                let client = catalog_client.clone();
+                async move {
+                    client
+                        .list_ad_units_bounded_with_request_state(
+                            &network_code,
+                            page_size,
+                            page_token,
+                            MAX_DESCENDANT_PAGE_BYTES,
+                        )
                         .await
                 }
             },
@@ -2451,16 +2466,25 @@ fn default_true() -> bool {
     true
 }
 
-async fn ad_unit_retirement_tool_result<F, Fut>(
+async fn ad_unit_retirement_tool_result<IF, IFut, LF, LFut>(
     args: AdUnitRetirementAssessmentArgs,
     started: Instant,
-    read_ad_unit: F,
+    read_ad_unit: IF,
+    read_ad_unit_page: LF,
 ) -> CallToolResult
 where
-    F: FnMut(String, String) -> Fut,
-    Fut: Future<Output = (Result<Value, AdManagerError>, bool)>,
+    IF: FnMut(String, String) -> IFut,
+    IFut: Future<Output = (Result<Value, AdManagerError>, bool)>,
+    LF: FnMut(String, u32, Option<String>) -> LFut,
+    LFut: Future<Output = (Result<(Value, usize), AdManagerError>, bool)>,
 {
-    let response = match assess_ad_unit_retirement_with_reader(&args, read_ad_unit).await {
+    let response = match assess_ad_unit_retirement_with_readers(
+        &args,
+        read_ad_unit,
+        read_ad_unit_page,
+    )
+    .await
+    {
         Ok(response) => response,
         Err(err) => return contract::error(err, started),
     };
@@ -2470,9 +2494,19 @@ where
         .and_then(|value| value.get("attempted_count"))
         .and_then(Value::as_u64)
         .unwrap_or(0);
+    let identity_attempted_count = response
+        .get("provider_requests")
+        .and_then(|value| value.get("identity_attempted_count"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
     let target_count = response
         .get("provider_requests")
         .and_then(|value| value.get("target_count"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let descendant_page_attempted_count = response
+        .get("provider_requests")
+        .and_then(|value| value.get("descendant_page_attempted_count"))
         .and_then(Value::as_u64)
         .unwrap_or(0);
     let result = contract::success_with_meta(
@@ -2482,7 +2516,9 @@ where
             "upstream_called": upstream_attempted_count > 0,
             "upstream_call_state": if upstream_attempted_count == 0 {
                 "not_sent"
-            } else if upstream_attempted_count == target_count {
+            } else if identity_attempted_count == target_count
+                && descendant_page_attempted_count > 0
+            {
                 "attempted_all"
             } else {
                 "attempted_partial"
@@ -7702,6 +7738,8 @@ mod tests {
             AdUnitRetirementAssessmentArgs {
                 network_code: "1234567".to_string(),
                 ad_unit_ids: vec!["200".to_string()],
+                ad_unit_page_size: Some(100),
+                max_ad_units: Some(100),
             },
             Instant::now(),
             |network_code, resource_name| async move {
@@ -7718,6 +7756,19 @@ mod tests {
                     true,
                 )
             },
+            |_network_code, _page_size, _page_token| async move {
+                let payload = json!({
+                    "adUnits": [{
+                        "name":"networks/1234567/adUnits/200",
+                        "status":"ACTIVE",
+                        "parentPath":[],
+                        "hasChildren":false,
+                        "updateTime":"2026-07-10T00:00:00Z"
+                    }]
+                });
+                let bytes = payload.to_string().len();
+                (Ok((payload, bytes)), true)
+            },
         )
         .await;
         let response = result.structured_content.expect("structured response");
@@ -7726,7 +7777,10 @@ mod tests {
             response["data"]["identity"]["proof_state"],
             "complete_clear"
         );
-        assert_eq!(response["data"]["descendants"]["proof_state"], "not_run");
+        assert_eq!(
+            response["data"]["descendants"]["proof_state"],
+            "complete_clear"
+        );
         assert_eq!(response["data"]["evidence"]["proof_state"], "not_run");
         assert_eq!(response["data"]["recommendation"]["decision"], "not_run");
         assert_eq!(response["meta"]["mutation_performed"], false);
@@ -7746,6 +7800,8 @@ mod tests {
             AdUnitRetirementAssessmentArgs {
                 network_code: "1234567".to_string(),
                 ad_unit_ids: (200..210).map(|id| id.to_string()).collect(),
+                ad_unit_page_size: Some(100),
+                max_ad_units: Some(100),
             },
             Instant::now(),
             |_network_code, resource_name| async move {
@@ -7760,6 +7816,19 @@ mod tests {
                     })),
                     true,
                 )
+            },
+            |_network_code, _page_size, _page_token| async move {
+                let payload = json!({
+                    "adUnits": (200..210).map(|id| json!({
+                        "name":format!("networks/1234567/adUnits/{id}"),
+                        "status":"ACTIVE",
+                        "parentPath":[],
+                        "hasChildren":false,
+                        "updateTime":"2026-07-10T00:00:00Z"
+                    })).collect::<Vec<_>>()
+                });
+                let bytes = payload.to_string().len();
+                (Ok((payload, bytes)), true)
             },
         )
         .await;
@@ -7789,9 +7858,19 @@ mod tests {
             AdUnitRetirementAssessmentArgs {
                 network_code: "1234567".to_string(),
                 ad_unit_ids: vec!["200".to_string()],
+                ad_unit_page_size: Some(100),
+                max_ad_units: Some(100),
             },
             Instant::now(),
             |_network_code, _resource_name| async move {
+                (
+                    Err(AdManagerError::AuthBootstrap(
+                        "private auth detail".to_string(),
+                    )),
+                    false,
+                )
+            },
+            |_network_code, _page_size, _page_token| async move {
                 (
                     Err(AdManagerError::AuthBootstrap(
                         "private auth detail".to_string(),
