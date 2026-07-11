@@ -45,8 +45,8 @@ read as clear or blocked.
 
 The inner response is capped at 7 KiB. The adapter also measures the complete
 Contract V1 model-visible content and serialized RMCP result against their
-advertised 8 KiB and 20 KiB limits. It always reports no mutation, no
-authorization, and no safe-to-retire result.
+advertised 8 KiB and 20 KiB limits. Every successful assessment reports no
+mutation, no authorization, and no safe-to-retire result.
 Identity proof must not be treated as descendant, activity, protection, site,
 telemetry, or operator-approval proof.
 

@@ -1864,6 +1864,10 @@ fn clip_message_with_truncation(message: String) -> (String, bool) {
 
 #[cfg(test)]
 mod tests {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::thread;
+
     use super::{
         AD_UNIT_HIERARCHY_FIELDS, AdManagerClient, CatalogCollection, MAX_SOAP_RESPONSE_XML_BYTES,
         RestWriteOperation, RestWriteResource, SOAP_ENVELOPE_NAMESPACE, SoapTraffickingOperation,
@@ -1873,6 +1877,18 @@ mod tests {
     };
     use crate::Settings;
     use serde_json::json;
+
+    fn serve_one_http_response(response: Vec<u8>) -> (String, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind local test server");
+        let address = listener.local_addr().expect("local test address");
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept test request");
+            let mut request = [0_u8; 4096];
+            let _ = stream.read(&mut request).expect("read test request");
+            let _ = stream.write_all(&response);
+        });
+        (format!("http://{address}/bounded"), handle)
+    }
 
     #[test]
     fn collection_names_are_curated() {
@@ -1906,6 +1922,75 @@ mod tests {
             AD_UNIT_HIERARCHY_FIELDS,
             "adUnits.name,adUnits.parentAdUnit,adUnits.parentPath.parentAdUnit,adUnits.status,adUnits.hasChildren,adUnits.updateTime,nextPageToken"
         );
+    }
+
+    #[tokio::test]
+    async fn bounded_json_reader_enforces_http_body_limit_before_decode() {
+        let client = AdManagerClient::new(Settings::default()).expect("test client");
+
+        let body = br#"{"ok":true}"#;
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        )
+        .into_bytes()
+        .into_iter()
+        .chain(body.iter().copied())
+        .collect::<Vec<_>>();
+        let (url, server) = serve_one_http_response(response);
+        let (value, bytes) = client
+            .send_json_bounded(client.http.get(url), body.len())
+            .await
+            .expect("exact-boundary JSON response");
+        server.join().expect("valid response server");
+        assert_eq!(value, json!({"ok":true}));
+        assert_eq!(bytes, body.len());
+
+        let oversized = b"0123456789";
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            oversized.len()
+        )
+        .into_bytes()
+        .into_iter()
+        .chain(oversized.iter().copied())
+        .collect::<Vec<_>>();
+        let (url, server) = serve_one_http_response(response);
+        assert!(
+            client
+                .send_json_bounded(client.http.get(url), 5)
+                .await
+                .is_err()
+        );
+        server.join().expect("content-length response server");
+
+        let chunked = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\nA\r\n0123456789\r\n0\r\n\r\n".to_vec();
+        let (url, server) = serve_one_http_response(chunked);
+        assert!(
+            client
+                .send_json_bounded(client.http.get(url), 5)
+                .await
+                .is_err()
+        );
+        server.join().expect("chunked response server");
+
+        let invalid = b"not-json";
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            invalid.len()
+        )
+        .into_bytes()
+        .into_iter()
+        .chain(invalid.iter().copied())
+        .collect::<Vec<_>>();
+        let (url, server) = serve_one_http_response(response);
+        assert!(
+            client
+                .send_json_bounded(client.http.get(url), invalid.len())
+                .await
+                .is_err()
+        );
+        server.join().expect("invalid JSON response server");
     }
 
     #[test]

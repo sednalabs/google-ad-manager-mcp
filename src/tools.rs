@@ -2509,6 +2509,11 @@ where
         .and_then(|value| value.get("descendant_page_attempted_count"))
         .and_then(Value::as_u64)
         .unwrap_or(0);
+    let descendant_request_state = response
+        .get("descendants")
+        .and_then(|value| value.get("provider_request_state"))
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
     let result = contract::success_with_meta(
         response,
         json!({
@@ -2518,12 +2523,14 @@ where
                 "not_sent"
             } else if identity_attempted_count == target_count
                 && descendant_page_attempted_count > 0
+                && descendant_request_state == "completed"
             {
                 "attempted_all"
             } else {
                 "attempted_partial"
             },
             "serialized_response_bytes": serialized_response_bytes,
+            "descendant_request_state": descendant_request_state,
             "max_model_visible_result_bytes": MAX_CONTRACT_ENVELOPE_BYTES,
             "max_wire_result_bytes": MAX_RMCP_TRANSPORT_BYTES,
             "policy": provider_safety_contract_json(),
@@ -7899,6 +7906,74 @@ mod tests {
         assert_eq!(response["meta"]["upstream_called"], false);
         assert_eq!(response["meta"]["upstream_call_state"], "not_sent");
         assert!(!response.to_string().contains("private auth detail"));
+    }
+
+    #[tokio::test]
+    async fn retirement_preflight_outer_meta_reports_late_not_sent_page_as_partial() {
+        let page_calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let result = ad_unit_retirement_tool_result(
+            AdUnitRetirementAssessmentArgs {
+                network_code: "1234567".to_string(),
+                ad_unit_ids: vec!["200".to_string()],
+                ad_unit_page_size: Some(100),
+                max_ad_units: Some(100),
+            },
+            Instant::now(),
+            |_network_code, resource_name| async move {
+                (
+                    Ok(json!({
+                        "name":resource_name,
+                        "adUnitCode":"fixture_unit",
+                        "status":"ACTIVE",
+                        "adUnitSizes":[],
+                        "hasChildren":false,
+                        "updateTime":"2026-07-10T00:00:00Z"
+                    })),
+                    true,
+                )
+            },
+            {
+                let page_calls = page_calls.clone();
+                move |_network_code, _page_size, _page_token| {
+                    let page_calls = page_calls.clone();
+                    async move {
+                        if page_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                            let payload = json!({
+                                "adUnits":[{
+                                    "name":"networks/1234567/adUnits/200",
+                                    "status":"ACTIVE",
+                                    "parentPath":[],
+                                    "hasChildren":false,
+                                    "updateTime":"2026-07-10T00:00:00Z"
+                                }],
+                                "nextPageToken":"page-2"
+                            });
+                            let bytes = payload.to_string().len();
+                            (Ok((payload, bytes)), true)
+                        } else {
+                            (
+                                Err(AdManagerError::AuthBootstrap(
+                                    "private auth detail".to_string(),
+                                )),
+                                false,
+                            )
+                        }
+                    }
+                }
+            },
+        )
+        .await;
+        let response = result.structured_content.expect("structured response");
+        assert_eq!(response["ok"], true);
+        assert_eq!(
+            response["data"]["descendants"]["provider_request_state"],
+            "completed_then_not_sent"
+        );
+        assert_eq!(response["meta"]["upstream_call_state"], "attempted_partial");
+        assert_eq!(
+            response["meta"]["descendant_request_state"],
+            "completed_then_not_sent"
+        );
     }
 
     #[test]
