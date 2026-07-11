@@ -510,7 +510,7 @@ fn root_catalog_rows_may_omit_or_null_parent_path() {
         scan.consume_page(&page, page.to_string().len());
         let summary = scan.finish(100);
         assert_eq!(summary["proof_state"], "complete_clear");
-        assert_eq!(summary["issues"], json!([]));
+        assert!(summary.get("issues").is_none());
     }
 }
 
@@ -521,7 +521,7 @@ fn unavailable_identity_child_flag_does_not_create_a_false_mismatch() {
     scan.consume_page(&page, page.to_string().len());
     let summary = scan.finish(100);
     assert_eq!(summary["proof_state"], "complete_clear");
-    assert_eq!(summary["issues"], json!([]));
+    assert!(summary.get("issues").is_none());
 }
 
 #[test]
