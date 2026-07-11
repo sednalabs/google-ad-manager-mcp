@@ -982,11 +982,7 @@ impl AdManagerServer {
         .await
         {
             Ok(summary) => {
-                apply_yield_group_decision(
-                    &summary,
-                    &mut attention_reasons,
-                    &mut partial_reasons,
-                );
+                apply_yield_group_decision(&summary, &mut attention_reasons, &mut partial_reasons);
                 summary
             }
             Err(err) => {
@@ -7193,11 +7189,7 @@ mod tests {
             }],
             "nextPageToken": "next-page"
         });
-        let summary = summarize_probe_collection(
-            &payload,
-            CatalogCollection::PrivateAuctions,
-            100,
-        );
+        let summary = summarize_probe_collection(&payload, CatalogCollection::PrivateAuctions, 100);
         let mut attention_reasons = Vec::new();
         let mut partial_reasons = Vec::new();
 
@@ -7255,11 +7247,7 @@ mod tests {
         let mut attention_reasons = Vec::new();
         let mut partial_reasons = Vec::new();
 
-        apply_yield_group_decision(
-            &summary,
-            &mut attention_reasons,
-            &mut partial_reasons,
-        );
+        apply_yield_group_decision(&summary, &mut attention_reasons, &mut partial_reasons);
 
         assert_eq!(summary["decision"], "targeted_exposed");
         assert_eq!(summary["proof_state"], "sample_only");
