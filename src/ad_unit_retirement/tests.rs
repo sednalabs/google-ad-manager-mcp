@@ -33,6 +33,7 @@ fn targets_require_canonical_positive_network_and_ids() {
         " 200",
         "200 ",
         "unit",
+        "9223372036854775808",
         "18446744073709551616",
     ] {
         assert!(
@@ -40,6 +41,7 @@ fn targets_require_canonical_positive_network_and_ids() {
             "ad unit `{ad_unit_id}` must be rejected"
         );
     }
+    assert!(validate_targets("9223372036854775807", &["9223372036854775807".to_string()]).is_ok());
 }
 
 #[test]
@@ -58,6 +60,7 @@ fn targets_reject_empty_duplicate_and_over_limit_sets() {
 #[test]
 fn identity_summary_is_compact_exact_and_fingerprinted() {
     let target = RetirementTarget {
+        network_code: "1234567".to_string(),
         ad_unit_id: "200".to_string(),
         resource_name: "networks/1234567/adUnits/200".to_string(),
     };
@@ -80,7 +83,14 @@ fn identity_summary_is_compact_exact_and_fingerprinted() {
     );
     assert_eq!(summary["proof_state"], "complete_clear");
     assert_eq!(summary["identity_matches_request"], true);
-    assert_eq!(summary["current"]["sizes"], json!(["160x1200", "160x600"]));
+    assert_eq!(summary["current"]["sizes"]["source_count"], 3);
+    assert_eq!(summary["current"]["sizes"]["retained_count"], 3);
+    assert_eq!(summary["current"]["sizes"]["truncated"], false);
+    assert!(
+        summary["current"]["sizes"]["source_fingerprint"]
+            .as_str()
+            .is_some_and(|value| value.len() == 16)
+    );
     assert!(
         summary["identity_fingerprint"]
             .as_str()
@@ -93,6 +103,7 @@ fn identity_summary_is_compact_exact_and_fingerprinted() {
 #[test]
 fn identity_mismatch_and_permission_failure_block_without_leaking_details() {
     let target = RetirementTarget {
+        network_code: "1234567".to_string(),
         ad_unit_id: "200".to_string(),
         resource_name: "networks/1234567/adUnits/200".to_string(),
     };
@@ -109,9 +120,101 @@ fn identity_mismatch_and_permission_failure_block_without_leaking_details() {
             status: 403,
             message: "private provider detail".to_string(),
         },
+        true,
     );
     assert_eq!(permission["proof_state"], "blocked_permission");
     assert!(!permission.to_string().contains("private provider detail"));
+}
+
+#[test]
+fn malformed_identity_and_cross_network_parent_never_clear() {
+    let target = RetirementTarget {
+        network_code: "1234567".to_string(),
+        ad_unit_id: "200".to_string(),
+        resource_name: "networks/1234567/adUnits/200".to_string(),
+    };
+    let malformed = summarize_identity(&target, &json!({"name":"networks/1234567/adUnits/200"}));
+    assert_eq!(malformed["proof_state"], "not_run");
+    assert_eq!(malformed["identity_matches_request"], true);
+    assert_eq!(malformed["shape_complete"], false);
+
+    let foreign_parent = summarize_identity(
+        &target,
+        &json!({
+            "name":"networks/1234567/adUnits/200",
+            "adUnitCode":"fixture_unit",
+            "status":"ACTIVE",
+            "adUnitSizes":[],
+            "hasChildren":false,
+            "parentAdUnit":"networks/9999999/adUnits/42",
+            "updateTime":"2026-07-10T00:00:00Z"
+        }),
+    );
+    assert_eq!(foreign_parent["proof_state"], "not_run");
+    assert_eq!(foreign_parent["current"]["parent_ad_unit_id"], Value::Null);
+    assert!(
+        foreign_parent["shape_issues"]
+            .as_array()
+            .is_some_and(|issues| issues
+                .iter()
+                .any(|issue| issue == "parent_ad_unit_invalid_or_cross_network"))
+    );
+}
+
+#[test]
+fn size_fingerprint_covers_environment_companions_and_truncated_tail() {
+    let target = RetirementTarget {
+        network_code: "1234567".to_string(),
+        ad_unit_id: "200".to_string(),
+        resource_name: "networks/1234567/adUnits/200".to_string(),
+    };
+    let sizes = (0..21)
+        .map(|index| {
+            json!({
+                "size":{"width":160,"height":600 + index},
+                "environmentType":"BROWSER",
+                "companions":[{"width":320,"height":50}]
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut changed = sizes.clone();
+    changed[20]["environmentType"] = Value::String("VIDEO_PLAYER".to_string());
+    let row = |ad_unit_sizes: Vec<Value>| {
+        json!({
+            "name":"networks/1234567/adUnits/200",
+            "adUnitCode":"fixture_unit",
+            "status":"ACTIVE",
+            "adUnitSizes":ad_unit_sizes,
+            "hasChildren":false,
+            "updateTime":"2026-07-10T00:00:00Z"
+        })
+    };
+    let first = summarize_identity(&target, &row(sizes));
+    let second = summarize_identity(&target, &row(changed));
+    assert_eq!(first["current"]["sizes"]["source_count"], 21);
+    assert_eq!(first["current"]["sizes"]["retained_count"], 20);
+    assert_eq!(first["current"]["sizes"]["truncated"], true);
+    assert_ne!(
+        first["identity_fingerprint"],
+        second["identity_fingerprint"]
+    );
+}
+
+#[test]
+fn auth_bootstrap_is_not_reported_as_an_upstream_request() {
+    let target = RetirementTarget {
+        network_code: "1234567".to_string(),
+        ad_unit_id: "200".to_string(),
+        resource_name: "networks/1234567/adUnits/200".to_string(),
+    };
+    let summary = blocked_identity(
+        &target,
+        AdManagerError::AuthBootstrap("private auth detail".to_string()),
+        false,
+    );
+    assert_eq!(summary["proof_state"], "blocked_auth");
+    assert_eq!(summary["provider_request_state"], "not_sent");
+    assert!(!summary.to_string().contains("private auth detail"));
 }
 
 #[tokio::test]
@@ -121,14 +224,17 @@ async fn successful_preflight_keeps_later_surfaces_not_run() {
         |network_code, resource_name| async move {
             assert_eq!(network_code, "1234567");
             assert_eq!(resource_name, "networks/1234567/adUnits/200");
-            Ok(json!({
-                "name": resource_name,
-                "adUnitCode": "fixture_unit",
-                "status": "ACTIVE",
-                "adUnitSizes": [{"size":{"width":300,"height":250}}],
-                "hasChildren": false,
-                "updateTime": "2026-07-10T00:00:00Z"
-            }))
+            (
+                Ok(json!({
+                    "name": resource_name,
+                    "adUnitCode": "fixture_unit",
+                    "status": "ACTIVE",
+                    "adUnitSizes": [{"size":{"width":300,"height":250}}],
+                    "hasChildren": false,
+                    "updateTime": "2026-07-10T00:00:00Z"
+                })),
+                true,
+            )
         },
     )
     .await
@@ -143,6 +249,8 @@ async fn successful_preflight_keeps_later_surfaces_not_run() {
         false
     );
     assert_eq!(response["mutation_performed"], false);
+    assert_eq!(response["provider_requests"]["attempted_count"], 1);
+    assert_eq!(response["provider_requests"]["not_sent_count"], 0);
     assert_eq!(
         response["authorization"]["archive_or_deactivate_authorized"],
         false
@@ -158,6 +266,7 @@ fn response_size_guard_fails_closed() {
             "1234567".to_string(),
             vec!["200".to_string()],
             oversized_identity,
+            1,
         )
         .is_err()
     );

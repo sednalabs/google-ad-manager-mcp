@@ -18,19 +18,25 @@ later proof surface explicit rather than implying it ran.
 
 ## Exact-Identity Contract
 
-The public schema and runtime both require canonical positive decimal strings
-of at most 20 digits. Whitespace, zero, leading zeroes, duplicates, values that
-overflow `u64`, empty target sets, and more than ten targets fail before any
+The public schema and runtime both require canonical positive signed-64-bit
+decimal strings. Whitespace, zero, leading zeroes, duplicates, values above
+`i64::MAX`, empty target sets, and more than ten targets fail before any
 provider call.
 
 For each target, the adapter constructs exactly
 `networks/<network>/adUnits/<id>` and calls the REST get endpoint. A response is
 clear for identity only when its resource name and canonical id match the
-request. The compact summary includes code, status, sizes, child flag, parent
-id, and update time, but omits descriptions and display text. Provider errors
-are mapped to bounded proof states without echoing raw provider details.
+request, required identity fields are present, and any parent resource is a
+canonical ad-unit resource in the same network. The compact summary includes
+code, status, a bounded size projection with source counts and a complete size
+source fingerprint, child flag, parent id, and update time, but omits
+descriptions and display text. Provider errors are mapped to bounded proof
+states without echoing raw provider details. Request metadata distinguishes
+pre-authentication failures from attempted provider reads.
 
-The response is capped at 5 KiB before the Contract V1 envelope is created. It
-always reports no mutation, no authorization, and no safe-to-retire result.
+The inner response is capped at 7 KiB. The adapter also measures the complete
+Contract V1 model-visible content and serialized RMCP result against their
+advertised 8 KiB and 20 KiB limits. It always reports no mutation, no
+authorization, and no safe-to-retire result.
 Identity proof must not be treated as descendant, activity, protection, site,
 telemetry, or operator-approval proof.

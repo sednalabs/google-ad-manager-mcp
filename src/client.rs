@@ -711,14 +711,42 @@ impl AdManagerClient {
         network_code: &str,
         resource_name: &str,
     ) -> Result<Value, AdManagerError> {
-        let network_code = validate_network_code(network_code)?;
-        let resource_name = validate_resource_name(
+        self.get_ad_unit_with_request_state(network_code, resource_name)
+            .await
+            .0
+    }
+
+    pub(crate) async fn get_ad_unit_with_request_state(
+        &self,
+        network_code: &str,
+        resource_name: &str,
+    ) -> (Result<Value, AdManagerError>, bool) {
+        let network_code = match validate_network_code(network_code) {
+            Ok(value) => value,
+            Err(err) => return (Err(err), false),
+        };
+        let resource_name = match validate_resource_name(
             "ad_unit_resource_names",
             Some(resource_name),
             &network_code,
             "adUnits",
-        )?;
-        self.get_json(&resource_name, &[]).await
+        ) {
+            Ok(value) => value,
+            Err(err) => return (Err(err), false),
+        };
+        let token = match self.access_token().await {
+            Ok(value) => value,
+            Err(err) => return (Err(err), false),
+        };
+        let url = match absolute_api_url(&self.api_base_url, &resource_name) {
+            Ok(value) => value,
+            Err(err) => return (Err(err), false),
+        };
+        let mut request = self.http.request(Method::GET, url).bearer_auth(token);
+        if let Some(quota_project) = &self.quota_project {
+            request = request.header("x-goog-user-project", quota_project.as_ref());
+        }
+        (self.send_json(request).await, true)
     }
 
     pub async fn get_rest_discovery_document(&self) -> Result<Value, AdManagerError> {

@@ -1252,7 +1252,11 @@ impl AdManagerServer {
             Instant::now(),
             move |network_code, resource_name| {
                 let client = client.clone();
-                async move { client.get_ad_unit(&network_code, &resource_name).await }
+                async move {
+                    client
+                        .get_ad_unit_with_request_state(&network_code, &resource_name)
+                        .await
+                }
             },
         )
         .await)
@@ -2454,25 +2458,61 @@ async fn ad_unit_retirement_tool_result<F, Fut>(
 ) -> CallToolResult
 where
     F: FnMut(String, String) -> Fut,
-    Fut: Future<Output = Result<Value, AdManagerError>>,
+    Fut: Future<Output = (Result<Value, AdManagerError>, bool)>,
 {
     let response = match assess_ad_unit_retirement_with_reader(&args, read_ad_unit).await {
         Ok(response) => response,
         Err(err) => return contract::error(err, started),
     };
     let serialized_response_bytes = response_bytes(&response);
-    contract::success_with_meta(
+    let upstream_attempted_count = response
+        .get("provider_requests")
+        .and_then(|value| value.get("attempted_count"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let target_count = response
+        .get("provider_requests")
+        .and_then(|value| value.get("target_count"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let result = contract::success_with_meta(
         response,
         json!({
             "mutation_performed": false,
-            "upstream_called": true,
+            "upstream_called": upstream_attempted_count > 0,
+            "upstream_call_state": if upstream_attempted_count == 0 {
+                "not_sent"
+            } else if upstream_attempted_count == target_count {
+                "attempted_all"
+            } else {
+                "attempted_partial"
+            },
             "serialized_response_bytes": serialized_response_bytes,
             "max_model_visible_result_bytes": MAX_CONTRACT_ENVELOPE_BYTES,
             "max_wire_result_bytes": MAX_RMCP_TRANSPORT_BYTES,
             "policy": provider_safety_contract_json(),
         }),
         started,
-    )
+    );
+    let model_visible_bytes = result
+        .structured_content
+        .as_ref()
+        .and_then(|value| serde_json::to_vec(value).ok())
+        .map(|bytes| bytes.len())
+        .unwrap_or(MAX_CONTRACT_ENVELOPE_BYTES + 1);
+    let wire_bytes = serde_json::to_vec(&result)
+        .map(|bytes| bytes.len())
+        .unwrap_or(MAX_RMCP_TRANSPORT_BYTES + 1);
+    if model_visible_bytes > MAX_CONTRACT_ENVELOPE_BYTES || wire_bytes > MAX_RMCP_TRANSPORT_BYTES {
+        return contract::error(
+            AdManagerError::invalid(
+                "assessment_result",
+                "retirement preflight exceeded its model-visible or RMCP transport limit; assess fewer targets",
+            ),
+            started,
+        );
+    }
+    result
 }
 
 fn validate_probe_ad_unit_codes(codes: &[String]) -> Result<Vec<String>, AdManagerError> {
@@ -7666,14 +7706,17 @@ mod tests {
             Instant::now(),
             |network_code, resource_name| async move {
                 assert_eq!(network_code, "1234567");
-                Ok(json!({
-                    "name": resource_name,
-                    "adUnitCode": "fixture_unit",
-                    "status": "ACTIVE",
-                    "adUnitSizes": [{"size":{"width":300,"height":250}}],
-                    "hasChildren": false,
-                    "updateTime": "2026-07-10T00:00:00Z"
-                }))
+                (
+                    Ok(json!({
+                        "name": resource_name,
+                        "adUnitCode": "fixture_unit",
+                        "status": "ACTIVE",
+                        "adUnitSizes": [{"size":{"width":300,"height":250}}],
+                        "hasChildren": false,
+                        "updateTime": "2026-07-10T00:00:00Z"
+                    })),
+                    true,
+                )
             },
         )
         .await;
@@ -7688,12 +7731,83 @@ mod tests {
         assert_eq!(response["data"]["recommendation"]["decision"], "not_run");
         assert_eq!(response["meta"]["mutation_performed"], false);
         assert_eq!(response["meta"]["upstream_called"], true);
+        assert_eq!(response["meta"]["upstream_call_state"], "attempted_all");
         assert!(
             serde_json::to_vec(&response)
                 .expect("serialize successful tool boundary")
                 .len()
                 <= MAX_CONTRACT_ENVELOPE_BYTES
         );
+    }
+
+    #[tokio::test]
+    async fn maximal_retirement_preflight_stays_inside_full_wire_limit() {
+        let result = ad_unit_retirement_tool_result(
+            AdUnitRetirementAssessmentArgs {
+                network_code: "1234567".to_string(),
+                ad_unit_ids: (200..210).map(|id| id.to_string()).collect(),
+            },
+            Instant::now(),
+            |_network_code, resource_name| async move {
+                (
+                    Ok(json!({
+                        "name": resource_name,
+                        "adUnitCode": "fixture_unit",
+                        "status": "ACTIVE",
+                        "adUnitSizes": [],
+                        "hasChildren": false,
+                        "updateTime": "2026-07-10T00:00:00Z"
+                    })),
+                    true,
+                )
+            },
+        )
+        .await;
+        let response = result
+            .structured_content
+            .as_ref()
+            .expect("maximal successful result must include structured content");
+        assert_eq!(response["ok"], true);
+        assert_eq!(response["data"]["identity"]["target_count"], 10);
+        assert!(
+            serde_json::to_vec(response)
+                .expect("serialize maximal model-visible result")
+                .len()
+                <= MAX_CONTRACT_ENVELOPE_BYTES
+        );
+        assert!(
+            serde_json::to_vec(&result)
+                .expect("serialize maximal full RMCP result")
+                .len()
+                <= MAX_RMCP_TRANSPORT_BYTES
+        );
+    }
+
+    #[tokio::test]
+    async fn retirement_preflight_auth_bootstrap_reports_no_upstream_request() {
+        let result = ad_unit_retirement_tool_result(
+            AdUnitRetirementAssessmentArgs {
+                network_code: "1234567".to_string(),
+                ad_unit_ids: vec!["200".to_string()],
+            },
+            Instant::now(),
+            |_network_code, _resource_name| async move {
+                (
+                    Err(AdManagerError::AuthBootstrap(
+                        "private auth detail".to_string(),
+                    )),
+                    false,
+                )
+            },
+        )
+        .await;
+        let response = result.structured_content.expect("structured response");
+        assert_eq!(response["ok"], true);
+        assert_eq!(response["data"]["identity"]["proof_state"], "blocked_auth");
+        assert_eq!(response["data"]["provider_requests"]["attempted_count"], 0);
+        assert_eq!(response["meta"]["upstream_called"], false);
+        assert_eq!(response["meta"]["upstream_call_state"], "not_sent");
+        assert!(!response.to_string().contains("private auth detail"));
     }
 
     #[test]
