@@ -23,6 +23,7 @@ pub const DEFAULT_SOAP_API_VERSION: &str = "v202605";
 const MAX_SOAP_PAYLOAD_XML_BYTES: usize = 256 * 1024;
 const MAX_SOAP_RESPONSE_XML_BYTES: usize = 200 * 1024;
 const SOAP_ENVELOPE_NAMESPACE: &str = concat!("http", "://schemas.xmlsoap.org/soap/envelope/");
+const NETWORK_HIERARCHY_FIELDS: &str = "name,networkCode,effectiveRootAdUnit";
 const AD_UNIT_HIERARCHY_FIELDS: &str = "adUnits.name,adUnits.parentAdUnit,adUnits.parentPath.parentAdUnit,adUnits.status,adUnits.hasChildren,adUnits.updateTime,nextPageToken";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -675,6 +676,30 @@ impl AdManagerClient {
             query.push(("pageToken", page_token));
         }
         self.get_json("networks", &query).await
+    }
+
+    pub(crate) async fn get_network_with_request_state(
+        &self,
+        network_code: &str,
+    ) -> (Result<Value, AdManagerError>, bool) {
+        let network_code = match validate_network_code(network_code) {
+            Ok(value) => value,
+            Err(err) => return (Err(err), false),
+        };
+        let token = match self.access_token().await {
+            Ok(value) => value,
+            Err(err) => return (Err(err), false),
+        };
+        let url = match absolute_api_url(&self.api_base_url, &format!("networks/{network_code}")) {
+            Ok(value) => value,
+            Err(err) => return (Err(err), false),
+        };
+        let mut request = self.http.request(Method::GET, url).bearer_auth(token);
+        if let Some(quota_project) = &self.quota_project {
+            request = request.header("x-goog-user-project", quota_project.as_ref());
+        }
+        request = request.query(&[("fields", NETWORK_HIERARCHY_FIELDS)]);
+        (self.send_json(request).await, true)
     }
 
     pub async fn list_network_catalog(
@@ -1870,8 +1895,8 @@ mod tests {
 
     use super::{
         AD_UNIT_HIERARCHY_FIELDS, AdManagerClient, CatalogCollection, MAX_SOAP_RESPONSE_XML_BYTES,
-        RestWriteOperation, RestWriteResource, SOAP_ENVELOPE_NAMESPACE, SoapTraffickingOperation,
-        ad_unit_hierarchy_list_query, classify_soap_impact, clip_message,
+        NETWORK_HIERARCHY_FIELDS, RestWriteOperation, RestWriteResource, SOAP_ENVELOPE_NAMESPACE,
+        SoapTraffickingOperation, ad_unit_hierarchy_list_query, classify_soap_impact, clip_message,
         clip_message_with_truncation, clip_xml_response, extract_xml_tag, validate_operation_name,
         validate_report_result_name, validate_rest_write_body, validate_soap_payload_xml,
     };
@@ -1921,6 +1946,10 @@ mod tests {
         assert_eq!(
             AD_UNIT_HIERARCHY_FIELDS,
             "adUnits.name,adUnits.parentAdUnit,adUnits.parentPath.parentAdUnit,adUnits.status,adUnits.hasChildren,adUnits.updateTime,nextPageToken"
+        );
+        assert_eq!(
+            NETWORK_HIERARCHY_FIELDS,
+            "name,networkCode,effectiveRootAdUnit"
         );
     }
 

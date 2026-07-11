@@ -25,6 +25,21 @@ fn child_claims(values: &[(&str, bool)]) -> BTreeMap<String, bool> {
         .collect()
 }
 
+fn network_row(effective_root_id: &str) -> Value {
+    json!({
+        "name":"networks/1234567",
+        "networkCode":"1234567",
+        "effectiveRootAdUnit":format!("networks/1234567/adUnits/{effective_root_id}")
+    })
+}
+
+fn effective_root_row(effective_root_id: &str, google_root_id: &str) -> Value {
+    json!({
+        "name":format!("networks/1234567/adUnits/{effective_root_id}"),
+        "parentAdUnit":format!("networks/1234567/adUnits/{google_root_id}")
+    })
+}
+
 fn catalog_row(id: &str, parent_id: Option<&str>, has_children: bool, status: &str) -> Value {
     let ancestors = parent_id
         .map(|parent_id| {
@@ -84,6 +99,41 @@ fn targets_reject_empty_duplicate_and_over_limit_sets() {
             &(1..=11).map(|value| value.to_string()).collect::<Vec<_>>(),
         )
         .is_err()
+    );
+}
+
+#[test]
+fn effective_root_identity_requires_exact_same_network_resources() {
+    assert_eq!(
+        effective_root_id_from_network("1234567", &network_row("100")).as_deref(),
+        Some("100")
+    );
+    assert_eq!(
+        google_root_id_from_effective_root("1234567", "100", &effective_root_row("100", "50"))
+            .as_deref(),
+        Some("50")
+    );
+    assert!(
+        effective_root_id_from_network(
+            "1234567",
+            &json!({
+                "name":"networks/1234567",
+                "networkCode":"1234567",
+                "effectiveRootAdUnit":"networks/7654321/adUnits/100"
+            })
+        )
+        .is_none()
+    );
+    assert!(
+        google_root_id_from_effective_root(
+            "1234567",
+            "100",
+            &json!({
+                "name":"networks/1234567/adUnits/100",
+                "parentAdUnit":"networks/7654321/adUnits/50"
+            })
+        )
+        .is_none()
     );
 }
 
@@ -449,6 +499,24 @@ fn hierarchy_scan_requires_strict_order_and_bidirectional_child_flags() {
 }
 
 #[test]
+fn hierarchy_scan_orders_resource_names_by_numeric_ad_unit_id() {
+    let mut scan = DescendantScan::new(
+        "1234567",
+        &["10".to_string()],
+        &child_claims(&[("10", false)]),
+        100,
+    );
+    let page = json!({"adUnits":[
+        catalog_row("9", None, true, "ACTIVE"),
+        catalog_row("10", Some("9"), false, "ACTIVE")
+    ]});
+    scan.consume_page(&page, page.to_string().len());
+    let summary = scan.finish(100);
+    assert_eq!(summary["proof_state"], "complete_clear");
+    assert!(summary.get("issues").is_none());
+}
+
+#[test]
 fn hierarchy_scan_requires_one_root_and_reconciles_target_parent_identity() {
     let mut multiple_roots = DescendantScan::new(
         "1234567",
@@ -515,6 +583,119 @@ fn root_catalog_rows_may_omit_or_null_parent_path() {
 }
 
 #[test]
+fn live_shaped_catalog_may_omit_the_google_created_root_from_parent_path() {
+    let mut network_root = catalog_row("15422", None, true, "ACTIVE");
+    network_root
+        .as_object_mut()
+        .expect("catalog row object")
+        .remove("parentPath");
+    let mut publisher_root = catalog_row("303152", Some("15422"), true, "ACTIVE");
+    publisher_root
+        .as_object_mut()
+        .expect("catalog row object")
+        .remove("parentPath");
+    let target = json!({
+        "name":"networks/1234567/adUnits/182784272",
+        "parentAdUnit":"networks/1234567/adUnits/303152",
+        "parentPath":[{"parentAdUnit":"networks/1234567/adUnits/303152"}],
+        "hasChildren":false,
+        "status":"ACTIVE",
+        "updateTime":"2026-02-10T04:54:39.470Z"
+    });
+    let expected_parents = BTreeMap::from([("182784272".to_string(), Some("303152".to_string()))]);
+    let mut scan = DescendantScan::new(
+        "1234567",
+        &["182784272".to_string()],
+        &child_claims(&[("182784272", false)]),
+        100,
+    )
+    .with_expected_parent_ids(&expected_parents)
+    .require_root_identity(Some(("303152", "15422")));
+    let page = json!({"adUnits":[network_root,publisher_root,target]});
+    scan.consume_page(&page, page.to_string().len());
+    let summary = scan.finish(100);
+    assert_eq!(summary["proof_state"], "complete_clear");
+    assert!(summary.get("issues").is_none());
+}
+
+#[test]
+fn omitted_parent_path_below_the_root_still_fails_closed() {
+    let mut direct_root_child = catalog_row("200", Some("100"), true, "ACTIVE");
+    direct_root_child
+        .as_object_mut()
+        .expect("catalog row object")
+        .remove("parentPath");
+    let mut grandchild = catalog_row("300", Some("200"), false, "ACTIVE");
+    grandchild
+        .as_object_mut()
+        .expect("catalog row object")
+        .remove("parentPath");
+    let mut scan = DescendantScan::new(
+        "1234567",
+        &["300".to_string()],
+        &child_claims(&[("300", false)]),
+        100,
+    )
+    .require_root_identity(Some(("200", "100")));
+    let page = json!({"adUnits":[
+        catalog_row("100", None, true, "ACTIVE"),
+        direct_root_child,
+        grandchild
+    ]});
+    scan.consume_page(&page, page.to_string().len());
+    let summary = scan.finish(100);
+    assert_eq!(summary["proof_state"], "partial_capped");
+    assert!(summary["issues"].as_array().is_some_and(|issues| {
+        issues
+            .iter()
+            .any(|issue| issue == "catalog_ancestry_mismatch")
+    }));
+}
+
+#[test]
+fn authoritative_root_identity_rejects_a_sparse_fabricated_root() {
+    let mut scan = DescendantScan::new(
+        "1234567",
+        &["300".to_string()],
+        &child_claims(&[("300", false)]),
+        100,
+    )
+    .require_root_identity(Some(("200", "100")));
+    let page = json!({"adUnits":[
+        catalog_row("200", None, true, "ACTIVE"),
+        catalog_row("300", Some("200"), false, "ACTIVE")
+    ]});
+    scan.consume_page(&page, page.to_string().len());
+    let summary = scan.finish(100);
+    assert_eq!(summary["proof_state"], "partial_capped");
+    assert!(summary["issues"].as_array().is_some_and(|issues| {
+        issues
+            .iter()
+            .any(|issue| issue == "google_root_catalog_mismatch")
+    }));
+}
+
+#[test]
+fn unavailable_authoritative_root_identity_never_clears() {
+    let mut scan = DescendantScan::new(
+        "1234567",
+        &["200".to_string()],
+        &child_claims(&[("200", false)]),
+        100,
+    )
+    .require_root_identity(None);
+    let page = json!({"adUnits":[catalog_row("200", None, false, "ACTIVE")]});
+    scan.consume_page(&page, page.to_string().len());
+    let summary = scan.finish(100);
+    assert_eq!(summary["proof_state"], "partial_capped");
+    assert!(summary["issues"].as_array().is_some_and(|issues| {
+        issues
+            .iter()
+            .any(|issue| issue == "effective_root_identity_unverified")
+    }));
+}
+
+#[test]
 fn unavailable_identity_child_flag_does_not_create_a_false_mismatch() {
     let mut scan = DescendantScan::new("1234567", &["200".to_string()], &BTreeMap::new(), 100);
     let page = json!({"adUnits":[catalog_row("200", None, false, "ACTIVE")]});
@@ -559,7 +740,7 @@ fn hierarchy_scan_validates_complete_root_to_parent_paths() {
     let malformed_grandchild = json!({
         "name":"networks/1234567/adUnits/300",
         "parentAdUnit":"networks/1234567/adUnits/201",
-        "parentPath":[{"parentAdUnit":"networks/1234567/adUnits/201"}],
+        "parentPath":[],
         "hasChildren":false,
         "status":"ACTIVE",
         "updateTime":"2026-07-10T00:00:00Z"
@@ -608,6 +789,7 @@ fn known_external_descendant_remains_a_blocker_after_late_read_failure() {
     let summary = scan.finish(100);
     assert_eq!(summary["proof_state"], "partial_blocked");
     assert_eq!(summary["blocking_external_descendant_count"], 1);
+    assert_eq!(summary["external_descendant_status_counts"]["INACTIVE"], 1);
     assert_eq!(
         summary["provider_request_state"],
         "completed_then_attempted_incomplete"
@@ -707,15 +889,19 @@ fn intra_target_relationship_sample_reports_truncation_and_full_count() {
 async fn successful_preflight_reconciles_hierarchy_and_keeps_later_surfaces_not_run() {
     let response = assess_ad_unit_retirement_with_readers(
         &args("1234567", &["200"]),
+        |_network_code| async move { (Ok(network_row("100")), true) },
         |network_code, resource_name| async move {
             assert_eq!(network_code, "1234567");
-            assert_eq!(resource_name, "networks/1234567/adUnits/200");
+            if resource_name == "networks/1234567/adUnits/100" {
+                return (Ok(effective_root_row("100", "50")), true);
+            }
             (
                 Ok(json!({
                     "name": resource_name,
                     "adUnitCode": "fixture_unit",
                     "status": "ACTIVE",
                     "adUnitSizes": [{"size":{"width":300,"height":250},"environmentType":"BROWSER"}],
+                    "parentAdUnit":"networks/1234567/adUnits/100",
                     "hasChildren": false,
                     "updateTime": "2026-07-10T00:00:00Z"
                 })),
@@ -724,13 +910,11 @@ async fn successful_preflight_reconciles_hierarchy_and_keeps_later_surfaces_not_
         },
         |_network_code, _page_size, _page_token| async move {
             let payload = json!({
-                "adUnits":[{
-                    "name":"networks/1234567/adUnits/200",
-                    "status":"ACTIVE",
-                    "parentPath":[],
-                    "hasChildren":false,
-                    "updateTime":"2026-07-10T00:00:00Z"
-                }]
+                "adUnits":[
+                    catalog_row("50", None, true, "ACTIVE"),
+                    catalog_row("100", Some("50"), true, "ACTIVE"),
+                    catalog_row("200", Some("100"), false, "ACTIVE")
+                ]
             });
             let bytes = payload.to_string().len();
             (Ok((payload, bytes)), true)
@@ -748,7 +932,12 @@ async fn successful_preflight_reconciles_hierarchy_and_keeps_later_surfaces_not_
         false
     );
     assert_eq!(response["mutation_performed"], false);
-    assert_eq!(response["provider_requests"]["attempted_count"], 2);
+    assert_eq!(response["provider_requests"]["attempted_count"], 4);
+    assert_eq!(response["provider_requests"]["network_attempted_count"], 1);
+    assert_eq!(
+        response["provider_requests"]["effective_root_attempted_count"],
+        1
+    );
     assert_eq!(response["provider_requests"]["identity_not_sent_count"], 0);
     assert_eq!(
         response["authorization"]["archive_or_deactivate_authorized"],
@@ -761,13 +950,18 @@ async fn successful_preflight_reconciles_hierarchy_and_keeps_later_surfaces_not_
 async fn maximal_descendant_sample_stays_inside_inner_response_cap() {
     let response = assess_ad_unit_retirement_with_readers(
         &args("1234567", &["200"]),
+        |_network_code| async move { (Ok(network_row("100")), true) },
         |_network_code, resource_name| async move {
+            if resource_name == "networks/1234567/adUnits/100" {
+                return (Ok(effective_root_row("100", "50")), true);
+            }
             (
                 Ok(json!({
                     "name":resource_name,
                     "adUnitCode":"fixture_root",
                     "status":"ACTIVE",
                     "adUnitSizes":[],
+                    "parentAdUnit":"networks/1234567/adUnits/100",
                     "hasChildren":true,
                     "updateTime":"2026-07-10T00:00:00Z"
                 })),
@@ -775,10 +969,24 @@ async fn maximal_descendant_sample_stays_inside_inner_response_cap() {
             )
         },
         |_network_code, _page_size, _page_token| async move {
-            let mut rows = vec![catalog_row("200", None, true, "ACTIVE")];
-            rows.extend(
-                (201..=209).map(|id| catalog_row(&id.to_string(), Some("200"), false, "ARCHIVED")),
-            );
+            let mut rows = vec![
+                catalog_row("50", None, true, "ACTIVE"),
+                catalog_row("100", Some("50"), true, "ACTIVE"),
+                catalog_row("200", Some("100"), true, "ACTIVE"),
+            ];
+            rows.extend((201..=209).map(|id| {
+                json!({
+                    "name":format!("networks/1234567/adUnits/{id}"),
+                    "parentAdUnit":"networks/1234567/adUnits/200",
+                    "parentPath":[
+                        {"parentAdUnit":"networks/1234567/adUnits/100"},
+                        {"parentAdUnit":"networks/1234567/adUnits/200"}
+                    ],
+                    "hasChildren":false,
+                    "status":"ARCHIVED",
+                    "updateTime":"2026-07-10T00:00:00Z"
+                })
+            }));
             let payload = json!({"adUnits":rows});
             let bytes = payload.to_string().len();
             (Ok((payload, bytes)), true)
@@ -810,6 +1018,8 @@ fn response_size_guard_fails_closed() {
             oversized_identity,
             json!({"proof_state":"complete_clear"}),
             ProviderRequestSummary {
+                network_attempted_count: 1,
+                effective_root_attempted_count: 1,
                 identity_attempted_count: 1,
                 descendant_page_attempted_count: 1,
             },

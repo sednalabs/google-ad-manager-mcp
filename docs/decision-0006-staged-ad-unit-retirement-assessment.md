@@ -11,7 +11,7 @@ later proof surface explicit rather than implying it ran.
 | Workflow | Tool | Class | Inputs | Data source | Proof | Negative cases | Status |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | Resolve exact targets | `gam_ad_unit_retirement_assessment` | read | canonical network and 1-10 canonical exact ad-unit ids | REST `adUnits.get` | compact current identity, exact resource match, stable fingerprints | zero, whitespace, leading zeroes, duplicates, overflow, missing target, identity mismatch, permission or upstream failure | implemented |
-| Reconcile descendants | same | read | bounded hierarchy scan | paginated REST `adUnits.list` | target/list reconciliation, complete root-to-parent validation, bidirectional child flags, descendant state, and child-first order | byte/row/page cap, pagination or order drift, malformed rows, sparse or cross-network ancestry | implemented |
+| Reconcile descendants | same | read | bounded hierarchy scan | paginated REST `adUnits.list` | target/list reconciliation, catalog-proven root-to-parent validation, bidirectional child flags, descendant state, and child-first order | byte/row/page cap, pagination or numeric-id order drift, malformed rows, sparse or cross-network ancestry | implemented |
 | Grade evidence | same | read decisioning | freshness-bound receipts | existing proof tools, reports, site contract, telemetry | source/network/target/version/hash/time binding | stale, capped, blocked, unsupported, duplicate, or mismatched receipts | planned Stage 4; returns `not_run` now |
 | Return recommendation | same | read decisioning | complete identity, hierarchy, and evidence proof | staged assessment | operator-review recommendation only | any incomplete or blocked surface | planned Stage 5; returns `not_run` now |
 | Archive or deactivate | none | mutation | not accepted | none | none | every call | out of scope |
@@ -63,11 +63,16 @@ capped at 10000. The scan also caps pages at 100, each upstream response at
 
 Every page must contain an `adUnits` array and a valid optional continuation
 token. Every row must contain an exact same-network canonical resource name,
-an official status, a boolean `hasChildren`, and a complete `parentPath` from
-root through the direct parent. Rows must remain strictly ordered across page
-boundaries. Missing or malformed final pages, repeated tokens, zero-progress
-pages, duplicate ids, catalog gaps, cycles, cross-network parents, incomplete
-paths, or exceeded caps keep proof incomplete.
+an official status, and a boolean `hasChildren`. Rows must remain ordered by
+their signed 64-bit numeric ad-unit id across page boundaries. An exact network
+read binds `effectiveRootAdUnit`; an exact GET of that ad unit binds its
+Google-created parent. The adapter reconstructs the complete root-to-parent
+chain from direct parents and accepts either the documented root-inclusive
+`parentPath` or the root-omitted form observed on some networks. The latter
+clears only when the sole catalog root and effective-root relationship match
+those authoritative reads. Missing or malformed final pages, repeated tokens,
+zero-progress pages, duplicate ids, catalog gaps, cycles, cross-network
+parents, incomplete deeper paths, or exceeded caps keep proof incomplete.
 
 The adapter reconstructs direct children from the catalog and compares that
 state bidirectionally with each listed `hasChildren` flag. Target flags are

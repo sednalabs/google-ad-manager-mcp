@@ -1248,12 +1248,18 @@ impl AdManagerServer {
         Parameters(args): Parameters<AdUnitRetirementAssessmentArgs>,
     ) -> Result<CallToolResult, McpError> {
         let client = self.client().clone();
+        let network_client = client.clone();
+        let identity_client = client.clone();
         let catalog_client = client.clone();
         Ok(ad_unit_retirement_tool_result(
             args,
             Instant::now(),
+            move |network_code| {
+                let client = network_client.clone();
+                async move { client.get_network_with_request_state(&network_code).await }
+            },
             move |network_code, resource_name| {
-                let client = client.clone();
+                let client = identity_client.clone();
                 async move {
                     client
                         .get_ad_unit_with_request_state(&network_code, &resource_name)
@@ -2466,13 +2472,16 @@ fn default_true() -> bool {
     true
 }
 
-async fn ad_unit_retirement_tool_result<IF, IFut, LF, LFut>(
+async fn ad_unit_retirement_tool_result<NF, NFut, IF, IFut, LF, LFut>(
     args: AdUnitRetirementAssessmentArgs,
     started: Instant,
+    read_network: NF,
     read_ad_unit: IF,
     read_ad_unit_page: LF,
 ) -> CallToolResult
 where
+    NF: FnMut(String) -> NFut,
+    NFut: Future<Output = (Result<Value, AdManagerError>, bool)>,
     IF: FnMut(String, String) -> IFut,
     IFut: Future<Output = (Result<Value, AdManagerError>, bool)>,
     LF: FnMut(String, u32, Option<String>) -> LFut,
@@ -2480,6 +2489,7 @@ where
 {
     let response = match assess_ad_unit_retirement_with_readers(
         &args,
+        read_network,
         read_ad_unit,
         read_ad_unit_page,
     )
@@ -2497,6 +2507,16 @@ where
     let identity_attempted_count = response
         .get("provider_requests")
         .and_then(|value| value.get("identity_attempted_count"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let network_attempted_count = response
+        .get("provider_requests")
+        .and_then(|value| value.get("network_attempted_count"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let effective_root_attempted_count = response
+        .get("provider_requests")
+        .and_then(|value| value.get("effective_root_attempted_count"))
         .and_then(Value::as_u64)
         .unwrap_or(0);
     let target_count = response
@@ -2522,7 +2542,9 @@ where
             "upstream_called": upstream_attempted_count > 0,
             "upstream_call_state": if upstream_attempted_count == 0 {
                 "not_sent"
-            } else if identity_attempted_count == target_count
+            } else if network_attempted_count == 1
+                && effective_root_attempted_count == 1
+                && identity_attempted_count == target_count
                 && descendant_page_attempted_count > 0
                 && descendant_request_state == "completed"
             {
@@ -6765,6 +6787,21 @@ mod tests {
         value.as_object().expect("object").clone()
     }
 
+    fn retirement_network(effective_root_id: &str) -> Value {
+        json!({
+            "name":"networks/1234567",
+            "networkCode":"1234567",
+            "effectiveRootAdUnit":format!("networks/1234567/adUnits/{effective_root_id}")
+        })
+    }
+
+    fn retirement_effective_root(effective_root_id: &str, google_root_id: &str) -> Value {
+        json!({
+            "name":format!("networks/1234567/adUnits/{effective_root_id}"),
+            "parentAdUnit":format!("networks/1234567/adUnits/{google_root_id}")
+        })
+    }
+
     #[test]
     fn split_scopes_accepts_common_delimiters() {
         assert_eq!(
@@ -7750,14 +7787,19 @@ mod tests {
                 max_ad_units: Some(100),
             },
             Instant::now(),
+            |_network_code| async move { (Ok(retirement_network("100")), true) },
             |network_code, resource_name| async move {
                 assert_eq!(network_code, "1234567");
+                if resource_name == "networks/1234567/adUnits/100" {
+                    return (Ok(retirement_effective_root("100", "50")), true);
+                }
                 (
                     Ok(json!({
                         "name": resource_name,
                         "adUnitCode": "fixture_unit",
                         "status": "ACTIVE",
                         "adUnitSizes": [{"size":{"width":300,"height":250},"environmentType":"BROWSER"}],
+                        "parentAdUnit":"networks/1234567/adUnits/100",
                         "hasChildren": false,
                         "updateTime": "2026-07-10T00:00:00Z"
                     })),
@@ -7766,13 +7808,31 @@ mod tests {
             },
             |_network_code, _page_size, _page_token| async move {
                 let payload = json!({
-                    "adUnits": [{
-                        "name":"networks/1234567/adUnits/200",
-                        "status":"ACTIVE",
-                        "parentPath":[],
-                        "hasChildren":false,
-                        "updateTime":"2026-07-10T00:00:00Z"
-                    }]
+                    "adUnits": [
+                        {
+                            "name":"networks/1234567/adUnits/50",
+                            "status":"ACTIVE",
+                            "parentPath":[],
+                            "hasChildren":true,
+                            "updateTime":"2026-07-10T00:00:00Z"
+                        },
+                        {
+                            "name":"networks/1234567/adUnits/100",
+                            "parentAdUnit":"networks/1234567/adUnits/50",
+                            "status":"ACTIVE",
+                            "parentPath":[],
+                            "hasChildren":true,
+                            "updateTime":"2026-07-10T00:00:00Z"
+                        },
+                        {
+                            "name":"networks/1234567/adUnits/200",
+                            "parentAdUnit":"networks/1234567/adUnits/100",
+                            "status":"ACTIVE",
+                            "parentPath":[{"parentAdUnit":"networks/1234567/adUnits/100"}],
+                            "hasChildren":false,
+                            "updateTime":"2026-07-10T00:00:00Z"
+                        }
+                    ]
                 });
                 let bytes = payload.to_string().len();
                 (Ok((payload, bytes)), true)
@@ -7812,7 +7872,11 @@ mod tests {
                 max_ad_units: Some(100),
             },
             Instant::now(),
+            |_network_code| async move { (Ok(retirement_network("100")), true) },
             |_network_code, resource_name| async move {
+                if resource_name == "networks/1234567/adUnits/100" {
+                    return (Ok(retirement_effective_root("100", "50")), true);
+                }
                 (
                     Ok(json!({
                         "name": resource_name,
@@ -7827,13 +7891,23 @@ mod tests {
                 )
             },
             |_network_code, _page_size, _page_token| async move {
-                let mut rows = vec![json!({
-                    "name":"networks/1234567/adUnits/100",
-                    "status":"ACTIVE",
-                    "parentPath":[],
-                    "hasChildren":true,
-                    "updateTime":"2026-07-10T00:00:00Z"
-                })];
+                let mut rows = vec![
+                    json!({
+                        "name":"networks/1234567/adUnits/50",
+                        "status":"ACTIVE",
+                        "parentPath":[],
+                        "hasChildren":true,
+                        "updateTime":"2026-07-10T00:00:00Z"
+                    }),
+                    json!({
+                        "name":"networks/1234567/adUnits/100",
+                        "parentAdUnit":"networks/1234567/adUnits/50",
+                        "status":"ACTIVE",
+                        "parentPath":[],
+                        "hasChildren":true,
+                        "updateTime":"2026-07-10T00:00:00Z"
+                    }),
+                ];
                 rows.extend((200..210).map(|id| {
                     json!({
                         "name":format!("networks/1234567/adUnits/{id}"),
@@ -7882,6 +7956,14 @@ mod tests {
                 max_ad_units: Some(100),
             },
             Instant::now(),
+            |_network_code| async move {
+                (
+                    Err(AdManagerError::AuthBootstrap(
+                        "private auth detail".to_string(),
+                    )),
+                    false,
+                )
+            },
             |_network_code, _resource_name| async move {
                 (
                     Err(AdManagerError::AuthBootstrap(
@@ -7920,13 +8002,18 @@ mod tests {
                 max_ad_units: Some(100),
             },
             Instant::now(),
+            |_network_code| async move { (Ok(retirement_network("100")), true) },
             |_network_code, resource_name| async move {
+                if resource_name == "networks/1234567/adUnits/100" {
+                    return (Ok(retirement_effective_root("100", "50")), true);
+                }
                 (
                     Ok(json!({
                         "name":resource_name,
                         "adUnitCode":"fixture_unit",
                         "status":"ACTIVE",
                         "adUnitSizes":[],
+                        "parentAdUnit":"networks/1234567/adUnits/100",
                         "hasChildren":false,
                         "updateTime":"2026-07-10T00:00:00Z"
                     })),
@@ -7940,13 +8027,31 @@ mod tests {
                     async move {
                         if page_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
                             let payload = json!({
-                                "adUnits":[{
-                                    "name":"networks/1234567/adUnits/200",
-                                    "status":"ACTIVE",
-                                    "parentPath":[],
-                                    "hasChildren":false,
-                                    "updateTime":"2026-07-10T00:00:00Z"
-                                }],
+                                "adUnits":[
+                                    {
+                                        "name":"networks/1234567/adUnits/50",
+                                        "status":"ACTIVE",
+                                        "parentPath":[],
+                                        "hasChildren":true,
+                                        "updateTime":"2026-07-10T00:00:00Z"
+                                    },
+                                    {
+                                        "name":"networks/1234567/adUnits/100",
+                                        "parentAdUnit":"networks/1234567/adUnits/50",
+                                        "status":"ACTIVE",
+                                        "parentPath":[],
+                                        "hasChildren":true,
+                                        "updateTime":"2026-07-10T00:00:00Z"
+                                    },
+                                    {
+                                        "name":"networks/1234567/adUnits/200",
+                                        "parentAdUnit":"networks/1234567/adUnits/100",
+                                        "status":"ACTIVE",
+                                        "parentPath":[{"parentAdUnit":"networks/1234567/adUnits/100"}],
+                                        "hasChildren":false,
+                                        "updateTime":"2026-07-10T00:00:00Z"
+                                    }
+                                ],
                                 "nextPageToken":"page-2"
                             });
                             let bytes = payload.to_string().len();

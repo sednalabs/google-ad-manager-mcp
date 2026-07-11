@@ -248,17 +248,23 @@ Target ids are not repeated inside each compact `current` object, and derived
 resource names are omitted; the target id plus exact-match flag remain the
 identity binding.
 
-The hierarchy scan is strictly ordered and bounded by page, row, per-page byte,
-and total byte limits. It validates every row's exact network resource,
-root-to-parent path, official status, and child flag; reconstructs direct child
-state to reconcile `hasChildren` in both directions; and compares every target
-against its exact identity read. Pagination drift, malformed pages or tokens,
-catalog gaps, cycles, duplicate ids, cross-network paths, or caps remain
-incomplete. Known active or inactive external descendants remain positive
-blockers even if a later page fails. Archived descendants do not block. When
-targets contain an ancestor and its child, the response returns a deterministic
-child-first order. Only aggregate counts, bounded samples, issue codes, and
-fingerprints are returned.
+The hierarchy scan is bounded by page, row, per-page byte, and total byte
+limits, and verifies the numeric ad-unit-id ordering returned by `orderBy=name`.
+It validates every row's exact network resource, root-to-parent path, official
+status, and child flag; reconstructs direct child state to reconcile
+`hasChildren` in both directions; and compares every target against its exact
+identity read. An exact `networks.get` read binds the network's
+`effectiveRootAdUnit`, and an exact GET of that ad unit binds its Google-created
+parent. The catalog reconciliation accepts both the documented root-inclusive
+`parentPath` form and the root-omitted form returned by some networks, but only
+when the sole catalog root and effective-root relationship match those
+authoritative reads. A missing deeper ancestor still fails closed.
+Pagination drift, malformed pages or tokens, catalog gaps, cycles, duplicate
+ids, cross-network paths, or caps remain incomplete. Known active or inactive
+external descendants remain positive blockers even if a later page fails.
+Archived descendants do not block. When targets contain an ancestor and its
+child, the response returns a deterministic child-first order. Only aggregate
+counts, bounded samples, issue codes, and fingerprints are returned.
 
 The `evidence` and `recommendation` surfaces are intentionally returned as
 `not_run`. Identity and hierarchy proof alone are not retirement eligibility.

@@ -111,7 +111,7 @@ After auth is proven:
 4. `gam_ad_unit_dependency_probe` when you need read-only dependency proof
    before ad-unit cleanup, archive, or retargeting decisions
 5. `gam_ad_unit_retirement_assessment` to prove exact current identity and a
-   bounded, ordered hierarchy/descendant scan while later evidence and
+   bounded, numeric-id-ordered hierarchy/descendant scan while later evidence and
    recommendation stages remain explicitly `not_run`
 6. `gam_report_run`
 7. `gam_report_result_rows` when a report result has more pages

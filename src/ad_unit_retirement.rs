@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 
 use crate::{AdManagerError, fingerprint::stable_fingerprint};
 
-use descendants::scan_descendants_with_reader;
+use descendants::{DescendantScanInput, scan_descendants_with_reader, scoped_numeric_id};
 use inventory::{blocked_identity, summarize_identities, summarize_identity, validate_targets};
 
 pub(crate) use descendants::MAX_DESCENDANT_PAGE_BYTES;
@@ -53,12 +53,15 @@ pub(crate) struct AdUnitRetirementAssessmentArgs {
     pub max_ad_units: Option<u32>,
 }
 
-pub(crate) async fn assess_ad_unit_retirement_with_readers<IF, IFut, LF, LFut>(
+pub(crate) async fn assess_ad_unit_retirement_with_readers<NF, NFut, IF, IFut, LF, LFut>(
     args: &AdUnitRetirementAssessmentArgs,
+    mut read_network: NF,
     mut read_ad_unit: IF,
     read_ad_unit_page: LF,
 ) -> Result<Value, AdManagerError>
 where
+    NF: FnMut(String) -> NFut,
+    NFut: Future<Output = (Result<Value, AdManagerError>, bool)>,
     IF: FnMut(String, String) -> IFut,
     IFut: Future<Output = (Result<Value, AdManagerError>, bool)>,
     LF: FnMut(String, u32, Option<String>) -> LFut,
@@ -72,6 +75,26 @@ where
         .iter()
         .map(|target| target.ad_unit_id.clone())
         .collect::<Vec<_>>();
+
+    let (network_result, network_request_attempted) = read_network(network_code.clone()).await;
+    let effective_root_id = network_result
+        .ok()
+        .and_then(|row| effective_root_id_from_network(&network_code, &row));
+    let (google_root_id, effective_root_request_attempted) = if let Some(effective_root_id) =
+        effective_root_id.as_deref()
+    {
+        let resource_name = format!("networks/{network_code}/adUnits/{effective_root_id}");
+        let (result, request_attempted) = read_ad_unit(network_code.clone(), resource_name).await;
+        (
+            result.ok().and_then(|row| {
+                google_root_id_from_effective_root(&network_code, effective_root_id, &row)
+            }),
+            request_attempted,
+        )
+    } else {
+        (None, false)
+    };
+    let root_identity = effective_root_id.as_deref().zip(google_root_id.as_deref());
 
     let mut identities = Vec::with_capacity(targets.len());
     let mut request_attempted_count = 0usize;
@@ -110,11 +133,14 @@ where
         .collect::<BTreeMap<_, _>>();
     let (descendants, descendant_page_attempted_count) = scan_descendants_with_reader(
         &network_code,
-        &target_ids,
-        &identity_child_claims,
-        &identity_parent_claims,
+        DescendantScanInput {
+            target_ids: &target_ids,
+            identity_child_claims: &identity_child_claims,
+            identity_parent_claims: &identity_parent_claims,
+            root_identity,
+            max_rows: max_ad_units,
+        },
         page_size,
-        max_ad_units,
         read_ad_unit_page,
     )
     .await;
@@ -125,6 +151,8 @@ where
         identity,
         descendants,
         ProviderRequestSummary {
+            network_attempted_count: usize::from(network_request_attempted),
+            effective_root_attempted_count: usize::from(effective_root_request_attempted),
             identity_attempted_count: request_attempted_count,
             descendant_page_attempted_count,
         },
@@ -136,6 +164,8 @@ where
 }
 
 struct ProviderRequestSummary {
+    network_attempted_count: usize,
+    effective_root_attempted_count: usize,
     identity_attempted_count: usize,
     descendant_page_attempted_count: usize,
 }
@@ -157,6 +187,8 @@ fn build_preflight_response(
     let assessment_fingerprint =
         stable_fingerprint(&json!({"identity":&identity,"descendants":&descendants}).to_string());
     let total_request_attempted_count = provider_requests.identity_attempted_count
+        + provider_requests.network_attempted_count
+        + provider_requests.effective_root_attempted_count
         + provider_requests.descendant_page_attempted_count;
     let response = json!({
         "network_code": network_code,
@@ -176,6 +208,8 @@ fn build_preflight_response(
         "provider_requests": {
             "target_count": target_count,
             "attempted_count": total_request_attempted_count,
+            "network_attempted_count": provider_requests.network_attempted_count,
+            "effective_root_attempted_count": provider_requests.effective_root_attempted_count,
             "identity_attempted_count": provider_requests.identity_attempted_count,
             "identity_not_sent_count": target_count.saturating_sub(provider_requests.identity_attempted_count),
             "descendant_page_attempted_count": provider_requests.descendant_page_attempted_count,
@@ -197,6 +231,28 @@ fn build_preflight_response(
     });
     ensure_response_size(&response)?;
     Ok(response)
+}
+
+fn effective_root_id_from_network(network_code: &str, row: &Value) -> Option<String> {
+    let expected_name = format!("networks/{network_code}");
+    if row.get("name")?.as_str()? != expected_name
+        || row.get("networkCode")?.as_str()? != network_code
+    {
+        return None;
+    }
+    scoped_numeric_id(row.get("effectiveRootAdUnit")?.as_str()?, network_code)
+}
+
+fn google_root_id_from_effective_root(
+    network_code: &str,
+    effective_root_id: &str,
+    row: &Value,
+) -> Option<String> {
+    let expected_name = format!("networks/{network_code}/adUnits/{effective_root_id}");
+    if row.get("name")?.as_str()? != expected_name {
+        return None;
+    }
+    scoped_numeric_id(row.get("parentAdUnit")?.as_str()?, network_code)
 }
 
 fn bounded_scan_parameter(
