@@ -15,6 +15,8 @@ The current alpha focuses on a small useful surface:
   - line items
   - saved reports
 - run saved reports and fetch paginated result rows;
+- bind one to ten exact canonical ad-unit ids to current REST identity through a
+  read-only retirement preflight that cannot recommend or apply a mutation;
 - plan allowlisted REST write operations with no upstream mutation;
 - apply allowlisted REST writes only when an operator explicitly enables write
   mode, uses the manage scope, and passes the matching confirmation token;
@@ -41,6 +43,7 @@ query surface, or default live write operations.
 - [Decision 0003: Guarded SOAP trafficking adapter](docs/decision-0003-guarded-soap-trafficking-adapter.md)
 - [Decision 0004: Exchange and protection proof surface](docs/decision-0004-exchange-protection-proof.md)
 - [Decision 0005: Ad-unit dependency proof](docs/decision-0005-ad-unit-dependency-proof.md)
+- [Decision 0006: Staged ad-unit retirement assessment](docs/decision-0006-staged-ad-unit-retirement-assessment.md)
 - [Releasing](docs/RELEASING.md)
 
 ## Install
@@ -107,20 +110,22 @@ After auth is proven:
    `targeted_exposed` from `targeted_and_excluded`
 4. `gam_ad_unit_dependency_probe` when you need read-only dependency proof
    before ad-unit cleanup, archive, or retargeting decisions
-5. `gam_report_run`
-6. `gam_report_result_rows` when a report result has more pages
-7. `gam_trafficking_tool_matrix` before planning writes
-8. `gam_rest_write_plan` for dry-run write previews
-9. `gam_rest_write_apply` only in explicit operator mode
-10. `gam_soap_payload_build` to generate common SOAP payload fragments
-11. `gam_soap_trafficking_plan` for order, line-item, creative, LICA, preview,
+5. `gam_ad_unit_retirement_assessment` to prove exact current identity while
+   later retirement-proof stages remain explicitly `not_run`
+6. `gam_report_run`
+7. `gam_report_result_rows` when a report result has more pages
+8. `gam_trafficking_tool_matrix` before planning writes
+9. `gam_rest_write_plan` for dry-run write previews
+10. `gam_rest_write_apply` only in explicit operator mode
+11. `gam_soap_payload_build` to generate common SOAP payload fragments
+12. `gam_soap_trafficking_plan` for order, line-item, creative, LICA, preview,
    and forecast SOAP plans
-12. `gam_soap_trafficking_apply` only after reviewing the matching SOAP plan
-13. `gam_yield_group_exclusions_preview` when descendant-safe ad-unit exclusions should
+13. `gam_soap_trafficking_apply` only after reviewing the matching SOAP plan
+14. `gam_yield_group_exclusions_preview` when descendant-safe ad-unit exclusions should
    be added to an existing yield group without changing line-item targeting
-14. `gam_yield_group_exclusions_apply` only with write mode enabled, the
+15. `gam_yield_group_exclusions_apply` only with write mode enabled, the
    manage scope, the exact confirmation token, and post-apply readback proof
-15. `gam_scratchpad_open_session` and the `gam_scratchpad_ingest_*` tools when
+16. `gam_scratchpad_open_session` and the `gam_scratchpad_ingest_*` tools when
    you want local SQL analysis or a markdown evidence bundle
 
 ## Authentication
@@ -229,6 +234,7 @@ whole credential files in tool responses.
 - `gam_network_catalog_list`
 - `gam_exchange_protection_probe`
 - `gam_ad_unit_dependency_probe`
+- `gam_ad_unit_retirement_assessment`
 - `gam_report_run`
 - `gam_report_result_rows`
 - `gam_trafficking_tool_matrix`

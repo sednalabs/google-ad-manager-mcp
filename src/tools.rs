@@ -15,6 +15,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use tokio::process::Command;
 
+use crate::ad_unit_retirement::{
+    AdUnitRetirementAssessmentArgs, assess_ad_unit_retirement_with_reader, response_bytes,
+};
 use crate::auth_ux::{gcloud_adc_login_command, shell_join_with_cloudsdk_config};
 use crate::client::{
     CatalogCollection, DEFAULT_SOAP_API_VERSION, RestWriteOperation, RestWritePlan,
@@ -26,9 +29,10 @@ use crate::config::{
 };
 use crate::contract;
 use crate::evidence::{
-    EvidenceSource, EvidenceState, dependency_evidence_state, dependency_probe_decision,
-    evidence_receipt_target_ids, evidence_receipt_template, exact_ad_unit_id_from_resource_name,
-    exact_resource_id_from_name, exchange_evidence_state,
+    EvidenceSource, EvidenceState, MAX_CONTRACT_ENVELOPE_BYTES, MAX_RMCP_TRANSPORT_BYTES,
+    dependency_evidence_state, dependency_probe_decision, evidence_receipt_target_ids,
+    evidence_receipt_template, exact_ad_unit_id_from_resource_name, exact_resource_id_from_name,
+    exchange_evidence_state,
 };
 use crate::fingerprint::stable_fingerprint;
 use crate::probe_projection::{ProbeKind, bounded_probe_error, bounded_probe_success};
@@ -556,6 +560,7 @@ impl AdManagerServer {
                     "Call gam_network_catalog_list for ad_units, orders, line_items, placements, private_auctions, private_auction_deals, or reports.",
                     "Call gam_exchange_protection_probe when you need explicit partial-proof states for Exchange, private auction, private deal, or yield-group exposure.",
                     "Call gam_ad_unit_dependency_probe before ad-unit cleanup, archive, or retargeting work so placement and line-item dependencies are explicit.",
+                    "Call gam_ad_unit_retirement_assessment to bind one to ten exact canonical ad-unit ids to current REST identity. Descendants, evidence grading, and recommendations remain explicitly not_run in the current stage.",
                     "Call gam_report_run for saved reports and gam_report_result_rows for large paginated results.",
                     "Call gam_trafficking_tool_matrix before planning writes so the REST and SOAP trafficking surfaces are explicit.",
                     "Use gam_rest_write_plan for dry-run write plans; gam_rest_write_apply only works when the server is explicitly started with GOOGLE_AD_MANAGER_MCP_WRITE_MODE=enabled and the manage scope.",
@@ -597,6 +602,7 @@ impl AdManagerServer {
                     "gam_network_catalog_list",
                     "gam_exchange_protection_probe",
                     "gam_ad_unit_dependency_probe",
+                    "gam_ad_unit_retirement_assessment",
                     "gam_trafficking_tool_matrix",
                     "gam_rest_write_plan",
                     "gam_soap_trafficking_plan",
@@ -1230,6 +1236,26 @@ impl AdManagerServer {
             started,
             "dependency_probe_result",
         ))
+    }
+
+    #[tool(
+        name = "gam_ad_unit_retirement_assessment",
+        description = "Read-only exact-identity preflight for one to ten canonical Ad Manager ad-unit ids; descendant, evidence, and recommendation stages remain not_run."
+    )]
+    async fn gam_ad_unit_retirement_assessment(
+        &self,
+        Parameters(args): Parameters<AdUnitRetirementAssessmentArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let client = self.client().clone();
+        Ok(ad_unit_retirement_tool_result(
+            args,
+            Instant::now(),
+            move |network_code, resource_name| {
+                let client = client.clone();
+                async move { client.get_ad_unit(&network_code, &resource_name).await }
+            },
+        )
+        .await)
     }
 
     #[tool(
@@ -2419,6 +2445,34 @@ impl AdManagerServer {
 
 fn default_true() -> bool {
     true
+}
+
+async fn ad_unit_retirement_tool_result<F, Fut>(
+    args: AdUnitRetirementAssessmentArgs,
+    started: Instant,
+    read_ad_unit: F,
+) -> CallToolResult
+where
+    F: FnMut(String, String) -> Fut,
+    Fut: Future<Output = Result<Value, AdManagerError>>,
+{
+    let response = match assess_ad_unit_retirement_with_reader(&args, read_ad_unit).await {
+        Ok(response) => response,
+        Err(err) => return contract::error(err, started),
+    };
+    let serialized_response_bytes = response_bytes(&response);
+    contract::success_with_meta(
+        response,
+        json!({
+            "mutation_performed": false,
+            "upstream_called": true,
+            "serialized_response_bytes": serialized_response_bytes,
+            "max_model_visible_result_bytes": MAX_CONTRACT_ENVELOPE_BYTES,
+            "max_wire_result_bytes": MAX_RMCP_TRANSPORT_BYTES,
+            "policy": provider_safety_contract_json(),
+        }),
+        started,
+    )
 }
 
 fn validate_probe_ad_unit_codes(codes: &[String]) -> Result<Vec<String>, AdManagerError> {
@@ -7599,6 +7653,46 @@ mod tests {
         assert_eq!(
             response["data"]["evidence_receipt_template"]["state"],
             "not_generated"
+        );
+    }
+
+    #[tokio::test]
+    async fn retirement_assessment_tool_boundary_returns_successful_identity_preflight() {
+        let result = ad_unit_retirement_tool_result(
+            AdUnitRetirementAssessmentArgs {
+                network_code: "1234567".to_string(),
+                ad_unit_ids: vec!["200".to_string()],
+            },
+            Instant::now(),
+            |network_code, resource_name| async move {
+                assert_eq!(network_code, "1234567");
+                Ok(json!({
+                    "name": resource_name,
+                    "adUnitCode": "fixture_unit",
+                    "status": "ACTIVE",
+                    "adUnitSizes": [{"size":{"width":300,"height":250}}],
+                    "hasChildren": false,
+                    "updateTime": "2026-07-10T00:00:00Z"
+                }))
+            },
+        )
+        .await;
+        let response = result.structured_content.expect("structured response");
+        assert_eq!(response["ok"], true);
+        assert_eq!(
+            response["data"]["identity"]["proof_state"],
+            "complete_clear"
+        );
+        assert_eq!(response["data"]["descendants"]["proof_state"], "not_run");
+        assert_eq!(response["data"]["evidence"]["proof_state"], "not_run");
+        assert_eq!(response["data"]["recommendation"]["decision"], "not_run");
+        assert_eq!(response["meta"]["mutation_performed"], false);
+        assert_eq!(response["meta"]["upstream_called"], true);
+        assert!(
+            serde_json::to_vec(&response)
+                .expect("serialize successful tool boundary")
+                .len()
+                <= MAX_CONTRACT_ENVELOPE_BYTES
         );
     }
 

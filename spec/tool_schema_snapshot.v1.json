@@ -118,6 +118,44 @@
       "name": "gam_ad_unit_dependency_probe"
     },
     {
+      "description": "Read-only exact-identity preflight for one to ten canonical Ad Manager ad-unit ids; descendant, evidence, and recommendation stages remain not_run.",
+      "inputSchema": {
+        "$defs": {
+          "RetirementAdUnitIdSchema": {
+            "maxLength": 20,
+            "minLength": 1,
+            "pattern": "^[1-9][0-9]{0,19}$",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "ad_unit_ids": {
+            "description": "One to ten exact canonical positive numeric ad-unit ids to assess.",
+            "items": {
+              "$ref": "#/$defs/RetirementAdUnitIdSchema"
+            },
+            "maxItems": 10,
+            "minItems": 1,
+            "type": "array"
+          },
+          "network_code": {
+            "description": "Canonical positive numeric Ad Manager network code, for example 1234567.",
+            "maxLength": 20,
+            "minLength": 1,
+            "pattern": "^[1-9][0-9]{0,19}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "network_code",
+          "ad_unit_ids"
+        ],
+        "type": "object"
+      },
+      "name": "gam_ad_unit_retirement_assessment"
+    },
+    {
       "description": "Build a copyable gcloud Application Default Credentials login command for Google Ad Manager without running it.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",

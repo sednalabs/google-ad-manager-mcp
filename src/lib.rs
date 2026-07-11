@@ -21,6 +21,7 @@
 //! * Google Ad Manager API (Beta) Authentication
 //! * Google Ad Manager API (Beta) Reports
 
+mod ad_unit_retirement;
 pub mod auth_ux;
 mod client;
 mod config;

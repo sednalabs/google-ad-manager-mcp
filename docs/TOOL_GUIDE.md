@@ -215,6 +215,29 @@ upstream byte totals remain summary metadata. Nested placement, yield-group, and
 within the exact top-level probe target scope before a returned receipt can bind
 the compact result.
 
+## `gam_ad_unit_retirement_assessment`
+
+`gam_ad_unit_retirement_assessment` is the staged, read-only retirement review
+surface. The current stage is an exact-identity preflight only. It accepts:
+
+- a canonical positive numeric `network_code` with no whitespace or leading
+  zeroes;
+- one to ten unique canonical positive numeric `ad_unit_ids`.
+
+Each target is read with an exact REST `adUnits.get` resource name. The result
+contains a bounded current identity summary, per-target identity fingerprint,
+aggregate identity proof state, and assessment fingerprint. Provider errors are
+classified without returning provider error text. A missing target or identity
+mismatch blocks the identity surface; permission failures remain explicit.
+
+The `descendants`, `evidence`, and `recommendation` surfaces are intentionally
+returned as `not_run`. Exact identity alone is not retirement eligibility. The
+response always reports `mutation_performed=false`,
+`archive_or_deactivate_authorized=false`, and
+`safe_to_archive_or_retire=false`. Later stages will add hierarchy
+reconciliation and evidence grading without weakening these fail-closed
+defaults.
+
 ## `gam_report_run`
 
 `gam_report_run` is designed for saved reports that already exist in Ad
