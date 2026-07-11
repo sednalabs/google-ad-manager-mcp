@@ -283,8 +283,9 @@ not raw receipt notes or provider payloads. Receipt provenance is always
 
 Receipts from the built-in dependency and exchange/protection probes must match
 the complete `gam-evidence-producer-v3` contract: a 16-character lowercase
-hexadecimal result fingerprint, the producer's 3600-second TTL, and a state the
-named producer can actually emit. Unknown receipt fields are rejected rather
+hexadecimal result fingerprint, the producer's 3600-second TTL, its fixed
+provenance and non-authorisation metadata, and a state the named producer can
+actually emit. Unknown receipt fields are rejected rather
 than discarded, so callers cannot attach raw reports or telemetry payloads to
 the compact contract. Freshness is evaluated after the live identity and
 hierarchy reads complete.

@@ -6,8 +6,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::evidence::{
-    DEFAULT_EVIDENCE_TTL_SECONDS, EVIDENCE_PRODUCER_CONTRACT_VERSION, EvidenceSource,
-    EvidenceState, valid_result_hash as valid_producer_result_hash,
+    DEFAULT_EVIDENCE_TTL_SECONDS, EVIDENCE_OPERATOR_ACTION, EVIDENCE_PRODUCER_CONTRACT_VERSION,
+    EVIDENCE_PROVENANCE, EvidenceSource, EvidenceState,
+    valid_result_hash as valid_producer_result_hash,
 };
 use crate::{AdManagerError, fingerprint::stable_fingerprint};
 
@@ -27,6 +28,16 @@ struct RetirementEvidenceHashSchema(
 #[allow(dead_code)]
 #[derive(JsonSchema)]
 struct RetirementEvidenceNoteSchema(#[schemars(length(max = 500))] String);
+
+#[allow(dead_code)]
+#[derive(JsonSchema)]
+struct RetirementEvidenceProvenanceSchema(
+    #[schemars(length(min = 1, max = 64), regex(pattern = r"^[a-z_]+$"))] String,
+);
+
+#[allow(dead_code)]
+#[derive(JsonSchema)]
+struct RetirementEvidenceActionSchema(#[schemars(length(min = 1, max = 256))] String);
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -67,6 +78,12 @@ pub(crate) struct RetirementEvidenceReceipt {
     /// Optional bounded, non-sensitive operator note. The note is never echoed.
     #[schemars(with = "Option<RetirementEvidenceNoteSchema>")]
     pub note: Option<String>,
+    /// Fixed provenance marker emitted by built-in evidence producers.
+    #[schemars(with = "Option<RetirementEvidenceProvenanceSchema>")]
+    pub provenance: Option<String>,
+    /// Fixed non-authorisation guidance emitted by built-in evidence producers.
+    #[schemars(with = "Option<RetirementEvidenceActionSchema>")]
+    pub operator_action: Option<String>,
 }
 
 pub(super) fn current_unix_seconds() -> Result<u64, AdManagerError> {
@@ -184,6 +201,12 @@ pub(super) fn grade_evidence(
             .is_some_and(|ttl| ttl > 0 && ttl <= EVIDENCE_MAX_TTL_SECONDS)
     };
     let state_valid = valid_source_state(receipt.source, receipt.state);
+    let producer_metadata_valid = if producer_contract {
+        receipt.provenance.as_deref() == Some(EVIDENCE_PROVENANCE)
+            && receipt.operator_action.as_deref() == Some(EVIDENCE_OPERATOR_ACTION)
+    } else {
+        receipt.provenance.is_none() && receipt.operator_action.is_none()
+    };
     let observed = receipt.observed_at_unix_seconds;
     let timestamp_valid =
         observed.is_some_and(|value| value <= now.saturating_add(EVIDENCE_FUTURE_SKEW_SECONDS));
@@ -205,6 +228,7 @@ pub(super) fn grade_evidence(
         && source_matches
         && version_valid
         && state_valid
+        && producer_metadata_valid
         && targets_match
         && hash_valid
         && ttl_valid
@@ -216,6 +240,7 @@ pub(super) fn grade_evidence(
         (source_matches, "source"),
         (version_valid, "source_version"),
         (state_valid, "source_state"),
+        (producer_metadata_valid, "producer_metadata"),
         (targets_match, "targets"),
         (hash_valid, "result_hash"),
         (ttl_valid, "ttl"),
@@ -230,7 +255,7 @@ pub(super) fn grade_evidence(
     let (state, reason) = if !structurally_complete {
         (
             "invalid_binding",
-            "the receipt has a network, source, version, state, target, hash, timestamp, activity-window, or TTL mismatch",
+            "the receipt has a network, source, version, state, producer-metadata, target, hash, timestamp, activity-window, or TTL mismatch",
         )
     } else if stale {
         (

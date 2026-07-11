@@ -11,6 +11,8 @@ use serde_json::{Value, json};
 use crate::{AdManagerError, contract, fingerprint::stable_fingerprint};
 
 pub(crate) const EVIDENCE_PRODUCER_CONTRACT_VERSION: &str = "gam-evidence-producer-v3";
+pub(crate) const EVIDENCE_PROVENANCE: &str = "caller_supplied_unverified";
+pub(crate) const EVIDENCE_OPERATOR_ACTION: &str = "Preserve the exact producer result and target scope. This caller-supplied receipt does not authorize a GAM mutation.";
 pub(crate) const MAX_EVIDENCE_TARGETS: usize = 10;
 pub(crate) const MAX_CONTRACT_ENVELOPE_BYTES: usize = 8 * 1024;
 pub(crate) const MAX_RMCP_TRANSPORT_BYTES: usize = 20 * 1024;
@@ -133,11 +135,11 @@ pub(crate) fn evidence_receipt_template(
         "observed_at_unix_seconds": current_unix_seconds()?,
         "ttl_seconds": DEFAULT_EVIDENCE_TTL_SECONDS,
         "target_ad_unit_ids": target_ad_unit_ids,
-        "provenance": "caller_supplied_unverified",
+        "provenance": EVIDENCE_PROVENANCE,
         "window_start_unix_seconds": null,
         "window_end_unix_seconds": null,
         "manual_ui_proof_included": false,
-        "operator_action": "Preserve the exact producer result and target scope. This caller-supplied receipt does not authorize a GAM mutation."
+        "operator_action": EVIDENCE_OPERATOR_ACTION
     }))
 }
 

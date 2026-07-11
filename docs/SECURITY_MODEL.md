@@ -123,8 +123,8 @@ alone while relevant GAM UI-only surfaces remain unsupported. Operator notes
 are bounded and never echoed. Receipts remain caller-supplied and do not verify
 operator identity or authorize any mutation.
 Built-in probe receipts are additionally checked against their complete
-producer contract: exact fingerprint shape, fixed TTL, and source-possible
-states. Receipt objects reject unknown fields instead of silently discarding
+producer contract: exact fingerprint shape, fixed TTL, fixed provenance and
+non-authorisation metadata, and source-possible states. Receipt objects reject unknown fields instead of silently discarding
 attached raw payloads. Freshness is evaluated after provider reads so evidence
 cannot clear merely because it was valid when a long assessment began.
 

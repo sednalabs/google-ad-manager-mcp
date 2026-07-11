@@ -99,7 +99,8 @@ positive TTL no greater than 31 days. Dependency and exchange/protection
 receipts use the current evidence-producer contract version. Delivery,
 site-contract, and telemetry receipts use their explicit V1 contracts.
 Built-in producer receipts must also preserve the producer's exact 16-character
-lowercase hexadecimal fingerprint, 3600-second TTL, and source-possible state.
+lowercase hexadecimal fingerprint, 3600-second TTL, fixed provenance and
+non-authorisation metadata, and source-possible state.
 Delivery and telemetry additionally require a non-zero activity window of at
 least 30 days whose end does not exceed the observation time. Freshness uses
 the older of the observation and activity-window end.

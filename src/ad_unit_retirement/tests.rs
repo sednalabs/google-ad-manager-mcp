@@ -63,6 +63,16 @@ fn receipt(
         window_end_unix_seconds: windowed.then_some(observed_at),
         manual_ui_proof_included: false,
         note: None,
+        provenance: matches!(
+            source,
+            EvidenceSource::DependencyProbe | EvidenceSource::ExchangeProtectionReview
+        )
+        .then(|| crate::evidence::EVIDENCE_PROVENANCE.to_string()),
+        operator_action: matches!(
+            source,
+            EvidenceSource::DependencyProbe | EvidenceSource::ExchangeProtectionReview
+        )
+        .then(|| crate::evidence::EVIDENCE_OPERATOR_ACTION.to_string()),
     }
 }
 
@@ -239,6 +249,34 @@ fn producer_v3_receipts_enforce_hash_ttl_and_source_state_contracts() {
 }
 
 #[test]
+fn built_in_producer_receipt_round_trips_into_the_consumer() {
+    let template = crate::evidence::evidence_receipt_template(
+        "1234567",
+        EvidenceSource::DependencyProbe,
+        EvidenceState::CompleteClear,
+        "0123456789abcdef",
+        vec!["200".to_string()],
+    )
+    .expect("producer receipt template");
+    let receipt: RetirementEvidenceReceipt =
+        serde_json::from_value(template).expect("producer receipt must deserialize");
+    let graded = grade_evidence(
+        "dependency",
+        EvidenceSource::DependencyProbe,
+        Some(&receipt),
+        "1234567",
+        &["200".to_string()],
+        receipt
+            .observed_at_unix_seconds
+            .expect("producer observation time"),
+        false,
+    )
+    .expect("producer receipt must grade");
+    assert_eq!(graded["state"], "complete_clear");
+    assert_eq!(graded["binding_valid"], true);
+}
+
+#[test]
 fn receipt_target_ids_are_required_and_partial_blockers_remain_incomplete() {
     let payload = json!({
         "network_code":"1234567",
@@ -251,7 +289,9 @@ fn receipt_target_ids_are_required_and_partial_blockers_remain_incomplete() {
         "window_start_unix_seconds":null,
         "window_end_unix_seconds":null,
         "manual_ui_proof_included":false,
-        "note":null
+        "note":null,
+        "provenance":null,
+        "operator_action":null
     });
     assert!(serde_json::from_value::<RetirementEvidenceReceipt>(payload).is_err());
 
@@ -268,6 +308,8 @@ fn receipt_target_ids_are_required_and_partial_blockers_remain_incomplete() {
         "window_end_unix_seconds":null,
         "manual_ui_proof_included":false,
         "note":null,
+        "provenance":null,
+        "operator_action":null,
         "raw_report":{"rows":[{"sensitive":"payload"}]}
     });
     assert!(serde_json::from_value::<RetirementEvidenceReceipt>(raw_payload).is_err());
