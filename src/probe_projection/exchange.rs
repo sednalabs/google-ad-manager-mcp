@@ -18,6 +18,7 @@ struct ExchangeAdUnitSemantics {
 #[derive(Debug, Clone, Copy)]
 struct ExchangeCollectionSemantics {
     proof_state: &'static str,
+    has_observed_rows: bool,
 }
 
 #[derive(Debug)]
@@ -407,8 +408,8 @@ fn exchange_surface_severity(
     let attention = ad_units
         .iter()
         .any(|row| row.decision == "attention_required")
-        || matches!(private_auctions.proof_state, "complete_present")
-        || matches!(private_auction_deals.proof_state, "complete_present")
+        || private_auctions.has_observed_rows
+        || private_auction_deals.has_observed_rows
         || yield_decision == Some("targeted_exposed");
     let partial = !unsupported.is_empty()
         || ad_units.iter().any(|row| !row.proof_complete)
@@ -454,6 +455,7 @@ fn validate_exchange_collection(
         flag(source, "hint_truncated", "exchange collection")?;
         return Ok(ExchangeCollectionSemantics {
             proof_state: "blocked",
+            has_observed_rows: false,
         });
     }
 
@@ -510,14 +512,9 @@ fn validate_exchange_collection(
             return Err("exchange collection sample resource id was not producer-derived".into());
         }
     }
-    if state == "sample_only" && row_count > 0 {
-        return Err(
-            "capped private-auction evidence with observed rows requires attention semantics"
-                .into(),
-        );
-    }
     Ok(ExchangeCollectionSemantics {
         proof_state: expected_state,
+        has_observed_rows: row_count > 0,
     })
 }
 
@@ -769,10 +766,9 @@ fn exchange_yield(
         if total.is_some_and(|total| inspected > total) {
             return Err("yield inspected results exceeded the reported total".into());
         }
-        if total.is_none() && !response_truncated {
-            return Err("yield total was unavailable without an incomplete-response signal".into());
-        }
-        let sample_only = response_truncated || total.is_some_and(|total| total > inspected);
+        let sample_only = response_truncated
+            || total.is_none()
+            || total.is_some_and(|total| total > inspected);
         let expected_proof_state = if sample_only {
             "sample_only"
         } else {

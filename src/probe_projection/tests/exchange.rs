@@ -670,7 +670,7 @@ fn exchange_private_market_proof_state_is_derived_from_page_evidence() {
 }
 
 #[test]
-fn exchange_projection_rejects_capped_private_market_rows_without_attention_semantics() {
+fn exchange_projection_accepts_capped_private_market_rows_with_attention_semantics() {
     for field in ["private_auctions", "private_auction_deals"] {
         let mut full = producer_exchange(true, 9_000);
         full[field] = json!({
@@ -692,17 +692,42 @@ fn exchange_projection_rejects_capped_private_market_rows_without_attention_sema
         } else {
             full["certainty"]["can_prove_private_deal_absence_or_presence"] = json!(false);
         }
+        full["attention_reasons"] = json!(["private market inventory is present"]);
+        full["overall_decision"] = json!("attention_required");
         full = reseal(full, ProbeKind::ExchangeProtection, true);
 
-        assert!(
-            compact_success(
-                ProbeKind::ExchangeProtection,
-                &full,
-                &json!({"mutation_performed":false})
-            )
-            .is_err()
-        );
+        let compact = compact_success(
+            ProbeKind::ExchangeProtection,
+            &full,
+            &json!({"mutation_performed":false}),
+        )
+        .expect("capped positive private-market evidence keeps attention precedence");
+        assert_eq!(compact["overall_decision"], "attention_required");
+        assert_eq!(compact[field]["proof_state"], "sample_only");
     }
+}
+
+#[test]
+fn exchange_projection_accepts_missing_yield_total_as_incomplete() {
+    let mut full = producer_exchange(true, 9_000);
+    full["yield_groups"]["total_result_set_size"] = Value::Null;
+    full["yield_groups"]["proof_state"] = json!("sample_only");
+    full["yield_groups"]["decision"] = json!("sample_only");
+    full["certainty"]["can_prove_yield_group_targeting"] = json!(false);
+    full = reseal(full, ProbeKind::ExchangeProtection, true);
+
+    let compact = compact_success(
+        ProbeKind::ExchangeProtection,
+        &full,
+        &json!({"mutation_performed":false}),
+    )
+    .expect("missing yield total remains explicit sample-only evidence");
+    assert_eq!(compact["yield_groups"]["proof_state"], "sample_only");
+    assert_eq!(compact["yield_groups"]["decision"], "sample_only");
+    assert_eq!(
+        compact["certainty"]["can_prove_yield_group_targeting"],
+        false
+    );
 }
 
 #[test]

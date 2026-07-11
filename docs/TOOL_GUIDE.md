@@ -103,6 +103,12 @@ same network and canonical-ID rule; malformed hierarchy data makes the proof
 partial instead of being treated as a clear hierarchy read. Invalid SOAP API
 versions fail input validation before any provider read.
 
+Observed private-auction or private-deal rows require attention even when the
+REST page is capped; the cap separately keeps certainty partial. Yield-group
+proof is complete only when the SOAP response supplies a usable total matching
+the inspected result set. Missing, malformed, or inconsistent totals remain
+sample-only evidence.
+
 Small results keep the native response shape. If the full response would exceed
 the Contract V1 or RMCP transport limit, the adapter returns a validated compact
 projection instead. Decisions, certainty and proof states, aggregate
