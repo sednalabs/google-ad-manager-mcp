@@ -81,6 +81,12 @@ where
         .iter()
         .map(|target| target.ad_unit_id.clone())
         .collect::<Vec<_>>();
+    let evidence = grade_evidence_bundle(
+        &args.evidence,
+        &network_code,
+        &target_ids,
+        current_unix_seconds()?,
+    )?;
 
     let (network_result, network_request_attempted) = read_network(network_code.clone()).await;
     let effective_root_id = network_result
@@ -150,13 +156,6 @@ where
         read_ad_unit_page,
     )
     .await;
-    let evidence = grade_evidence_bundle(
-        &args.evidence,
-        &network_code,
-        &target_ids,
-        current_unix_seconds()?,
-    )?;
-
     build_preflight_response(
         network_code,
         target_ids,

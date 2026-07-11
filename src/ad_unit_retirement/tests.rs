@@ -308,6 +308,29 @@ fn evidence_bundle_rejects_duplicate_sources_and_reports_missing_surfaces() {
     }
 }
 
+#[tokio::test]
+async fn invalid_evidence_fails_before_any_provider_request() {
+    let dependency = receipt(
+        EvidenceSource::DependencyProbe,
+        EvidenceState::CompleteClear,
+        3_999_900,
+    );
+    let mut invalid_args = args("1234567", &["200"]);
+    invalid_args.evidence = vec![dependency.clone(), dependency];
+
+    let result =
+        assess_ad_unit_retirement_with_readers(
+            &invalid_args,
+            |_network_code| async move { panic!("network reader must not run") },
+            |_network_code, _resource_name| async move { panic!("identity reader must not run") },
+            |_network_code, _page_size, _page_token| async move {
+                panic!("catalog reader must not run")
+            },
+        )
+        .await;
+    assert!(result.is_err());
+}
+
 fn child_claims(values: &[(&str, bool)]) -> BTreeMap<String, bool> {
     values
         .iter()
