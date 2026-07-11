@@ -378,6 +378,11 @@ impl DescendantScan {
             .take(DESCENDANT_SAMPLE_LIMIT)
             .cloned()
             .collect::<Vec<_>>();
+        let external_descendant_count = external_descendants.len();
+        let descendant_result_fingerprint = stable_fingerprint(
+            &serde_json::to_string(&external_descendants)
+                .expect("descendant summaries are JSON-serializable"),
+        );
         let blocking_count = external_descendants
             .iter()
             .filter(|row| row.get("status").and_then(Value::as_str) != Some("ARCHIVED"))
@@ -432,12 +437,12 @@ impl DescendantScan {
             "page_count": self.page_count,
             "rows_scanned": self.rows_scanned,
             "response_bytes_scanned": self.response_bytes_scanned,
-            "external_descendant_count": external_descendants.len(),
+            "external_descendant_count": external_descendant_count,
             "blocking_external_descendant_count": blocking_count,
             "requires_child_first_sequence": !target_depths.is_empty(),
             "required_child_first_target_order": child_first_order,
             "catalog_fingerprint": stable_fingerprint(&Value::Array(fingerprint_rows).to_string()),
-            "descendant_result_fingerprint": stable_fingerprint(&Value::Array(external_descendants).to_string()),
+            "descendant_result_fingerprint": descendant_result_fingerprint,
             "provider_request_state": self.provider_request_state,
         });
         let object = result
@@ -457,7 +462,7 @@ impl DescendantScan {
             );
             object.insert(
                 "external_descendant_sample_truncated".to_string(),
-                json!(external_descendants.len() > DESCENDANT_SAMPLE_LIMIT),
+                json!(external_descendant_count > DESCENDANT_SAMPLE_LIMIT),
             );
         }
         if !intra_target_hierarchy.is_empty() {
