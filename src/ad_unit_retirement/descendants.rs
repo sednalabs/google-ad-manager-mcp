@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 
 use crate::{AdManagerError, fingerprint::stable_fingerprint};
 
-const DESCENDANT_SAMPLE_LIMIT: usize = 8;
+pub(super) const DESCENDANT_SAMPLE_LIMIT: usize = 8;
 const MAX_DESCENDANT_SCAN_PAGES: u32 = 100;
 const MAX_DESCENDANT_SCAN_BYTES: usize = 16 * 1024 * 1024;
 const MAX_PAGE_TOKEN_BYTES: usize = 2 * 1024;

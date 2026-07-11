@@ -1926,7 +1926,7 @@ mod tests {
 
     #[tokio::test]
     async fn bounded_json_reader_enforces_http_body_limit_before_decode() {
-        let client = AdManagerClient::new(Settings::default()).expect("test client");
+        let client = AdManagerClient::from_settings(&Settings::default());
 
         let body = br#"{"ok":true}"#;
         let response = format!(
