@@ -64,11 +64,13 @@ capped at 10000. The scan also caps pages at 100, each upstream response at
 Every page must contain an `adUnits` array and a valid optional continuation
 token. Every row must contain an exact same-network canonical resource name,
 an official status, and a boolean `hasChildren`. Rows must remain ordered by
-their signed 64-bit numeric ad-unit id across page boundaries. The adapter
-reconstructs the complete root-to-parent chain from direct parents and accepts
-either the documented root-inclusive `parentPath` or the root-omitted form
-observed on some networks. The latter clears only when the sole omitted node is
-the Google-created root. Missing or malformed final pages, repeated tokens,
+their signed 64-bit numeric ad-unit id across page boundaries. An exact network
+read binds `effectiveRootAdUnit`; an exact GET of that ad unit binds its
+Google-created parent. The adapter reconstructs the complete root-to-parent
+chain from direct parents and accepts either the documented root-inclusive
+`parentPath` or the root-omitted form observed on some networks. The latter
+clears only when the sole catalog root and effective-root relationship match
+those authoritative reads. Missing or malformed final pages, repeated tokens,
 zero-progress pages, duplicate ids, catalog gaps, cycles, cross-network
 parents, incomplete deeper paths, or exceeded caps keep proof incomplete.
 

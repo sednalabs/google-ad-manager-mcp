@@ -163,7 +163,8 @@ REST `adUnits.get` reads, and returns compact current identity plus stable
 fingerprints. It then performs a minimal-field, bounded, byte-capped REST
 `adUnits.list` scan, verifies numeric resource-id order, reconciles documented
 root-inclusive and observed root-omitted parent paths against the complete
-catalog chain, reconciles child flags for every catalog row, reports external descendants, and returns a
+catalog chain plus exact network/effective-root reads, reconciles child flags
+for every catalog row, reports external descendants, and returns a
 deterministic child-first target order. Malformed pages, pagination drift,
 cross-network paths, catalog gaps, or caps fail closed while already-observed
 positive descendant blockers remain visible. External evidence grading and the

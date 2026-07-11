@@ -253,10 +253,12 @@ limits, and verifies the numeric ad-unit-id ordering returned by `orderBy=name`.
 It validates every row's exact network resource, root-to-parent path, official
 status, and child flag; reconstructs direct child state to reconcile
 `hasChildren` in both directions; and compares every target against its exact
-identity read. The catalog reconciliation accepts both the documented
-root-inclusive `parentPath` form and the root-omitted form returned by some
-networks, but only when the complete direct-parent chain proves the omission is
-the Google-created root. A missing deeper ancestor still fails closed.
+identity read. An exact `networks.get` read binds the network's
+`effectiveRootAdUnit`, and an exact GET of that ad unit binds its Google-created
+parent. The catalog reconciliation accepts both the documented root-inclusive
+`parentPath` form and the root-omitted form returned by some networks, but only
+when the sole catalog root and effective-root relationship match those
+authoritative reads. A missing deeper ancestor still fails closed.
 Pagination drift, malformed pages or tokens, catalog gaps, cycles, duplicate
 ids, cross-network paths, or caps remain incomplete. Known active or inactive
 external descendants remain positive blockers even if a later page fails.

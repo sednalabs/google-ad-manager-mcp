@@ -21,11 +21,19 @@ struct CatalogRow {
     fingerprint: Value,
 }
 
+#[derive(Clone)]
+struct RootIdentity {
+    effective_root_id: String,
+    google_root_id: String,
+}
+
 pub(super) struct DescendantScan {
     network_code: String,
     target_ids: BTreeSet<String>,
     expected_has_children: BTreeMap<String, bool>,
     expected_parent_ids: BTreeMap<String, Option<String>>,
+    root_identity: Option<RootIdentity>,
+    root_identity_required: bool,
     rows_by_id: BTreeMap<String, CatalogRow>,
     observed_blocking_descendants: BTreeMap<String, Value>,
     listed_target_ids: BTreeSet<String>,
@@ -51,6 +59,8 @@ impl DescendantScan {
             target_ids: target_ids.iter().cloned().collect(),
             expected_has_children: expected_has_children.clone(),
             expected_parent_ids: BTreeMap::new(),
+            root_identity: None,
+            root_identity_required: false,
             rows_by_id: BTreeMap::new(),
             observed_blocking_descendants: BTreeMap::new(),
             listed_target_ids: BTreeSet::new(),
@@ -70,6 +80,16 @@ impl DescendantScan {
         expected_parent_ids: &BTreeMap<String, Option<String>>,
     ) -> Self {
         self.expected_parent_ids = expected_parent_ids.clone();
+        self
+    }
+
+    pub(super) fn require_root_identity(mut self, root_identity: Option<(&str, &str)>) -> Self {
+        self.root_identity_required = true;
+        self.root_identity =
+            root_identity.map(|(effective_root_id, google_root_id)| RootIdentity {
+                effective_root_id: effective_root_id.to_string(),
+                google_root_id: google_root_id.to_string(),
+            });
         self
     }
 
@@ -294,15 +314,46 @@ impl DescendantScan {
             .values()
             .filter_map(|row| row.parent_id.clone())
             .collect::<BTreeSet<_>>();
-        if self
+        let catalog_root_ids = self
             .rows_by_id
-            .values()
-            .filter(|row| row.parent_id.is_none())
-            .count()
-            != 1
-        {
+            .iter()
+            .filter_map(|(id, row)| row.parent_id.is_none().then_some(id.clone()))
+            .collect::<Vec<_>>();
+        if catalog_root_ids.len() != 1 {
             self.issues.insert("catalog_root_count_invalid");
         }
+        let catalog_root_id = catalog_root_ids.first().cloned();
+        let root_identity_valid = if self.root_identity_required {
+            match (&self.root_identity, catalog_root_id.as_deref()) {
+                (Some(identity), Some(catalog_root_id))
+                    if identity.google_root_id.as_str() == catalog_root_id
+                        && self
+                            .rows_by_id
+                            .get(&identity.effective_root_id)
+                            .is_some_and(|row| {
+                                row.parent_id.as_deref() == Some(identity.google_root_id.as_str())
+                            }) =>
+                {
+                    true
+                }
+                (None, _) => {
+                    self.issues.insert("effective_root_identity_unverified");
+                    false
+                }
+                (Some(identity), Some(catalog_root_id))
+                    if identity.google_root_id.as_str() != catalog_root_id =>
+                {
+                    self.issues.insert("google_root_catalog_mismatch");
+                    false
+                }
+                _ => {
+                    self.issues.insert("effective_root_catalog_mismatch");
+                    false
+                }
+            }
+        } else {
+            false
+        };
         for (id, row) in &self.rows_by_id {
             let actual_has_children = actual_parent_ids.contains(id);
             if row.has_children != Some(actual_has_children) {
@@ -327,9 +378,15 @@ impl DescendantScan {
             match resolve_catalog_ancestors(id, &self.rows_by_id) {
                 Some(resolved)
                     if resolved == row.reported_ancestors
-                        || resolved.get(1..).is_some_and(|without_root| {
-                            without_root == row.reported_ancestors.as_slice()
-                        }) => {}
+                        || (root_identity_valid
+                            && self.root_identity.as_ref().is_some_and(|identity| {
+                                root_omitted_path_matches(
+                                    id,
+                                    &row.reported_ancestors,
+                                    &resolved,
+                                    identity,
+                                )
+                            })) => {}
                 _ => {
                     self.issues.insert("catalog_ancestry_mismatch");
                 }
@@ -500,6 +557,7 @@ pub(super) async fn scan_descendants_with_reader<F, Fut>(
     target_ids: &[String],
     identity_child_claims: &BTreeMap<String, bool>,
     identity_parent_claims: &BTreeMap<String, Option<String>>,
+    root_identity: Option<(&str, &str)>,
     page_size: u32,
     max_rows: u32,
     mut read_page: F,
@@ -509,7 +567,8 @@ where
     Fut: Future<Output = (Result<(Value, usize), AdManagerError>, bool)>,
 {
     let mut scan = DescendantScan::new(network_code, target_ids, identity_child_claims, max_rows)
-        .with_expected_parent_ids(identity_parent_claims);
+        .with_expected_parent_ids(identity_parent_claims)
+        .require_root_identity(root_identity);
     let mut page_token = None;
     let mut request_attempted_count = 0usize;
     loop {
@@ -560,7 +619,7 @@ fn ancestor_ids(
     Ok(ids)
 }
 
-fn scoped_numeric_id(value: &str, network_code: &str) -> Option<String> {
+pub(super) fn scoped_numeric_id(value: &str, network_code: &str) -> Option<String> {
     let prefix = format!("networks/{network_code}/adUnits/");
     let raw_id = value.strip_prefix(&prefix)?;
     if raw_id.is_empty()
@@ -577,6 +636,22 @@ fn scoped_numeric_id(value: &str, network_code: &str) -> Option<String> {
         .filter(|value| *value > 0)
         .map(|value| value.to_string())
         .filter(|canonical| canonical == raw_id)
+}
+
+fn root_omitted_path_matches(
+    ad_unit_id: &str,
+    reported: &[String],
+    resolved: &[String],
+    identity: &RootIdentity,
+) -> bool {
+    if resolved.first().map(String::as_str) != Some(identity.google_root_id.as_str()) {
+        return false;
+    }
+    let without_google_root = &resolved[1..];
+    let is_effective_root_or_descendant = ad_unit_id == identity.effective_root_id
+        || without_google_root.first().map(String::as_str)
+            == Some(identity.effective_root_id.as_str());
+    is_effective_root_or_descendant && reported == without_google_root
 }
 
 fn resolve_catalog_ancestors(
