@@ -30,6 +30,7 @@ mod error;
 mod evidence;
 mod fingerprint;
 mod probe_projection;
+mod tool_discovery;
 mod tool_surface;
 mod tools;
 

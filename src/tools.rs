@@ -37,12 +37,15 @@ use crate::evidence::{
 };
 use crate::fingerprint::stable_fingerprint;
 use crate::probe_projection::{ProbeKind, bounded_probe_error, bounded_probe_success};
+use crate::tool_discovery::{
+    companion_result_records, companion_tool_names, recovery_result_record, workflow_companions,
+};
 use crate::{AdManagerError, AdManagerServer, MANAGE_SCOPE, McpError};
 use mcp_toolkit_core::guarded_action::{
     GuardedActionApply, GuardedActionError, GuardedActionNoMutationProof, GuardedActionPlanSeed,
     GuardedActionPosture, GuardedActionPreview, GuardedActionRuntimeMode,
 };
-use mcp_toolkit_core::tool_inventory::{ToolOperation, ToolSearchFilter, ToolSearchResponse};
+use mcp_toolkit_core::tool_inventory::{ToolInventoryPolicy, ToolOperation, ToolSearchFilter};
 
 const AD_MANAGER_PROVIDER_API_NAME: &str = "Google Ad Manager API";
 const AD_MANAGER_PROVIDER_API_SERVICE: &str = "admanager.googleapis.com";
@@ -67,14 +70,19 @@ pub struct AuthStatusArgs {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct FindToolsArgs {
+    /// Natural-language workflow or tool query.
     #[serde(default)]
     pub query: Option<String>,
+    /// Optional exact tool group filter, such as catalog, reports, trafficking, or scratchpad.
     #[serde(default)]
     pub group: Option<String>,
+    /// Restrict discovery to non-mutating tools when true.
     #[serde(default)]
     pub read_only: Option<bool>,
+    /// Maximum ranked inventory matches. Defaults to 20 and is capped at 100.
     #[serde(default)]
     pub limit: Option<usize>,
+    /// Include full tool schemas and hosted-client metadata. Defaults to false for compact agent discovery.
     #[serde(default)]
     pub include_schema: bool,
 }
@@ -497,7 +505,7 @@ pub struct ScratchpadEvidenceBundleArgs {
 impl AdManagerServer {
     #[tool(
         name = "find_tools",
-        description = "Search Google Ad Manager MCP tools by keyword, group, and read-only status for OpenAI tool_search or deferred-loading clients."
+        description = "Semantically search Google Ad Manager MCP tools with ranked matches, plan-before-apply companions, completeness metadata, and empty-result recovery."
     )]
     async fn find_tools(
         &self,
@@ -511,18 +519,30 @@ impl AdManagerServer {
             read_only: args.read_only,
             limit: Some(limit),
         };
-        let results = self.inventory().search(
+        let ranked = self.inventory().search_ranked(
             &filter,
             ToolOperation::List,
-            &mcp_toolkit_core::tool_inventory::ToolInventoryPolicy::strict(),
+            &ToolInventoryPolicy::strict(),
         );
+        let companions = workflow_companions(&ranked.response.results);
+        let companion_names = companion_tool_names(&companions);
+        let mut extra_results = companion_result_records(&companions);
+        if let Some(recovery) =
+            recovery_result_record(self.inventory(), &filter, &ranked.match_summary)
+        {
+            extra_results.push(recovery);
+        }
         let schemas = if args.include_schema {
+            let mut selected_names = ranked
+                .response
+                .results
+                .iter()
+                .map(|result| result.name.clone())
+                .collect::<BTreeSet<_>>();
+            selected_names.extend(companion_names.iter().map(|name| (*name).to_string()));
             let mut schema_map = serde_json::Map::new();
             for tool in self.tool_schema_snapshot() {
-                if results
-                    .iter()
-                    .any(|result| result.name == tool.name.as_ref())
-                {
+                if selected_names.contains(tool.name.as_ref()) {
                     schema_map.insert(tool.name.to_string(), json!(tool));
                 }
             }
@@ -530,11 +550,18 @@ impl AdManagerServer {
         } else {
             None
         };
-        let response =
-            ToolSearchResponse::find_tools(args.query, args.group, args.read_only, results)
-                .with_schemas(schemas)
-                .with_metadata_label("gpt-5.5-compatible tool_search metadata contract");
-        Ok(contract::success(response.to_value(), started))
+        let response = ranked
+            .with_schemas(schemas)
+            .with_metadata_label("ranked compact tool_search metadata contract")
+            .into_openai_response()
+            .with_companion_allowed_tools(companion_names)
+            .with_extra_results(extra_results);
+        let value = if args.include_schema {
+            response.to_value()
+        } else {
+            response.to_compact_value()
+        };
+        Ok(contract::success(value, started))
     }
 
     #[tool(

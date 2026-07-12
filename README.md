@@ -271,6 +271,15 @@ All tool responses use Contract V1 envelopes:
 }
 ```
 
+`find_tools` uses deterministic ranked natural-language discovery. Its default
+response is compact, schema-free, capped by the toolkit's 32 KiB selection
+budget, and includes match-completeness metadata. When a guarded apply tool is
+selected, the response also allows and describes the required plan or preview
+companion; SOAP apply discovery additionally offers the payload builder when it
+is useful. Empty searches return available groups and bounded retry examples
+without relaxing `read_only`. Set `include_schema=true` only after narrowing the
+result set when full tool schemas are required.
+
 ## Upstream Scope
 
 This server is intentionally shaped around curated official Google Ad Manager

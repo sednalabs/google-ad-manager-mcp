@@ -43,6 +43,184 @@ fn stdio_initializes_and_lists_tools() {
 }
 
 #[test]
+fn find_tools_is_semantic_compact_and_recoverable() {
+    let mut process = StdioMcpProcess::start(env!("CARGO_BIN_EXE_google-ad-manager-mcp"));
+    for (offset, query, expected_tool) in [
+        (
+            0,
+            "set up and authenticate Google Ad Manager",
+            "gam_auth_status",
+        ),
+        (
+            1,
+            "inspect ad units and placements",
+            "gam_network_catalog_list",
+        ),
+        (
+            2,
+            "plan a campaign line item with creatives",
+            "gam_soap_trafficking_plan",
+        ),
+        (
+            3,
+            "audit campaign delivery and report rows",
+            "gam_report_result_rows",
+        ),
+        (
+            4,
+            "check exchange and yield protection",
+            "gam_exchange_protection_probe",
+        ),
+        (
+            5,
+            "assess ad units for retirement",
+            "gam_ad_unit_retirement_assessment",
+        ),
+        (
+            6,
+            "analyze line item delivery in a scratchpad",
+            "gam_scratchpad_ingest_soap_line_items",
+        ),
+    ] {
+        let response = process.call_tool(
+            100 + offset,
+            "find_tools",
+            json!({"query":query,"limit":10}),
+        );
+        let data = &response["result"]["structuredContent"]["data"];
+        assert!(data.get("schemas").is_none(), "query: {query}");
+        assert!(
+            data.get("openai_deferred_loading").is_none(),
+            "query: {query}"
+        );
+        assert!(
+            data["match_summary"]["total_matches"]
+                .as_u64()
+                .is_some_and(|count| count > 0)
+        );
+        assert!(
+            data["openai_allowed_tools"]
+                .as_array()
+                .is_some_and(|tools| tools.contains(&json!(expected_tool))),
+            "query '{query}' did not return {expected_tool}: {data}"
+        );
+        assert!(
+            serde_json::to_vec(data)
+                .expect("compact discovery serializes")
+                .len()
+                <= 32 * 1024
+        );
+    }
+
+    let empty = process.call_tool(
+        108,
+        "find_tools",
+        json!({
+            "query":"unknown workflow phrase",
+            "group":"missing-group",
+            "read_only":true
+        }),
+    );
+    let empty_data = &empty["result"]["structuredContent"]["data"];
+    assert_eq!(empty_data["match_summary"]["total_matches"], 0);
+    let recovery = empty_data["results"]
+        .as_array()
+        .and_then(|results| {
+            results
+                .iter()
+                .find(|result| result["type"] == "search_recovery")
+        })
+        .expect("empty search recovery record");
+    assert_eq!(recovery["status"], "no_matches");
+    assert!(
+        recovery["available_groups"]
+            .as_array()
+            .is_some_and(|groups| !groups.is_empty())
+    );
+
+    let full = process.call_tool(
+        109,
+        "find_tools",
+        json!({"query":"report rows","limit":2,"include_schema":true}),
+    );
+    let full_data = &full["result"]["structuredContent"]["data"];
+    assert!(
+        full_data["schemas"]
+            .as_object()
+            .is_some_and(|schemas| !schemas.is_empty())
+    );
+    assert!(full_data.get("openai_deferred_loading").is_some());
+}
+
+#[test]
+fn find_tools_pairs_apply_results_with_plan_or_preview() {
+    let mut process = StdioMcpProcess::start(env!("CARGO_BIN_EXE_google-ad-manager-mcp"));
+    for (offset, query, apply_tool, companion_tool) in [
+        (
+            0,
+            "gam rest write apply",
+            "gam_rest_write_apply",
+            "gam_rest_write_plan",
+        ),
+        (
+            1,
+            "gam soap trafficking apply creative",
+            "gam_soap_trafficking_apply",
+            "gam_soap_trafficking_plan",
+        ),
+        (
+            2,
+            "gam yield group exclusions apply",
+            "gam_yield_group_exclusions_apply",
+            "gam_yield_group_exclusions_preview",
+        ),
+    ] {
+        let response = process.call_tool(
+            120 + offset,
+            "find_tools",
+            json!({"query":query,"group":"trafficking","read_only":false,"limit":10}),
+        );
+        let data = &response["result"]["structuredContent"]["data"];
+        let allowed = data["openai_allowed_tools"]
+            .as_array()
+            .expect("allowed tools");
+        assert!(
+            allowed.contains(&json!(apply_tool)),
+            "query: {query}; data: {data}"
+        );
+        assert!(
+            allowed.contains(&json!(companion_tool)),
+            "query: {query}; data: {data}"
+        );
+        assert!(data["results"].as_array().is_some_and(|results| {
+            results.iter().any(|result| {
+                result["type"] == "workflow_companion"
+                    && result["name"] == companion_tool
+                    && result["before_tool"] == apply_tool
+                    && result["required"] == true
+            })
+        }));
+    }
+
+    let full = process.call_tool(
+        124,
+        "find_tools",
+        json!({
+            "query":"gam rest write apply",
+            "group":"trafficking",
+            "read_only":false,
+            "limit":1,
+            "include_schema":true
+        }),
+    );
+    let schemas = full["result"]["structuredContent"]["data"]["schemas"]
+        .as_object()
+        .expect("full schema map");
+    assert!(schemas.contains_key("gam_rest_write_apply"));
+    assert!(schemas.contains_key("gam_rest_write_plan"));
+}
+
+#[test]
 fn probe_handlers_reject_invalid_soap_versions_before_provider_access() {
     let mut process = StdioMcpProcess::start(env!("CARGO_BIN_EXE_google-ad-manager-mcp"));
     for (id, tool_name, arguments) in [
