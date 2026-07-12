@@ -42,18 +42,25 @@ whether a low-cost access check succeeded. They must not return:
 secret-bearing. Public discovery results omit raw query text and query-derived
 terms, return an exact group only when it matches a registered strict
 list-visible group, and otherwise expose only presence, recognition, and term
-counts. Narrow schema expansion is capped at five direct-plus-companion tools.
+counts. Provider semantics are computed only from the toolkit's bounded ranked
+query/group projection and are disabled when input truncation makes that
+projection fail closed; raw caller strings are never rescanned after search.
+Narrow schema expansion is capped at five direct-plus-companion tools.
 The complete RMCP result is guarded at 64 KiB with a 48 KiB structured-envelope
 cap and a bounded actionable JSON text projection rather than a duplicate full
 payload. Failed Contract V1 results set MCP `isError=true` as well as
 `ok:false`.
 
 Report operation and result handles are length-bounded and identity-bound. The
-run request, operation name, `metadata.report`, and final `reportResult` must
+run request uses an empty body. Once the non-idempotent POST may have been
+dispatched, transport, response, and decode failures are uncertain handoffs with
+`automatic_replay_safe=false` and no automatic retry guidance. The operation
+name, `metadata.report`, and final `reportResult` must
 remain in one network/report scope. Operation/result HTTP bodies and complete
-MCP results have explicit caps; polling controls have fixed maxima and an
-absolute deadline. A malformed provider handoff after a successful run POST is
-not replay-safe and must not trigger an automatic second run.
+MCP results have explicit caps, successful row payloads are shape-validated,
+and polling controls have fixed minima/maxima plus an absolute deadline over
+each GET and sleep. GET-only continuations preserve the optional expected report
+identity and the last valid observation.
 
 ## Tool-surface restrictions
 
@@ -108,7 +115,9 @@ The write surface uses a preview/apply contract:
   rollback note
 - `gam_yield_group_exclusions_preview` reads the current yield group and binds
   the confirmation token to the readback fingerprint, requested ad-unit
-  exclusions, and descendant-safe update payload
+  exclusions, descendant-safe update payload, payload-output choice, reason,
+  expected impact, rollback note, and idempotency key; its receipt contains the
+  exact schema-complete request for apply
 - `gam_yield_group_exclusions_apply` re-reads before apply, calls
   `updateYieldGroups` only when requested exclusions are missing or not already
   `includeDescendants=true`, and re-reads after apply before reporting success
@@ -175,6 +184,10 @@ This server bounds that surface by:
 - using paginated result fetching
 - returning structured JSON rather than writing files
 - keeping long-running operation polling bounded by a timeout
+- enforcing a 5-second minimum initial interval with bounded backoff and a
+  deadline over every in-flight GET
+- validating successful fetchRows objects, row arrays, page tokens, and row
+  counts before returning `ok:true`
 
 ## Public logging and diagnostics
 

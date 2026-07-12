@@ -221,7 +221,7 @@ whole credential files in tool responses.
 | `GOOGLE_AD_MANAGER_MCP_SOAP_BASE_URL` | `https://ads.google.com/apis/ads/publisher` | Upstream SOAP API root before version/service |
 | `GOOGLE_AD_MANAGER_MCP_WRITE_MODE` | `preview_only` | Write runtime gate: `read_only`, `preview_only`, or `enabled` |
 | `GOOGLE_AD_MANAGER_MCP_REPORT_POLL_TIMEOUT_MS` | `300000` | Default report wait timeout |
-| `GOOGLE_AD_MANAGER_MCP_REPORT_POLL_INITIAL_INTERVAL_MS` | `5000` | Initial report polling interval |
+| `GOOGLE_AD_MANAGER_MCP_REPORT_POLL_INITIAL_INTERVAL_MS` | `5000` | Initial report polling interval, clamped to 5000-30000 ms |
 | `GOOGLE_AD_MANAGER_MCP_SCRATCHPAD_SESSION_TTL_SECS` | `900` | Scratchpad session idle TTL |
 | `GOOGLE_AD_MANAGER_MCP_SCRATCHPAD_MAX_SESSIONS` | `64` | Maximum active scratchpad sessions |
 | `GOOGLE_AD_MANAGER_MCP_SCRATCHPAD_MAX_TABLES_PER_SESSION` | `32` | Maximum tables per scratchpad session |
@@ -304,14 +304,22 @@ Stateful recovery examples begin with executable entry points: report runs
 before completed-result pagination, and scratchpad session opening before
 ingestion into that session.
 
-Report runs and polls bind the requested report, returned operation name,
-`metadata.report`, and final `reportResult` to one network/report identity.
+Report runs send the provider-required empty POST body. Once that POST may have
+been dispatched, transport, response-read, size-limit, status, JSON, and handoff
+failures are all reported as non-replay-safe uncertain handoffs; agents must not
+start a replacement run automatically. Successful runs and subsequent polls
+bind the requested report, returned operation name, `metadata.report`, and final
+`reportResult` to one network/report identity. Poll continuations preserve the
+optional expected report name and use GET only.
 Operation bodies are read through a 64 KiB cap and projected to documented
 fields; result pages are read through a 512 KiB cap, use a maximum page size of
-1,000, and pass complete-result size guards. Poll timeouts are capped at 24
-hours, initial intervals normalized to at least 250 ms and capped at 30 seconds, and sleeps stop at an absolute deadline.
-If a successful run POST returns an invalid handoff, the error is explicitly
-not replay-safe and automatic reruns are prohibited.
+1,000, validate the documented object/row/page-token/count shapes, and pass
+complete-result size guards. Poll timeouts are between 1 ms and 24 hours;
+initial intervals are between 5 and 30 seconds with bounded exponential backoff.
+The absolute deadline covers in-flight GETs as well as sleeps. A timed-out
+continuation increases the bounded timeout instead of replaying the expired
+value. Contract-invalid poll observations preserve the last valid observation
+and a safely resumable GET continuation.
 
 `limit` defaults to 20 and must be at least 1. Values above 100 are passed to
 the toolkit, which clamps `match_summary.result_limit` to 100 and reports
@@ -338,9 +346,11 @@ recovery returns `local_state_alternatives` rather than silently relaxing the
 filter. A query with strong scratchpad intent under `read_only=true` also emits
 the same bounded `filter_alternative` alongside any weak read-only matches, so
 unrelated ranking results cannot hide the deliberate local-state continuation.
-Fail-closed searches never emit either form. The record makes the
-`read_only=false` retry explicit, limits its scope
-to bounded MCP-local scratchpad state, states that it cannot mutate GAM, and
+Fail-closed searches never emit either form. The record and content-only
+projection include a bounded executable rediscovery call,
+eligible/destructive counts, and access classes. They make the
+`read_only=false` retry explicit, limit its scope
+to bounded MCP-local scratchpad state, state that it cannot mutate GAM, and
 separately identifies destructive local close/drop tools. Its access classes
 also distinguish local-only calls, normal GAM REST reads, and the SOAP line-item
 ingest that requires the manage scope.
@@ -356,8 +366,12 @@ to the reviewed request and confirmation token, and does not authorize a
 mutation or bypass existing runtime, scope, context, confirmation, or readback
 gates.
 
-Each `workflow_companion` record reports `required_for_guided_sequence` and
-`server_call_enforced:false`. The legacy `required` field remains as an equal
+Each `workflow_companion` record reports `callable_as_tool`,
+`required_for_guided_sequence`, and `server_call_enforced:false`. An existing
+report operation keeps `gam_report_run` only as non-callable cold-start
+guidance, so it is never injected into `openai_allowed_tools` or schemas and
+cannot prompt a duplicate run. Optional SOAP builder guidance remains callable.
+The legacy `required` field remains as an equal
 compatibility alias and is labelled by
 `required_semantics:"guided_sequence_compatibility_alias"`; clients should use
 the new fields. Every reachable dependency edge is emitted even when its
@@ -400,4 +414,7 @@ required by the legacy SOAP API.
 YieldGroupService ad-unit exclusions. They preserve current yield-group
 targeting, add or repair only requested `excludedAdUnits` entries with
 `includeDescendants=true`, and require post-apply readback before reporting
-success.
+success. A non-noop preview includes a schema-complete exact apply request, and
+its confirmation fingerprint binds the excluded IDs, API and payload-output
+choice, reason, expected impact, rollback note, idempotency key, and current
+readback/update fingerprints.

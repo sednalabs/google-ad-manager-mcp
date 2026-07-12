@@ -369,7 +369,7 @@ impl Settings {
             write_mode,
             report_poll_timeout: Duration::from_millis(cli.report_poll_timeout_ms.max(1)),
             report_poll_initial_interval: Duration::from_millis(
-                cli.report_poll_initial_interval_ms.max(250),
+                cli.report_poll_initial_interval_ms.clamp(5_000, 30_000),
             ),
             scratchpad_session_ttl: Duration::from_secs(cli.scratchpad_session_ttl_secs),
             scratchpad_max_sessions: cli.scratchpad_max_sessions,

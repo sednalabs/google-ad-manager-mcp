@@ -102,6 +102,11 @@ one pull request.
   - remove `FindToolsArgs`, the `find_tools` handler, its result guards, and its
     discovery-only imports and helpers from `src/tools.rs`, while retaining the
     `gam_report_operation_poll` arguments and handler;
+  - remove `apply_rediscovery_continuation`,
+    `yield_group_apply_rediscovery_continuation`, and every `apply_rediscovery`
+    field from REST, SOAP, and yield-group preview receipts because their
+    executable discovery target no longer exists; keep the exact request and
+    confirmation-token fields themselves;
   - remove `success_with_text_summary`, its `ContentBlock` import, and its unit
     test from `src/contract.rs`, because that production helper is owned solely
     by the removed discovery response path;
@@ -111,10 +116,14 @@ one pull request.
     remains registered;
   - remove only the `find_tools` contracts from `tests/stdio_smoke.rs` and its
     expected tool list, while retaining all `gam_report_operation_poll`
-    contracts and its expected tool-list entry;
+    contracts and its expected tool-list entry; also remove the
+    `rest_plan_receipt_provides_explicit_apply_rediscovery` regression and any
+    preview-continuation assertions while retaining guarded request/token tests;
   - remove the `find_tools` sections from `README.md`, `docs/ARCHITECTURE.md`,
     `docs/SECURITY_MODEL.md`, and `docs/TOOL_GUIDE.md`, while retaining report
-    polling documentation in those files and `docs/GETTING_STARTED.md`; and
+    polling documentation in those files and `docs/GETTING_STARTED.md`; remove
+    the `apply_rediscovery` paragraph from `docs/GETTING_STARTED.md` and keep the
+    direct plan/preview-to-apply instructions; and
   - regenerate `spec/tool_schema_snapshot.v1.json` from the retained router.
   Do not restore the pull-request base schema snapshot, because it predates
   report polling. The resulting tool-list and schema contracts must contain

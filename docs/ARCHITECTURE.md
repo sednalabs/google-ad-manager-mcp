@@ -70,15 +70,20 @@ REST beta:
   sites, ad spots, and related batch state actions
 
 The report adapter treats long-running operation handles as bound capabilities,
-not free strings. A run response must bind its operation to the requested
+not free strings. `reports.run` sends a genuinely empty request body. Once that
+non-idempotent POST may have been dispatched, every transport, body-read,
+response-bound, status, JSON, or handoff failure is classified as uncertain and
+not automatically replay-safe. A run response must bind its operation to the requested
 `networks/{network}/reports/{report}` through `metadata.report`; every poll must
 echo the requested operation name; and the final `reportResult` must belong to
 that same report. Operation reads are capped at 64 KiB and projected to the
 documented name/metadata/done/error/response fields. Result-page reads are
-capped at 512 KiB and page size 1,000, then pass model-visible and complete RMCP
-result guards. Poll controls are capped at 24 hours and 30 seconds, and an
-absolute deadline bounds every sleep. A malformed response after the initial
-POST is an uncertain handoff with automatic replay prohibited.
+capped at 512 KiB and page size 1,000, validate documented row, token, and count
+types, then pass model-visible and complete RMCP result guards. Poll controls
+require a 5-to-30-second initial interval and at most 24 hours, with bounded
+backoff. An absolute deadline bounds every in-flight GET and sleep. Each
+continuation carries the optional expected report identity; malformed poll
+observations preserve the last valid observation and remain safely GET-resumable.
 
 SOAP v202605 by default:
 
@@ -153,22 +158,24 @@ yield-group preview before apply; and filter-validated bounded empty-result
 recovery. Destructive ad-unit archive/deactivate/retirement intent also adds
 network and catalogue identity, dependency-probe, and retirement-assessment
 predecessors before the REST plan.
-The provider computes transitive prerequisites in deterministic topological
-order. Direct report-operation discovery adds network lookup, report catalog,
-and the original run as an optional cold-start branch when no operation name is
-available; direct SOAP plan discovery adds the builder; and direct SOAP apply
-discovery adds builder then plan. Every reachable edge is emitted
+The provider computes callable transitive prerequisites in deterministic
+topological order and models non-callable conditions separately. Direct
+report-operation discovery keeps the original run only as a non-callable
+cold-start condition: it is present with the reason not to rerun an existing
+operation, but is absent from allowed tools and schemas. Direct SOAP plan
+discovery still adds its optional builder as callable guidance, and direct SOAP
+apply discovery adds builder then plan. Every reachable edge is emitted
 even when its predecessor is already a semantic result;
 `tool_already_selected` distinguishes that case from a missing predecessor.
-Only missing predecessor names are injected into allowed tools and schemas,
+Only missing callable predecessor names are injected into allowed tools and schemas,
 with name deduplication separate from edge emission. Match counts remain about
 semantic inventory results; companion and recovery records are separate OpenAI
 extra results so guidance does not inflate search counts. Full schemas and
 hosted-client metadata are emitted only when `include_schema=true`, and only
 when the complete direct-plus-companion selection contains at most five tools.
 Content-only clients receive a bounded actionable JSON projection with allowed
-tools, workflow edges, recovery, and schema names; complete ranked records and
-schemas remain in structured content.
+tools, callable/condition workflow edges and reasons, recovery, and schema
+names; complete ranked records and schemas remain in structured content.
 
 Recovery candidates are a typed static catalog covering every current tool
 group and both mutation classes where a group exposes both. Candidate examples
@@ -201,6 +208,8 @@ scope an explicit
 enumerates destructive close/drop tools without weakening the active filter.
 Provider-owned access classes distinguish local-only calls, REST reads under
 the read-only scope, and the SOAP line-item read that requires manage scope.
+The content-only projection retains the exact bounded rediscovery call plus
+eligible/destructive counts and access-class risk context.
 
 The provider rejects `limit=0` before inventory search. The public default is
 20; larger values flow into the toolkit unchanged so its hard maximum of 100,
@@ -291,7 +300,10 @@ YieldGroupService ad-unit exclusions. They read the current yield group,
 preserve the existing yield-group targeting object, add or repair only requested
 `excludedAdUnits` entries with `includeDescendants=true`, and require post-apply
 readback before reporting an applied state. They deliberately do not make
-`updateYieldGroups` a generic SOAP operation.
+`updateYieldGroups` a generic SOAP operation. The preview receipt serializes the
+exact schema-complete request for apply, and its confirmation fingerprint binds
+all mutation and approval-context fields plus the current readback and generated
+update fingerprints.
 
 The deliberately grouped write tools are `gam_rest_write_plan` and
 `gam_rest_write_apply`. They cover the current REST beta write surface through

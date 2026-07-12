@@ -171,6 +171,7 @@ const fn candidate(
 struct WorkflowDependency {
     tool_name: &'static str,
     before_tool: &'static str,
+    callable_as_tool: bool,
     required_for_guided_sequence: bool,
     reason: &'static str,
 }
@@ -179,6 +180,7 @@ struct WorkflowDependency {
 pub(crate) struct WorkflowCompanion {
     pub tool_name: &'static str,
     pub before_tool: &'static str,
+    pub callable_as_tool: bool,
     pub required_for_guided_sequence: bool,
     pub tool_already_selected: bool,
     pub reason: &'static str,
@@ -189,48 +191,56 @@ const WORKFLOW_DEPENDENCIES: [WorkflowDependency; 8] = [
     WorkflowDependency {
         tool_name: "gam_networks_list",
         before_tool: "gam_network_catalog_list",
+        callable_as_tool: true,
         required_for_guided_sequence: true,
         reason: "Cold-start catalog sequence: discover the exact network code before listing a network collection. Discovery does not prove that network discovery ran.",
     },
     WorkflowDependency {
         tool_name: "gam_network_catalog_list",
         before_tool: "gam_report_run",
+        callable_as_tool: true,
         required_for_guided_sequence: true,
         reason: "Cold-start report sequence: list collection=reports with the exact network code to obtain a saved report id before starting a run. Discovery does not prove that report catalog lookup ran.",
     },
     WorkflowDependency {
         tool_name: "gam_report_run",
         before_tool: "gam_report_operation_poll",
+        callable_as_tool: false,
         required_for_guided_sequence: false,
         reason: "Asynchronous report sequence: when no operation_name exists yet, start one report run with wait_for_completion=false, then pass its returned operation_name to gam_report_operation_poll. Do not call gam_report_run when an existing operation_name is already available; the poll tool never starts another report run.",
     },
     WorkflowDependency {
         tool_name: "gam_report_operation_poll",
         before_tool: "gam_report_result_rows",
+        callable_as_tool: true,
         required_for_guided_sequence: false,
         reason: "Asynchronous report sequence: poll the existing operation until it returns report_result before fetching rows. This step is optional when gam_report_run already waited for completion and returned report_result.",
     },
     WorkflowDependency {
         tool_name: "gam_rest_write_plan",
         before_tool: "gam_rest_write_apply",
+        callable_as_tool: true,
         required_for_guided_sequence: true,
         reason: "Guided sequence: review the REST plan before apply. Discovery does not prove that plan ran. REST apply independently revalidates its exact request and token and retains runtime, scope, and confirmation gates; configured readback is attempted where available but is not a universal success gate.",
     },
     WorkflowDependency {
         tool_name: "gam_soap_payload_build",
         before_tool: "gam_soap_trafficking_plan",
+        callable_as_tool: true,
         required_for_guided_sequence: false,
         reason: "Guided sequence: optionally build a typed SOAP payload before planning. Discovery does not prove the builder ran; independently authored payload_xml remains valid input, and the plan validates and builds its exact no-upstream-call request.",
     },
     WorkflowDependency {
         tool_name: "gam_soap_trafficking_plan",
         before_tool: "gam_soap_trafficking_apply",
+        callable_as_tool: true,
         required_for_guided_sequence: true,
         reason: "Guided sequence: review the SOAP trafficking plan before apply. Discovery does not prove that plan ran. Generic SOAP apply independently revalidates its exact request and token and retains runtime, scope, and confirmation gates; follow-up verification is still required.",
     },
     WorkflowDependency {
         tool_name: "gam_yield_group_exclusions_preview",
         before_tool: "gam_yield_group_exclusions_apply",
+        callable_as_tool: true,
         required_for_guided_sequence: true,
         reason: "Guided sequence: review descendant-safe yield-group exclusions before apply. Discovery does not prove that preview ran. Typed yield apply independently revalidates its exact request and token, retains runtime, scope, and confirmation gates, and requires descendant-safe post-apply readback.",
     },
@@ -240,18 +250,21 @@ const AD_UNIT_RETIREMENT_DEPENDENCIES: [WorkflowDependency; 3] = [
     WorkflowDependency {
         tool_name: "gam_network_catalog_list",
         before_tool: "gam_ad_unit_dependency_probe",
+        callable_as_tool: true,
         required_for_guided_sequence: true,
         reason: "Ad-unit retirement sequence: resolve the exact ad-unit code and canonical id before checking placement and line-item dependencies.",
     },
     WorkflowDependency {
         tool_name: "gam_ad_unit_dependency_probe",
         before_tool: "gam_ad_unit_retirement_assessment",
+        callable_as_tool: true,
         required_for_guided_sequence: true,
         reason: "Ad-unit retirement sequence: inspect current placement and line-item dependencies before producing a freshness-bound retirement assessment.",
     },
     WorkflowDependency {
         tool_name: "gam_ad_unit_retirement_assessment",
         before_tool: "gam_rest_write_plan",
+        callable_as_tool: true,
         required_for_guided_sequence: true,
         reason: "Ad-unit archive/deactivate sequence: review the conservative identity, hierarchy, dependency, and freshness assessment before creating any REST write plan.",
     },
@@ -273,7 +286,7 @@ pub(crate) fn workflow_companions(
     loop {
         let mut changed = false;
         for dependency in dependencies.iter().copied() {
-            if prerequisites.contains(dependency.before_tool) {
+            if dependency.callable_as_tool && prerequisites.contains(dependency.before_tool) {
                 changed |= prerequisites.insert(dependency.tool_name);
             }
         }
@@ -290,6 +303,7 @@ pub(crate) fn workflow_companions(
         .map(|dependency| WorkflowCompanion {
             tool_name: dependency.tool_name,
             before_tool: dependency.before_tool,
+            callable_as_tool: dependency.callable_as_tool,
             required_for_guided_sequence: dependency.required_for_guided_sequence,
             tool_already_selected: selected.contains(dependency.tool_name),
             reason: dependency.reason,
@@ -322,6 +336,7 @@ pub(crate) fn companion_tool_names(companions: &[WorkflowCompanion]) -> Vec<&'st
     let mut injected_names = BTreeSet::new();
     companions
         .iter()
+        .filter(|companion| companion.callable_as_tool)
         .filter(|companion| !companion.tool_already_selected)
         .filter(|companion| injected_names.insert(companion.tool_name))
         .map(|companion| companion.tool_name)
@@ -337,6 +352,19 @@ pub(crate) fn companion_result_records(companions: &[WorkflowCompanion]) -> Vec<
                 "name": companion.tool_name,
                 "relation": "before",
                 "before_tool": companion.before_tool,
+                "callable_as_tool": companion.callable_as_tool,
+                "selection_semantics": if companion.callable_as_tool {
+                    "callable_companion"
+                } else {
+                    "condition_only"
+                },
+                "invocation_condition": if !companion.callable_as_tool
+                    && companion.tool_name == "gam_report_run"
+                {
+                    Value::String("only_when_no_existing_operation_name".to_string())
+                } else {
+                    Value::Null
+                },
                 "tool_already_selected": companion.tool_already_selected,
                 "required": companion.required_for_guided_sequence,
                 "required_for_guided_sequence": companion.required_for_guided_sequence,
@@ -537,6 +565,17 @@ fn local_state_alternatives(inventory: &ToolInventory, filter: &ToolSearchFilter
         "retry_filter": {
             "group": "scratchpad",
             "read_only": false,
+        },
+        "rediscovery_call": {
+            "tool": "find_tools",
+            "arguments": {
+                "query": "scratchpad session analysis",
+                "group": "scratchpad",
+                "read_only": false,
+                "limit": 10,
+                "include_schema": false,
+            },
+            "calls_upstream": false,
         },
         "eligible_tools": eligible_tools,
         "eligible_tool_counts": {
@@ -757,23 +796,10 @@ mod tests {
                         vec!["gam_networks_list", "gam_network_catalog_list"]
                     )
                 }
-                "gam_report_operation_poll" => assert_eq!(
-                    prerequisites,
-                    vec![
-                        "gam_networks_list",
-                        "gam_network_catalog_list",
-                        "gam_report_run",
-                    ]
-                ),
-                "gam_report_result_rows" => assert_eq!(
-                    prerequisites,
-                    vec![
-                        "gam_networks_list",
-                        "gam_network_catalog_list",
-                        "gam_report_run",
-                        "gam_report_operation_poll",
-                    ]
-                ),
+                "gam_report_operation_poll" => assert!(prerequisites.is_empty()),
+                "gam_report_result_rows" => {
+                    assert_eq!(prerequisites, vec!["gam_report_operation_poll"])
+                }
                 "gam_rest_write_plan"
                     if candidate.query.contains("archive an ad unit")
                         || candidate.query.contains("deactivate an ad unit") =>
@@ -804,23 +830,16 @@ mod tests {
     }
 
     #[test]
-    fn report_rows_add_complete_cold_start_and_async_chain() {
+    fn report_rows_keep_existing_operation_calls_separate_from_cold_start_guidance() {
         let results = [result("gam_report_result_rows")];
         let companions = workflow_companions(&results, None);
         assert_eq!(
             companion_tool_names(&companions),
-            vec![
-                "gam_networks_list",
-                "gam_network_catalog_list",
-                "gam_report_run",
-                "gam_report_operation_poll",
-            ]
+            vec!["gam_report_operation_poll"]
         );
         assert_eq!(
             companion_edges(&companions),
             vec![
-                ("gam_networks_list", "gam_network_catalog_list", true, false,),
-                ("gam_network_catalog_list", "gam_report_run", true, false,),
                 ("gam_report_run", "gam_report_operation_poll", false, false,),
                 (
                     "gam_report_operation_poll",
@@ -830,6 +849,20 @@ mod tests {
                 ),
             ]
         );
+        let records = companion_result_records(&companions);
+        assert_eq!(records[0]["name"], "gam_report_run");
+        assert_eq!(records[0]["callable_as_tool"], false);
+        assert_eq!(records[0]["selection_semantics"], "condition_only");
+        assert_eq!(
+            records[0]["invocation_condition"],
+            "only_when_no_existing_operation_name"
+        );
+        assert!(
+            records[0]["reason"]
+                .as_str()
+                .is_some_and(|reason| reason.contains("Do not call gam_report_run"))
+        );
+        assert_eq!(records[1]["callable_as_tool"], true);
     }
 
     #[test]
@@ -895,6 +928,8 @@ mod tests {
         );
         assert_eq!(records[0]["server_call_enforced"], false);
         assert_eq!(records[0]["tool_already_selected"], false);
+        assert_eq!(records[0]["callable_as_tool"], true);
+        assert_eq!(records[0]["selection_semantics"], "callable_companion");
     }
 
     #[test]
@@ -1213,6 +1248,17 @@ mod tests {
             serde_json::json!({"group":"scratchpad","read_only":false})
         );
         assert_eq!(alternatives[0]["requires_explicit_operator_intent"], true);
+        assert_eq!(alternatives[0]["rediscovery_call"]["tool"], "find_tools");
+        assert_eq!(
+            alternatives[0]["rediscovery_call"]["arguments"],
+            serde_json::json!({
+                "query":"scratchpad session analysis",
+                "group":"scratchpad",
+                "read_only":false,
+                "limit":10,
+                "include_schema":false
+            })
+        );
 
         let mut fail_closed_summary = ranked.match_summary;
         fail_closed_summary

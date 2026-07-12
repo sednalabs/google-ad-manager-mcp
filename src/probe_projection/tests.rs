@@ -1243,6 +1243,7 @@ fn oversized_error_is_redacted_utf8_safe_and_byte_exact() {
         Instant::now(),
         "probe",
     );
+    assert_eq!(result.is_error, Some(true));
     assert!(serde_json::to_vec(&result).unwrap().len() < MAX_RMCP_TRANSPORT_BYTES);
     let envelope = structured(result);
     assert_eq!(envelope["error"]["code"], "auth_bootstrap");
@@ -1260,6 +1261,26 @@ fn oversized_error_is_redacted_utf8_safe_and_byte_exact() {
         row["retained_count"].as_u64().unwrap() + row["omitted_count"].as_u64().unwrap()
     );
     assert_eq!(row["retained_count"], json!(message.len()));
+}
+
+#[test]
+fn bounded_probe_errors_set_rmcp_error_for_full_and_compact_envelopes() {
+    for error in [
+        AdManagerError::invalid("probe", "small invalid input"),
+        AdManagerError::AuthBootstrap("x".repeat(MAX_CONTRACT_ENVELOPE_BYTES)),
+    ] {
+        let result =
+            bounded_probe_error(ProbeKind::AdUnitDependency, error, Instant::now(), "probe");
+        assert_eq!(result.is_error, Some(true));
+        assert!(serde_json::to_vec(&result).unwrap().len() < MAX_RMCP_TRANSPORT_BYTES);
+        assert_eq!(
+            result
+                .structured_content
+                .as_ref()
+                .and_then(|value| value.get("ok")),
+            Some(&json!(false))
+        );
+    }
 }
 
 #[test]

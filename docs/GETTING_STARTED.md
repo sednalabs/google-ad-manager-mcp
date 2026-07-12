@@ -131,11 +131,13 @@ For reports:
 4. `gam_report_operation_poll` when the run used `wait_for_completion=false`
 5. `gam_report_result_rows` when pagination is needed
 
-Report handles are bound to the requested network/report. Poll timeout is
-capped at 24 hours, the initial interval normalized to at least 250 ms and capped at 30 seconds, result pages at 1,000
-rows and 512 KiB, and polling stops at an absolute deadline. If a run POST
-returns an invalid operation handoff, do not automatically run the report
-again; inspect report activity first.
+Report handles are bound to the requested network/report. The run POST has an
+empty body. Once it may have been dispatched, any transport, response, or
+handoff failure is non-replay-safe: do not automatically run the report again.
+Poll timeout is between 1 ms and 24 hours, the initial interval between 5 and 30
+seconds, result pages at 1,000 rows and 512 KiB, and polling applies its absolute
+deadline to every GET and sleep. Continue with the returned
+`expected_report_name`; a timed-out continuation raises the bounded timeout.
 
 For REST write planning:
 
@@ -174,7 +176,9 @@ For descendant-safe yield-group ad-unit exclusions:
 The yield-group exclusion apply path re-reads the yield group before applying,
 preserves the existing yield-group targeting payload, adds only missing exact
 ad-unit exclusions, and re-reads the yield group after apply before it reports
-success.
+success. Its non-noop preview receipt carries the schema-complete request for
+apply, and the confirmation token binds every mutation and approval-context
+field in that request.
 
 For scratchpad analysis:
 

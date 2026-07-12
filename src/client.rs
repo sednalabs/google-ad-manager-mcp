@@ -14,7 +14,7 @@ use reqwest::{Client, Method, RequestBuilder};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::OnceCell;
-use tokio::time::{Instant as TokioInstant, sleep_until};
+use tokio::time::{Instant as TokioInstant, sleep_until, timeout_at};
 
 use crate::config::Settings;
 use crate::error::AdManagerError;
@@ -614,6 +614,7 @@ pub struct CompletedReportRun {
 pub(crate) struct ReportPollFailure {
     pub error: AdManagerError,
     pub operation: Option<Value>,
+    pub expected_report_name: Option<String>,
     pub terminal: bool,
 }
 
@@ -853,11 +854,21 @@ impl AdManagerClient {
     ) -> Result<Value, AdManagerError> {
         let network_code = validate_numeric_identifier("network_code", network_code)?;
         let report_id = validate_numeric_identifier("report_id", report_id)?;
-        self.post_empty_json_bounded(
+        let token = self.access_token().await?;
+        let url = absolute_api_url(
+            &self.api_base_url,
             &format!("networks/{network_code}/reports/{report_id}:run"),
-            MAX_REPORT_OPERATION_RESPONSE_BYTES,
-        )
-        .await
+        )?;
+        let mut request = self
+            .http
+            .request(Method::POST, url)
+            .bearer_auth(token)
+            .body(Vec::new());
+        if let Some(quota_project) = &self.quota_project {
+            request = request.header("x-goog-user-project", quota_project.as_ref());
+        }
+        self.send_report_run_json_bounded(request, MAX_REPORT_OPERATION_RESPONSE_BYTES)
+            .await
     }
 
     pub async fn get_report_result_rows(
@@ -886,12 +897,15 @@ impl AdManagerClient {
             }
             query.push(("pageToken", page_token));
         }
-        self.get_json_bounded(
-            &format!("{result_name}:fetchRows"),
-            &query,
-            MAX_REPORT_RESULT_RESPONSE_BYTES,
-        )
-        .await
+        let payload = self
+            .get_json_bounded(
+                &format!("{result_name}:fetchRows"),
+                &query,
+                MAX_REPORT_RESULT_RESPONSE_BYTES,
+            )
+            .await?;
+        validate_report_result_rows_payload(&payload)?;
+        Ok(payload)
     }
 
     pub async fn wait_for_report_result(
@@ -912,23 +926,27 @@ impl AdManagerClient {
         timeout: Duration,
         initial_interval: Duration,
     ) -> Result<CompletedReportRun, ReportPollFailure> {
-        if timeout.as_millis() > u128::from(MAX_REPORT_POLL_TIMEOUT_MS) {
+        if timeout.is_zero() || timeout.as_millis() > u128::from(MAX_REPORT_POLL_TIMEOUT_MS) {
             return Err(ReportPollFailure {
                 error: AdManagerError::invalid(
                     "poll_timeout_ms",
-                    format!("must be no greater than {MAX_REPORT_POLL_TIMEOUT_MS}"),
+                    format!("must be between 1 and {MAX_REPORT_POLL_TIMEOUT_MS}"),
                 ),
                 operation: None,
+                expected_report_name: None,
                 terminal: true,
             });
         }
-        if initial_interval.as_millis() > u128::from(MAX_REPORT_INITIAL_POLL_INTERVAL_MS) {
+        if initial_interval < Duration::from_secs(5)
+            || initial_interval.as_millis() > u128::from(MAX_REPORT_INITIAL_POLL_INTERVAL_MS)
+        {
             return Err(ReportPollFailure {
                 error: AdManagerError::invalid(
                     "initial_poll_interval_ms",
-                    format!("must be no greater than {MAX_REPORT_INITIAL_POLL_INTERVAL_MS}"),
+                    format!("must be between 5000 and {MAX_REPORT_INITIAL_POLL_INTERVAL_MS}"),
                 ),
                 operation: None,
+                expected_report_name: None,
                 terminal: true,
             });
         }
@@ -936,6 +954,7 @@ impl AdManagerClient {
             validate_operation_name(operation_name).map_err(|error| ReportPollFailure {
                 error,
                 operation: None,
+                expected_report_name: None,
                 terminal: true,
             })?;
         let expected_report_name = expected_report_name
@@ -944,48 +963,71 @@ impl AdManagerClient {
             .map_err(|error| ReportPollFailure {
                 error,
                 operation: None,
+                expected_report_name: None,
                 terminal: true,
             })?;
         let deadline = TokioInstant::now() + timeout;
-        let mut interval = initial_interval.max(Duration::from_millis(250));
-        let mut first_poll = true;
+        let mut interval = initial_interval.max(Duration::from_secs(5));
+        let mut bound_report_name = expected_report_name;
         let mut last_operation = None;
 
         loop {
-            if !first_poll && TokioInstant::now() >= deadline {
+            if TokioInstant::now() >= deadline {
                 return Err(ReportPollFailure {
                     error: AdManagerError::ReportRunTimeout {
                         operation_name: operation_name.to_string(),
                         timeout_ms: timeout.as_millis().min(u128::from(u64::MAX)) as u64,
                     },
                     operation: last_operation,
+                    expected_report_name: bound_report_name,
                     terminal: false,
                 });
             }
-            first_poll = false;
-            let operation = match self
-                .get_json_bounded(&operation_name, &[], MAX_REPORT_OPERATION_RESPONSE_BYTES)
-                .await
+            let operation = match timeout_at(
+                deadline,
+                self.get_json_bounded(&operation_name, &[], MAX_REPORT_OPERATION_RESPONSE_BYTES),
+            )
+            .await
             {
-                Ok(operation) => operation,
-                Err(error) => {
+                Ok(Ok(operation)) => operation,
+                Ok(Err(error)) => {
                     return Err(ReportPollFailure {
                         error,
                         operation: last_operation,
+                        expected_report_name: bound_report_name,
+                        terminal: false,
+                    });
+                }
+                Err(_) => {
+                    return Err(ReportPollFailure {
+                        error: AdManagerError::ReportRunTimeout {
+                            operation_name: operation_name.to_string(),
+                            timeout_ms: timeout.as_millis().min(u128::from(u64::MAX)) as u64,
+                        },
+                        operation: last_operation,
+                        expected_report_name: bound_report_name,
                         terminal: false,
                     });
                 }
             };
-            let (report_name, projected_operation) = validate_report_operation_binding(
+            let (report_name, projected_operation) = match validate_report_operation_binding(
                 &operation,
                 Some(&operation_name),
-                expected_report_name.as_deref(),
-            )
-            .map_err(|error| ReportPollFailure {
-                error,
-                operation: Some(project_report_operation(&operation)),
-                terminal: true,
-            })?;
+                bound_report_name.as_deref(),
+            ) {
+                Ok(value) => value,
+                Err(error) => {
+                    return Err(ReportPollFailure {
+                        error,
+                        operation: last_operation,
+                        expected_report_name: bound_report_name,
+                        terminal: false,
+                    });
+                }
+            };
+            if bound_report_name.is_none() {
+                bound_report_name = Some(report_name.clone());
+            }
             last_operation = Some(projected_operation.clone());
             if operation
                 .get("done")
@@ -999,6 +1041,7 @@ impl AdManagerClient {
                             message: clip_message(error.to_string()),
                         },
                         operation: Some(projected_operation),
+                        expected_report_name: bound_report_name,
                         terminal: true,
                     });
                 }
@@ -1016,7 +1059,8 @@ impl AdManagerClient {
                                     .to_string(),
                             },
                             operation: Some(projected_operation.clone()),
-                            terminal: true,
+                            expected_report_name: bound_report_name.clone(),
+                            terminal: false,
                         }
                     })?;
                     if !report_result.starts_with(&format!("{report_name}/results/")) {
@@ -1028,7 +1072,8 @@ impl AdManagerClient {
                                         .to_string(),
                             },
                             operation: Some(projected_operation),
-                            terminal: true,
+                            expected_report_name: bound_report_name,
+                            terminal: false,
                         });
                     }
                     return Ok(CompletedReportRun {
@@ -1042,6 +1087,7 @@ impl AdManagerClient {
                         operation_name: operation_name.to_string(),
                     },
                     operation: Some(projected_operation),
+                    expected_report_name: bound_report_name,
                     terminal: true,
                 });
             }
@@ -1054,6 +1100,7 @@ impl AdManagerClient {
                         timeout_ms: timeout.as_millis().min(u128::from(u64::MAX)) as u64,
                     },
                     operation: Some(projected_operation),
+                    expected_report_name: bound_report_name,
                     terminal: false,
                 });
             }
@@ -1366,28 +1413,6 @@ impl AdManagerClient {
             .map(|(value, _)| value)
     }
 
-    async fn post_empty_json_bounded(
-        &self,
-        relative_or_absolute_path: &str,
-        max_response_bytes: usize,
-    ) -> Result<Value, AdManagerError> {
-        let token = self.access_token().await?;
-        let mut request = self
-            .http
-            .request(
-                Method::POST,
-                absolute_api_url(&self.api_base_url, relative_or_absolute_path)?,
-            )
-            .bearer_auth(token)
-            .json(&json!({}));
-        if let Some(quota_project) = &self.quota_project {
-            request = request.header("x-goog-user-project", quota_project.as_ref());
-        }
-        self.send_json_bounded(request, max_response_bytes)
-            .await
-            .map(|(value, _)| value)
-    }
-
     async fn send_json(&self, request: RequestBuilder) -> Result<Value, AdManagerError> {
         let response = request.send().await?;
         let status = response.status();
@@ -1457,6 +1482,60 @@ impl AdManagerClient {
             return Ok((Value::Null, 0));
         }
         Ok((serde_json::from_slice(&bytes)?, response_bytes))
+    }
+
+    async fn send_report_run_json_bounded(
+        &self,
+        request: RequestBuilder,
+        max_response_bytes: usize,
+    ) -> Result<Value, AdManagerError> {
+        let mut response = request
+            .send()
+            .await
+            .map_err(|error| report_run_handoff_error(error))?;
+        let status = response.status();
+        if response
+            .content_length()
+            .is_some_and(|length| length > max_response_bytes as u64)
+        {
+            return Err(report_run_handoff_message(format!(
+                "upstream response exceeded the {max_response_bytes}-byte safety limit"
+            )));
+        }
+        let mut bytes = Vec::new();
+        loop {
+            let chunk = response
+                .chunk()
+                .await
+                .map_err(|error| report_run_handoff_error(error))?;
+            let Some(chunk) = chunk else {
+                break;
+            };
+            if bytes.len().saturating_add(chunk.len()) > max_response_bytes {
+                return Err(report_run_handoff_message(format!(
+                    "upstream response exceeded the {max_response_bytes}-byte safety limit"
+                )));
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        if !status.is_success() {
+            let message = String::from_utf8_lossy(&bytes).trim().to_string();
+            return Err(report_run_handoff_message(format!(
+                "upstream returned status {}: {}",
+                status.as_u16(),
+                if message.is_empty() {
+                    "no upstream response body".to_string()
+                } else {
+                    clip_message(message)
+                }
+            )));
+        }
+        if bytes.is_empty() {
+            return Err(report_run_handoff_message(
+                "upstream returned an empty report-run handoff".to_string(),
+            ));
+        }
+        serde_json::from_slice(&bytes).map_err(|error| report_run_handoff_error(error))
     }
 
     async fn send_xml(&self, request: RequestBuilder) -> Result<(u16, String), AdManagerError> {
@@ -2128,6 +2207,106 @@ pub(crate) fn canonical_report_name(
     Ok(format!("networks/{network_code}/reports/{report_id}"))
 }
 
+fn report_run_handoff_error(error: impl std::fmt::Display) -> AdManagerError {
+    report_run_handoff_message(error.to_string())
+}
+
+fn report_run_handoff_message(message: String) -> AdManagerError {
+    AdManagerError::ReportRunHandoffUncertain {
+        message: clip_message(message),
+    }
+}
+
+fn validate_report_result_rows_payload(payload: &Value) -> Result<(), AdManagerError> {
+    let Some(object) = payload.as_object() else {
+        return Err(AdManagerError::UpstreamContract {
+            field: "report_result_rows",
+            message: "successful fetchRows response must be a JSON object".to_string(),
+        });
+    };
+    if ![
+        "rows",
+        "runTime",
+        "dateRanges",
+        "comparisonDateRanges",
+        "totalRowCount",
+        "nextPageToken",
+    ]
+    .iter()
+    .any(|field| object.contains_key(*field))
+    {
+        return Err(AdManagerError::UpstreamContract {
+            field: "report_result_rows",
+            message:
+                "successful fetchRows response must contain documented report result metadata or rows"
+                    .to_string(),
+        });
+    }
+    if let Some(rows) = object.get("rows") {
+        let Some(rows) = rows.as_array() else {
+            return Err(AdManagerError::UpstreamContract {
+                field: "report_result_rows.rows",
+                message: "must be an array when present".to_string(),
+            });
+        };
+        if rows.iter().any(|row| !row.is_object()) {
+            return Err(AdManagerError::UpstreamContract {
+                field: "report_result_rows.rows",
+                message: "must contain only row objects".to_string(),
+            });
+        }
+    }
+    for field in ["dateRanges", "comparisonDateRanges"] {
+        if let Some(ranges) = object.get(field)
+            && !ranges
+                .as_array()
+                .is_some_and(|ranges| ranges.iter().all(Value::is_object))
+        {
+            return Err(AdManagerError::UpstreamContract {
+                field: if field == "dateRanges" {
+                    "report_result_rows.dateRanges"
+                } else {
+                    "report_result_rows.comparisonDateRanges"
+                },
+                message: "must be an array of objects when present".to_string(),
+            });
+        }
+    }
+    if object
+        .get("runTime")
+        .is_some_and(|value| !value.is_string())
+    {
+        return Err(AdManagerError::UpstreamContract {
+            field: "report_result_rows.runTime",
+            message: "must be an RFC 3339 timestamp string when present".to_string(),
+        });
+    }
+    if object
+        .get("totalRowCount")
+        .is_some_and(|value| value.as_u64().is_none())
+    {
+        return Err(AdManagerError::UpstreamContract {
+            field: "report_result_rows.totalRowCount",
+            message: "must be a non-negative integer when present".to_string(),
+        });
+    }
+    if let Some(next_page_token) = object.get("nextPageToken") {
+        let Some(next_page_token) = next_page_token.as_str() else {
+            return Err(AdManagerError::UpstreamContract {
+                field: "report_result_rows.nextPageToken",
+                message: "must be a string when present".to_string(),
+            });
+        };
+        if next_page_token.len() > MAX_REPORT_PAGE_TOKEN_BYTES {
+            return Err(AdManagerError::UpstreamContract {
+                field: "report_result_rows.nextPageToken",
+                message: format!("must be at most {MAX_REPORT_PAGE_TOKEN_BYTES} bytes"),
+            });
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_report_run_handoff(
     operation: &Value,
     expected_report_name: &str,
@@ -2151,6 +2330,46 @@ fn validate_report_operation_binding(
     expected_operation_name: Option<&str>,
     expected_report_name: Option<&str>,
 ) -> Result<(String, Value), AdManagerError> {
+    if !operation.is_object() {
+        return Err(AdManagerError::UpstreamContract {
+            field: "operation",
+            message: "report operation response must be a JSON object".to_string(),
+        });
+    }
+    if operation.get("done").is_some_and(|done| !done.is_boolean()) {
+        return Err(AdManagerError::UpstreamContract {
+            field: "operation.done",
+            message: "must be a boolean when present".to_string(),
+        });
+    }
+    if operation
+        .get("response")
+        .is_some_and(|response| !response.is_object())
+    {
+        return Err(AdManagerError::UpstreamContract {
+            field: "operation.response",
+            message: "must be an object when present".to_string(),
+        });
+    }
+    if operation
+        .get("error")
+        .is_some_and(|error| !error.is_object())
+    {
+        return Err(AdManagerError::UpstreamContract {
+            field: "operation.error",
+            message: "must be an object when present".to_string(),
+        });
+    }
+    if operation
+        .get("response")
+        .and_then(|response| response.get("reportResult"))
+        .is_some_and(|report_result| !report_result.is_string())
+    {
+        return Err(AdManagerError::UpstreamContract {
+            field: "operation.response.reportResult",
+            message: "must be a report result resource-name string when present".to_string(),
+        });
+    }
     let operation_name = operation
         .get("name")
         .and_then(Value::as_str)
@@ -2305,11 +2524,11 @@ mod tests {
         NETWORK_HIERARCHY_FIELDS, RestWriteOperation, RestWriteResource, SOAP_ENVELOPE_NAMESPACE,
         SoapTraffickingOperation, ad_unit_hierarchy_list_query, classify_soap_impact, clip_message,
         clip_message_with_truncation, clip_xml_response, extract_xml_tag, validate_operation_name,
-        validate_report_result_name, validate_report_run_handoff, validate_rest_write_body,
-        validate_soap_payload_xml,
+        validate_report_result_name, validate_report_result_rows_payload,
+        validate_report_run_handoff, validate_rest_write_body, validate_soap_payload_xml,
     };
     use crate::{AdManagerError, Settings};
-    use serde_json::json;
+    use serde_json::{Value, json};
 
     fn serve_one_http_response(response: Vec<u8>) -> (String, thread::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind local test server");
@@ -2430,6 +2649,27 @@ mod tests {
         server.join().expect("invalid JSON response server");
     }
 
+    #[tokio::test]
+    async fn report_run_maps_post_dispatch_decode_and_body_failures_to_uncertain_handoffs() {
+        for response in [
+            b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\nConnection: close\r\n\r\nnot-json".to_vec(),
+            b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\n{}".to_vec(),
+            b"HTTP/1.1 200 OK\r\nContent-Length: 65537\r\nConnection: close\r\n\r\n".to_vec(),
+        ] {
+            let (base_url, server) = serve_one_http_response(response);
+            let client = AdManagerClient::for_test_api_base_url(base_url);
+            let error = client
+                .run_report("123", "456")
+                .await
+                .expect_err("post-dispatch report failure must be uncertain");
+            assert!(matches!(
+                error,
+                AdManagerError::ReportRunHandoffUncertain { .. }
+            ));
+            server.join().expect("report-run failure server");
+        }
+    }
+
     #[test]
     fn validates_operation_name_shape() {
         assert!(validate_operation_name("networks/123/operations/reports/runs/456").is_ok());
@@ -2466,6 +2706,29 @@ mod tests {
             ))
             .is_err()
         );
+    }
+
+    #[test]
+    fn report_result_rows_payload_requires_documented_success_shapes() {
+        for invalid in [
+            Value::Null,
+            json!({}),
+            json!({"unknown": true}),
+            json!({"rows": {}}),
+            json!({"rows": ["not-a-row"]}),
+            json!({"nextPageToken": 42}),
+            json!({"totalRowCount": "1"}),
+            json!({"dateRanges": ["not-a-range"]}),
+        ] {
+            assert!(validate_report_result_rows_payload(&invalid).is_err());
+        }
+        for valid in [
+            json!({"rows": []}),
+            json!({"rows": [{"dimensionValues": [], "metricValueGroups": []}]}),
+            json!({"totalRowCount": 0, "nextPageToken": "next"}),
+        ] {
+            validate_report_result_rows_payload(&valid).expect("valid fetchRows payload");
+        }
     }
 
     #[test]

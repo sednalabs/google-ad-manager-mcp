@@ -246,29 +246,13 @@ fn find_tools_models_complete_report_cold_start_and_async_continuation() {
         sorted_direct_names(poll_data),
         vec!["gam_report_operation_poll"]
     );
-    let expected_poll_tools = vec![
-        "gam_network_catalog_list",
-        "gam_networks_list",
-        "gam_report_operation_poll",
-        "gam_report_run",
-    ];
+    let expected_poll_tools = vec!["gam_report_operation_poll"];
     assert_eq!(
         sorted_string_values(&poll_data["openai_allowed_tools"]),
         expected_poll_tools
     );
     assert_eq!(sorted_schema_names(poll_data), expected_poll_tools);
-    assert_eq!(workflow_edges(poll_data).len(), 3);
-    let catalog_companion = poll_data["results"]
-        .as_array()
-        .expect("poll discovery results")
-        .iter()
-        .find(|result| result["name"] == "gam_network_catalog_list")
-        .expect("report catalog companion");
-    assert!(
-        catalog_companion["reason"]
-            .as_str()
-            .is_some_and(|reason| reason.contains("collection=reports"))
-    );
+    assert_eq!(workflow_edges(poll_data).len(), 1);
     let run_companion = poll_data["results"]
         .as_array()
         .expect("poll discovery results")
@@ -281,13 +265,48 @@ fn find_tools_models_complete_report_cold_start_and_async_continuation() {
             .is_some_and(|reason| reason.contains("never starts another report run"))
     );
     assert_eq!(run_companion["required_for_guided_sequence"], false);
-    let network_companion = poll_data["results"]
-        .as_array()
-        .expect("poll discovery results")
-        .iter()
-        .find(|result| result["name"] == "gam_networks_list")
-        .expect("network discovery companion");
-    assert_eq!(network_companion["before_tool"], "gam_network_catalog_list");
+    assert_eq!(run_companion["callable_as_tool"], false);
+    assert_eq!(run_companion["selection_semantics"], "condition_only");
+    assert_eq!(
+        run_companion["invocation_condition"],
+        "only_when_no_existing_operation_name"
+    );
+    let poll_content: Value = serde_json::from_str(
+        poll_response["result"]["content"][0]["text"]
+            .as_str()
+            .expect("poll discovery content"),
+    )
+    .expect("poll discovery content is JSON");
+    assert_eq!(
+        poll_content["allowed_tools"],
+        json!(["gam_report_operation_poll"])
+    );
+    assert_eq!(poll_content["workflow"][0]["tool"], "gam_report_run");
+    assert_eq!(poll_content["workflow"][0]["callable_as_tool"], false);
+    assert_eq!(
+        poll_content["workflow"][0]["invocation_condition"],
+        "only_when_no_existing_operation_name"
+    );
+    assert!(
+        poll_content["workflow"][0]["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("Do not call gam_report_run"))
+    );
+    let poll_properties =
+        &poll_data["schemas"]["gam_report_operation_poll"]["inputSchema"]["properties"];
+    assert_eq!(poll_properties["poll_timeout_ms"]["minimum"], 1);
+    assert_eq!(poll_properties["poll_timeout_ms"]["maximum"], 86_400_000);
+    assert_eq!(
+        poll_properties["initial_poll_interval_ms"]["minimum"],
+        5_000
+    );
+    assert_eq!(
+        poll_properties["initial_poll_interval_ms"]["maximum"],
+        30_000
+    );
+    assert_eq!(poll_properties["result_page_size"]["minimum"], 1);
+    assert_eq!(poll_properties["result_page_size"]["maximum"], 1_000);
+    assert!(poll_properties.get("expected_report_name").is_some());
 
     let rows_response = process.call_tool(
         340,
@@ -306,27 +325,42 @@ fn find_tools_models_complete_report_cold_start_and_async_continuation() {
     );
     assert_eq!(
         sorted_string_values(&rows_data["openai_allowed_tools"]),
-        vec![
-            "gam_network_catalog_list",
-            "gam_networks_list",
-            "gam_report_operation_poll",
-            "gam_report_result_rows",
-            "gam_report_run",
-        ]
+        vec!["gam_report_operation_poll", "gam_report_result_rows"]
     );
-    assert_eq!(workflow_edges(rows_data).len(), 4);
+    assert_eq!(workflow_edges(rows_data).len(), 2);
     assert_eq!(
         sorted_schema_names(rows_data),
-        vec![
-            "gam_network_catalog_list",
-            "gam_networks_list",
-            "gam_report_operation_poll",
-            "gam_report_result_rows",
-            "gam_report_run",
-        ]
+        vec!["gam_report_operation_poll", "gam_report_result_rows"]
     );
     assert_eq!(rows_data["response_limits"]["max_schema_tools"], 5);
+    let rows_properties =
+        &rows_data["schemas"]["gam_report_result_rows"]["inputSchema"]["properties"];
+    assert_eq!(rows_properties["page_size"]["minimum"], 1);
+    assert_eq!(rows_properties["page_size"]["maximum"], 1_000);
+    assert_eq!(rows_properties["page_token"]["maxLength"], 4_096);
     assert_complete_discovery_result_is_bounded(&rows_response);
+
+    let run_response = process.call_tool(
+        341,
+        "find_tools",
+        json!({
+            "query":"start a campaign delivery audit with a saved report",
+            "group":"reports",
+            "limit":1,
+            "include_schema":true
+        }),
+    );
+    let run_properties = &run_response["result"]["structuredContent"]["data"]["schemas"]["gam_report_run"]
+        ["inputSchema"]["properties"];
+    assert_eq!(run_properties["poll_timeout_ms"]["minimum"], 1);
+    assert_eq!(run_properties["poll_timeout_ms"]["maximum"], 86_400_000);
+    assert_eq!(run_properties["initial_poll_interval_ms"]["minimum"], 5_000);
+    assert_eq!(
+        run_properties["initial_poll_interval_ms"]["maximum"],
+        30_000
+    );
+    assert_eq!(run_properties["result_page_size"]["minimum"], 1);
+    assert_eq!(run_properties["result_page_size"]["maximum"], 1_000);
 }
 
 #[test]
@@ -548,7 +582,11 @@ fn find_tools_rejects_zero_and_preserves_toolkit_limit_diagnostics() {
     );
 
     let query_terminal_marker = "oversized-query-terminal-marker";
-    let oversized_query = format!("quasar {}{}", "z".repeat(64 * 1024), query_terminal_marker);
+    let oversized_query = format!(
+        "archive an ad unit {}{}",
+        "z".repeat(64 * 1024),
+        query_terminal_marker
+    );
     let truncated_query = process.call_tool(
         233,
         "find_tools",
@@ -1022,6 +1060,24 @@ fn find_tools_read_only_filter_partitions_all_scratchpad_tools() {
         query_only_text["local_state_retry"]["retry_filter"],
         json!({"group":"scratchpad","read_only":false})
     );
+    assert_eq!(
+        query_only_text["local_state_retry"]["rediscovery_call"]["arguments"],
+        json!({
+            "query":"scratchpad session analysis",
+            "group":"scratchpad",
+            "read_only":false,
+            "limit":10,
+            "include_schema":false
+        })
+    );
+    assert_eq!(
+        query_only_text["local_state_retry"]["destructive_tools"],
+        json!(["gam_scratchpad_close_session", "gam_scratchpad_drop_table"])
+    );
+    assert_eq!(
+        query_only_text["local_state_retry"]["tool_access_classes"][2]["manage_scope_required"],
+        true
+    );
 
     let fail_closed_response = process.call_tool(
         126,
@@ -1138,6 +1194,7 @@ fn probe_handlers_reject_invalid_soap_versions_before_provider_access() {
             "JSON-RPC error: {response}"
         );
         let result = &response["result"]["structuredContent"];
+        assert_eq!(response["result"]["isError"], true);
         assert!(
             serde_json::to_vec(result)
                 .expect("serialize public probe error")
