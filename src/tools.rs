@@ -507,7 +507,7 @@ pub struct ScratchpadEvidenceBundleArgs {
 impl AdManagerServer {
     #[tool(
         name = "find_tools",
-        description = "Semantically search Google Ad Manager MCP tools with ranked matches, plan-before-apply companions, completeness metadata, and empty-result recovery."
+        description = "Semantically search Google Ad Manager MCP tools with ranked matches, guided dependency edges, completeness metadata, and empty-result recovery."
     )]
     async fn find_tools(
         &self,

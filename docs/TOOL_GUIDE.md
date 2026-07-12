@@ -68,19 +68,29 @@ Discovery adds guided dependency edges:
   `gam_yield_group_exclusions_apply` and is required for the guided sequence.
 
 SOAP prerequisites are transitive: direct plan discovery adds the builder;
-direct apply discovery adds builder then plan. Companion names and edges are
-deduplicated when related tools are already semantic results. Companions are
-non-mutating, can be added to the allowed-tool list, and do not increase
-semantic match counts.
+direct apply discovery adds builder then plan. Every reachable edge is emitted
+even when its predecessor is already a semantic result, with
+`tool_already_selected` identifying that case. Only missing predecessor names
+are injected into allowed tools and schemas, so injection remains deduplicated
+without suppressing dependency edges. Companions are non-mutating and do not
+increase semantic match counts.
 
 Every companion record uses `required_for_guided_sequence` and
-`server_call_enforced:false`. This ordering is guidance and does not prove that
-the companion tool was invoked. Apply independently revalidates its exact
-request and token and retains runtime, scope, confirmation, and readback gates.
-A search that returns no tools adds a bounded `search_recovery` record with
-available groups, fail-closed reason codes when relevant, and representative
-retry queries. Recovery never recommends turning off `read_only` merely to
-produce a match.
+`server_call_enforced:false`. The legacy `required` field remains as the same
+boolean for compatibility and carries
+`required_semantics:"guided_sequence_compatibility_alias"`; clients should use
+the new fields. This ordering is guidance and does not prove that the companion
+tool was invoked.
+
+REST apply independently revalidates its exact request and token and retains
+runtime, scope, and confirmation gates; configured readback is attempted where
+available but is not a universal success gate. Generic SOAP apply retains those
+request, token, runtime, scope, and confirmation checks and requires follow-up
+verification. Typed yield apply also requires descendant-safe post-apply
+readback. A search that returns no tools adds a bounded `search_recovery` record
+with available groups, fail-closed reason codes when relevant, and
+representative retry queries. Recovery never recommends turning off
+`read_only` merely to produce a match.
 
 ## `gam_network_catalog_list`
 

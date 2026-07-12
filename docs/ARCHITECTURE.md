@@ -135,17 +135,29 @@ before apply, optional SOAP payload builder before SOAP plan, SOAP plan before
 SOAP apply, yield-group preview before apply, and bounded empty-result recovery.
 The provider computes transitive prerequisites in deterministic topological
 order, so direct SOAP plan discovery adds the builder and direct SOAP apply
-discovery adds builder then plan. Already-selected semantic tools are not
-duplicated as companions. Match counts remain about semantic inventory results;
-companion and recovery records are separate OpenAI extra results so guidance
-does not inflate search counts. Full schemas and hosted-client metadata are
-emitted only when `include_schema=true`.
+discovery adds builder then plan. Every reachable edge is emitted even when its
+predecessor is already a semantic result; `tool_already_selected` distinguishes
+that case from a missing predecessor. Only missing predecessor names are
+injected into allowed tools and schemas, with name deduplication separate from
+edge emission. Match counts remain about semantic inventory results; companion
+and recovery records are separate OpenAI extra results so guidance does not
+inflate search counts. Full schemas and hosted-client metadata are emitted only
+when `include_schema=true`.
 
 Companion edges describe a guided sequence, not server-side invocation proof.
 Each record exposes `required_for_guided_sequence` and
-`server_call_enforced:false`. Apply independently revalidates its exact request
-and token and retains runtime, scope, confirmation, and readback gates; no
-companion record claims that the builder, plan, or preview call occurred.
+`server_call_enforced:false`. The legacy `required` field is preserved as an
+equal compatibility alias with
+`required_semantics:"guided_sequence_compatibility_alias"`; clients should use
+the new fields. No companion record claims that the builder, plan, or preview
+call occurred.
+
+Verification authority remains tool-specific. REST apply independently
+revalidates its request and token and retains runtime, scope, and confirmation
+gates; configured readback is attempted where available but is not a universal
+success gate. Generic SOAP apply retains request, token, runtime, scope, and
+confirmation checks and requires follow-up verification. Typed yield apply
+retains those gates and requires descendant-safe post-apply readback.
 
 The deliberately grouped tool is `gam_network_catalog_list`. It keeps the
 surface compact while still covering the curated network collections that
@@ -209,8 +221,9 @@ The deliberately grouped write tools are `gam_rest_write_plan` and
 `gam_rest_write_apply`. They cover the current REST beta write surface through
 typed allowlists rather than exposing arbitrary HTTP. Planning is a no-mutation
 preview; apply requires explicit runtime enablement, the manage OAuth scope, a
-matching confirmation token, operator context, and post-apply readback where the
-upstream response exposes a resource name.
+matching confirmation token, and operator context. When the upstream response
+exposes a resource name, configured readback is attempted but is not a universal
+success gate.
 
 The deliberately grouped SOAP tools are `gam_soap_trafficking_plan` and
 `gam_soap_trafficking_apply`. They cover classic trafficking and forecast
@@ -227,9 +240,9 @@ SOAP plans are no-mutation previews. Discovery guides callers through optional
 builder, plan, then apply, but it does not enforce or prove those calls. SOAP
 apply independently validates the exact request and token, always requires the
 full Ad Manager manage scope because the legacy SOAP API does not support the
-newer read-only scope, and retains runtime, confirmation, and readback gates.
-Mutating SOAP apply also requires explicit write-mode enablement and operator
-context.
+newer read-only scope, retains runtime and confirmation gates, and requires
+follow-up verification rather than claiming universal readback. Mutating SOAP
+apply also requires explicit write-mode enablement and operator context.
 
 `gam_soap_payload_build` is a no-mutation helper that sits before those tools.
 It renders bounded, validated templates for common read, line-item action,

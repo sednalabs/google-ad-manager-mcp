@@ -291,10 +291,21 @@ include both non-mutating and mutating tools. Guided predecessors may still be
 added to an apply result's allowed-tool list.
 
 Each `workflow_companion` record reports `required_for_guided_sequence` and
-`server_call_enforced:false`. Discovery ordering is guidance and does not prove
-that a builder, plan, or preview tool was invoked. Apply independently
-revalidates its exact request and token and retains runtime, scope,
-confirmation, and readback gates.
+`server_call_enforced:false`. The legacy `required` field remains as an equal
+compatibility alias and is labelled by
+`required_semantics:"guided_sequence_compatibility_alias"`; clients should use
+the new fields. Every reachable dependency edge is emitted even when its
+predecessor is already a semantic tool result. `tool_already_selected` makes
+that state explicit, while allowed-tool and schema injection add only missing
+predecessors and remain deduplicated.
+
+Discovery ordering is guidance and does not prove that a builder, plan, or
+preview tool was invoked. REST apply revalidates its exact request and token and
+retains runtime, scope, and confirmation gates; configured readback is attempted
+where available but is not a universal success gate. Generic SOAP apply retains
+the same request, token, runtime, scope, and confirmation checks but requires
+follow-up verification. Typed yield apply also requires descendant-safe
+post-apply readback.
 
 ## Upstream Scope
 
