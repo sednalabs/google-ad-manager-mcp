@@ -2,12 +2,13 @@
   "schema": "mcp_tool_schema_snapshot",
   "tools": [
     {
-      "description": "Search Google Ad Manager MCP tools by keyword, group, and read-only status for OpenAI tool_search or deferred-loading clients.",
+      "description": "Semantically search Google Ad Manager MCP tools with ranked matches, plan-before-apply companions, completeness metadata, and empty-result recovery.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "group": {
             "default": null,
+            "description": "Optional exact tool group filter, such as catalog, reports, trafficking, or scratchpad.",
             "type": [
               "string",
               "null"
@@ -15,10 +16,12 @@
           },
           "include_schema": {
             "default": false,
+            "description": "Include full tool schemas and hosted-client metadata. Defaults to false for compact agent discovery.",
             "type": "boolean"
           },
           "limit": {
             "default": null,
+            "description": "Maximum ranked inventory matches. Defaults to 20 and is capped at 100.",
             "format": "uint",
             "minimum": 0,
             "type": [
@@ -28,6 +31,7 @@
           },
           "query": {
             "default": null,
+            "description": "Natural-language workflow or tool query.",
             "type": [
               "string",
               "null"
@@ -35,6 +39,7 @@
           },
           "read_only": {
             "default": null,
+            "description": "Restrict discovery to non-mutating tools when true.",
             "type": [
               "boolean",
               "null"
