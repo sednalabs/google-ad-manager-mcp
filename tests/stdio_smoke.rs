@@ -1,5 +1,5 @@
 use mcp_toolkit_testing::stdio_contract::StdioMcpProcess;
-use serde_json::json;
+use serde_json::{Value, json};
 
 #[test]
 fn stdio_initializes_and_lists_tools() {
@@ -210,9 +210,11 @@ fn find_tools_pairs_apply_results_with_plan_or_preview() {
             result["type"] == "workflow_companion"
                 && result["name"] == companion_tool
                 && result["before_tool"] == apply_tool
+                && result["required"] == true
                 && result["required_for_guided_sequence"] == true
+                && result["required_semantics"] == "guided_sequence_compatibility_alias"
                 && result["server_call_enforced"] == false
-                && result.get("required").is_none()
+                && result["tool_already_selected"] == false
         }));
         for non_mutating_name in allowed.iter().filter_map(|name| {
             name.as_str()
@@ -252,10 +254,100 @@ fn find_tools_pairs_apply_results_with_plan_or_preview() {
 }
 
 #[test]
-fn find_tools_models_soap_builder_plan_apply_dependencies() {
+fn find_tools_compact_models_exact_soap_dependencies() {
     let mut process = StdioMcpProcess::start(env!("CARGO_BIN_EXE_google-ad-manager-mcp"));
     let plan_response = process.call_tool(
         130,
+        "find_tools",
+        json!({
+            "query":"gam soap trafficking plan forecast line item",
+            "group":"trafficking",
+            "read_only":true,
+            "limit":1
+        }),
+    );
+    let plan_data = &plan_response["result"]["structuredContent"]["data"];
+    assert!(plan_data.get("schemas").is_none());
+    assert!(plan_data.get("openai_deferred_loading").is_none());
+    assert_eq!(
+        sorted_direct_names(plan_data),
+        vec!["gam_soap_trafficking_plan"]
+    );
+    assert_eq!(
+        sorted_string_values(&plan_data["openai_allowed_tools"]),
+        vec!["gam_soap_payload_build", "gam_soap_trafficking_plan"]
+    );
+    assert_eq!(
+        workflow_edges(plan_data),
+        vec![json!({
+            "relation": "before",
+            "name": "gam_soap_payload_build",
+            "before_tool": "gam_soap_trafficking_plan",
+            "tool_already_selected": false,
+            "required": false,
+            "required_for_guided_sequence": false,
+            "required_semantics": "guided_sequence_compatibility_alias",
+            "server_call_enforced": false,
+        })]
+    );
+
+    let apply_response = process.call_tool(
+        131,
+        "find_tools",
+        json!({
+            "query":"gam soap trafficking apply creative",
+            "group":"trafficking",
+            "read_only":false,
+            "limit":1
+        }),
+    );
+    let apply_data = &apply_response["result"]["structuredContent"]["data"];
+    assert!(apply_data.get("schemas").is_none());
+    assert!(apply_data.get("openai_deferred_loading").is_none());
+    assert_eq!(
+        sorted_direct_names(apply_data),
+        vec!["gam_soap_trafficking_apply"]
+    );
+    assert_eq!(
+        sorted_string_values(&apply_data["openai_allowed_tools"]),
+        vec![
+            "gam_soap_payload_build",
+            "gam_soap_trafficking_apply",
+            "gam_soap_trafficking_plan",
+        ]
+    );
+    assert_eq!(
+        workflow_edges(apply_data),
+        vec![
+            json!({
+                "relation": "before",
+                "name": "gam_soap_payload_build",
+                "before_tool": "gam_soap_trafficking_plan",
+                "tool_already_selected": false,
+                "required": false,
+                "required_for_guided_sequence": false,
+                "required_semantics": "guided_sequence_compatibility_alias",
+                "server_call_enforced": false,
+            }),
+            json!({
+                "relation": "before",
+                "name": "gam_soap_trafficking_plan",
+                "before_tool": "gam_soap_trafficking_apply",
+                "tool_already_selected": false,
+                "required": true,
+                "required_for_guided_sequence": true,
+                "required_semantics": "guided_sequence_compatibility_alias",
+                "server_call_enforced": false,
+            }),
+        ]
+    );
+}
+
+#[test]
+fn find_tools_full_schema_includes_exact_soap_dependency_tools() {
+    let mut process = StdioMcpProcess::start(env!("CARGO_BIN_EXE_google-ad-manager-mcp"));
+    let plan_response = process.call_tool(
+        132,
         "find_tools",
         json!({
             "query":"gam soap trafficking plan forecast line item",
@@ -266,41 +358,13 @@ fn find_tools_models_soap_builder_plan_apply_dependencies() {
         }),
     );
     let plan_data = &plan_response["result"]["structuredContent"]["data"];
-    let plan_results = plan_data["results"].as_array().expect("plan results");
-    assert!(plan_results.iter().any(|result| {
-        result["type"] == "tool" && result["name"] == "gam_soap_trafficking_plan"
-    }));
-    let plan_edges = plan_results
-        .iter()
-        .filter(|result| result["type"] == "workflow_companion")
-        .map(|result| {
-            (
-                result["name"].as_str().expect("companion name"),
-                result["before_tool"].as_str().expect("edge target"),
-                result["required_for_guided_sequence"]
-                    .as_bool()
-                    .expect("guided requirement"),
-                result["server_call_enforced"]
-                    .as_bool()
-                    .expect("server enforcement"),
-            )
-        })
-        .collect::<Vec<_>>();
     assert_eq!(
-        plan_edges,
-        vec![(
-            "gam_soap_payload_build",
-            "gam_soap_trafficking_plan",
-            false,
-            false,
-        )]
+        sorted_schema_names(plan_data),
+        vec!["gam_soap_payload_build", "gam_soap_trafficking_plan"]
     );
-    let plan_schemas = plan_data["schemas"].as_object().expect("plan schemas");
-    assert!(plan_schemas.contains_key("gam_soap_trafficking_plan"));
-    assert!(plan_schemas.contains_key("gam_soap_payload_build"));
 
     let apply_response = process.call_tool(
-        131,
+        133,
         "find_tools",
         json!({
             "query":"gam soap trafficking apply creative",
@@ -311,47 +375,90 @@ fn find_tools_models_soap_builder_plan_apply_dependencies() {
         }),
     );
     let apply_data = &apply_response["result"]["structuredContent"]["data"];
-    let apply_results = apply_data["results"].as_array().expect("apply results");
-    assert!(apply_results.iter().any(|result| {
-        result["type"] == "tool" && result["name"] == "gam_soap_trafficking_apply"
-    }));
-    let apply_edges = apply_results
-        .iter()
-        .filter(|result| result["type"] == "workflow_companion")
-        .map(|result| {
-            (
-                result["name"].as_str().expect("companion name"),
-                result["before_tool"].as_str().expect("edge target"),
-                result["required_for_guided_sequence"]
-                    .as_bool()
-                    .expect("guided requirement"),
-                result["server_call_enforced"]
-                    .as_bool()
-                    .expect("server enforcement"),
-            )
-        })
-        .collect::<Vec<_>>();
     assert_eq!(
-        apply_edges,
+        sorted_schema_names(apply_data),
         vec![
-            (
-                "gam_soap_payload_build",
-                "gam_soap_trafficking_plan",
-                false,
-                false,
-            ),
-            (
-                "gam_soap_trafficking_plan",
-                "gam_soap_trafficking_apply",
-                true,
-                false,
-            ),
+            "gam_soap_payload_build",
+            "gam_soap_trafficking_apply",
+            "gam_soap_trafficking_plan",
         ]
     );
-    let apply_schemas = apply_data["schemas"].as_object().expect("apply schemas");
-    assert!(apply_schemas.contains_key("gam_soap_trafficking_apply"));
-    assert!(apply_schemas.contains_key("gam_soap_trafficking_plan"));
-    assert!(apply_schemas.contains_key("gam_soap_payload_build"));
+}
+
+#[test]
+fn find_tools_broad_trafficking_keeps_edges_without_duplicate_injection() {
+    let mut process = StdioMcpProcess::start(env!("CARGO_BIN_EXE_google-ad-manager-mcp"));
+    let response = process.call_tool(
+        134,
+        "find_tools",
+        json!({
+            "group":"trafficking",
+            "limit":100,
+            "include_schema":true
+        }),
+    );
+    let data = &response["result"]["structuredContent"]["data"];
+    let expected_names = vec![
+        "gam_rest_write_apply",
+        "gam_rest_write_plan",
+        "gam_soap_payload_build",
+        "gam_soap_trafficking_apply",
+        "gam_soap_trafficking_plan",
+        "gam_trafficking_tool_matrix",
+        "gam_yield_group_exclusions_apply",
+        "gam_yield_group_exclusions_preview",
+    ];
+    assert_eq!(sorted_direct_names(data), expected_names);
+    assert_eq!(
+        sorted_string_values(&data["openai_allowed_tools"]),
+        expected_names
+    );
+    assert_eq!(sorted_schema_names(data), expected_names);
+    assert_eq!(
+        workflow_edges(data),
+        vec![
+            json!({
+                "relation": "before",
+                "name": "gam_rest_write_plan",
+                "before_tool": "gam_rest_write_apply",
+                "tool_already_selected": true,
+                "required": true,
+                "required_for_guided_sequence": true,
+                "required_semantics": "guided_sequence_compatibility_alias",
+                "server_call_enforced": false,
+            }),
+            json!({
+                "relation": "before",
+                "name": "gam_soap_payload_build",
+                "before_tool": "gam_soap_trafficking_plan",
+                "tool_already_selected": true,
+                "required": false,
+                "required_for_guided_sequence": false,
+                "required_semantics": "guided_sequence_compatibility_alias",
+                "server_call_enforced": false,
+            }),
+            json!({
+                "relation": "before",
+                "name": "gam_soap_trafficking_plan",
+                "before_tool": "gam_soap_trafficking_apply",
+                "tool_already_selected": true,
+                "required": true,
+                "required_for_guided_sequence": true,
+                "required_semantics": "guided_sequence_compatibility_alias",
+                "server_call_enforced": false,
+            }),
+            json!({
+                "relation": "before",
+                "name": "gam_yield_group_exclusions_preview",
+                "before_tool": "gam_yield_group_exclusions_apply",
+                "tool_already_selected": true,
+                "required": true,
+                "required_for_guided_sequence": true,
+                "required_semantics": "guided_sequence_compatibility_alias",
+                "server_call_enforced": false,
+            }),
+        ]
+    );
 }
 
 #[test]
@@ -538,4 +645,59 @@ fn retirement_assessment_rejects_noncanonical_targets_at_stdio_boundary() {
                 < 20 * 1024
         );
     }
+}
+
+fn sorted_direct_names(data: &Value) -> Vec<&str> {
+    let mut names = data["results"]
+        .as_array()
+        .expect("discovery results")
+        .iter()
+        .filter(|result| result["type"] == "tool")
+        .map(|result| result["name"].as_str().expect("direct tool name"))
+        .collect::<Vec<_>>();
+    names.sort_unstable();
+    names
+}
+
+fn sorted_string_values(value: &Value) -> Vec<&str> {
+    let mut values = value
+        .as_array()
+        .expect("string array")
+        .iter()
+        .map(|value| value.as_str().expect("string value"))
+        .collect::<Vec<_>>();
+    values.sort_unstable();
+    values
+}
+
+fn sorted_schema_names(data: &Value) -> Vec<&str> {
+    let mut names = data["schemas"]
+        .as_object()
+        .expect("schema map")
+        .keys()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    names.sort_unstable();
+    names
+}
+
+fn workflow_edges(data: &Value) -> Vec<Value> {
+    data["results"]
+        .as_array()
+        .expect("discovery results")
+        .iter()
+        .filter(|result| result["type"] == "workflow_companion")
+        .map(|result| {
+            json!({
+                "relation": result["relation"].clone(),
+                "name": result["name"].clone(),
+                "before_tool": result["before_tool"].clone(),
+                "tool_already_selected": result["tool_already_selected"].clone(),
+                "required": result["required"].clone(),
+                "required_for_guided_sequence": result["required_for_guided_sequence"].clone(),
+                "required_semantics": result["required_semantics"].clone(),
+                "server_call_enforced": result["server_call_enforced"].clone(),
+            })
+        })
+        .collect()
 }
