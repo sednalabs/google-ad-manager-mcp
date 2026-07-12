@@ -721,7 +721,38 @@ fn next_actions_distinguish_live_identity_hierarchy_and_cap_failures() {
     );
     assert_eq!(
         capped["next_actions"][0]["action"],
-        "rerun with a sufficient catalog budget or a narrower exact-target set"
+        "increase max_ad_units within its supported limit and rerun the complete catalog proof"
+    );
+
+    let hard_cap = recommendation(
+        &json!({"proof_state":"complete_clear"}),
+        &json!({
+            "proof_state":"partial_capped",
+            "issues":["page_cap_reached"]
+        }),
+        &evidence,
+        "0123456789abcdef",
+    );
+    assert_eq!(
+        hard_cap["next_actions"][0]["action"],
+        "use an authoritative alternate hierarchy proof because this assessor reached a hard catalog limit"
+    );
+
+    let mixed_identity = recommendation(
+        &json!({
+            "proof_state":"partial_blocked",
+            "targets":[
+                {"proof_state":"complete_blocked"},
+                {"proof_state":"not_run","shape_issues":["status_missing_or_invalid"]}
+            ]
+        }),
+        &json!({"proof_state":"complete_clear"}),
+        &evidence,
+        "0123456789abcdef",
+    );
+    assert_eq!(
+        mixed_identity["next_actions"][0]["action"],
+        "resolve the confirmed identity blocker and complete the remaining exact identity reads"
     );
 }
 

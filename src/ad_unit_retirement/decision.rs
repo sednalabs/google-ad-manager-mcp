@@ -36,7 +36,7 @@ pub(super) fn recommendation(
         })
         .collect::<Vec<_>>();
 
-    let observed_active_descendants = descendants
+    let observed_non_archived_descendants = descendants
         .get("blocking_external_descendant_count")
         .and_then(Value::as_u64)
         .is_some_and(|count| count > 0);
@@ -44,7 +44,7 @@ pub(super) fn recommendation(
         .iter()
         .filter(|(surface, state)| {
             matches!(*state, "complete_blocked" | "partial_blocked")
-                || (*surface == "descendants" && observed_active_descendants)
+                || (*surface == "descendants" && observed_non_archived_descendants)
         })
         .map(|(surface, _)| Value::String((*surface).to_string()))
         .collect::<Vec<_>>();
@@ -77,14 +77,14 @@ pub(super) fn recommendation(
         .iter()
         .filter_map(|(surface, state)| next_action(surface, state, identity, descendants))
         .collect::<Vec<_>>();
-    if observed_active_descendants
+    if observed_non_archived_descendants
         && !states.iter().any(|(surface, state)| {
             *surface == "descendants" && matches!(*state, "complete_blocked" | "partial_blocked")
         })
     {
         next_actions.push(json!({
             "surface": "descendants",
-            "action": "archive or retarget the observed active descendants before reassessment"
+            "action": "assess each observed non-archived descendant as an exact target before any separate disposition"
         }));
     }
     if all_required_surfaces_complete {
@@ -127,6 +127,9 @@ fn next_action(surface: &str, state: &str, identity: &Value, descendants: &Value
             "complete_blocked" => {
                 "resolve the missing or mismatched exact ad-unit identity before reassessment"
             }
+            "partial_blocked" => {
+                "resolve the confirmed identity blocker and complete the remaining exact identity reads"
+            }
             "blocked_auth" => "restore authentication and rerun the exact identity reads",
             "blocked_permission" => {
                 "restore exact ad-unit read permission and rerun the identity reads"
@@ -156,16 +159,19 @@ fn next_action(surface: &str, state: &str, identity: &Value, descendants: &Value
 fn descendant_next_action(state: &str, descendants: &Value) -> &'static str {
     match state {
         "complete_blocked" => {
-            "archive or retarget the observed active descendants before reassessment"
+            "assess each observed non-archived descendant as an exact target before any separate disposition"
         }
         "partial_blocked" => {
-            "resolve observed active descendants and rerun the incomplete hierarchy proof"
+            "assess each observed non-archived descendant as an exact target and rerun the incomplete hierarchy proof"
         }
         "blocked_auth" => "restore authentication and rerun the hierarchy proof",
         "blocked_permission" => "restore catalog read permission and rerun the hierarchy proof",
         "blocked_read" => "resolve the catalog read failure and rerun the hierarchy proof",
-        "partial_capped" if descendant_limit_issue(descendants) => {
-            "rerun with a sufficient catalog budget or a narrower exact-target set"
+        "partial_capped" if descendant_row_limit_issue(descendants) => {
+            "increase max_ad_units within its supported limit and rerun the complete catalog proof"
+        }
+        "partial_capped" if descendant_hard_limit_issue(descendants) => {
+            "use an authoritative alternate hierarchy proof because this assessor reached a hard catalog limit"
         }
         "partial_capped" => {
             "resolve the reported hierarchy, ordering, or row-shape issues and rerun the proof"
@@ -174,20 +180,30 @@ fn descendant_next_action(state: &str, descendants: &Value) -> &'static str {
     }
 }
 
-fn descendant_limit_issue(descendants: &Value) -> bool {
+fn descendant_row_limit_issue(descendants: &Value) -> bool {
+    descendant_has_issue(descendants, &["row_cap_reached"])
+}
+
+fn descendant_hard_limit_issue(descendants: &Value) -> bool {
+    descendant_has_issue(
+        descendants,
+        &[
+            "page_response_bytes_exceeded",
+            "scan_response_bytes_exceeded",
+            "page_cap_reached",
+        ],
+    )
+}
+
+fn descendant_has_issue(descendants: &Value, expected: &[&str]) -> bool {
     descendants
         .get("issues")
         .and_then(Value::as_array)
         .is_some_and(|issues| {
-            issues.iter().filter_map(Value::as_str).any(|issue| {
-                matches!(
-                    issue,
-                    "row_cap_reached"
-                        | "page_response_bytes_exceeded"
-                        | "scan_response_bytes_exceeded"
-                        | "page_cap_reached"
-                )
-            })
+            issues
+                .iter()
+                .filter_map(Value::as_str)
+                .any(|issue| expected.contains(&issue))
         })
 }
 

@@ -118,7 +118,7 @@ identity and hierarchy reads complete.
 ## Final Recommendation Contract
 
 The final read-only decision has three states. Positive blockers take
-precedence: `complete_blocked`, `partial_blocked`, or an observed active
+precedence: `complete_blocked`, `partial_blocked`, or an observed non-archived
 external descendant returns `blocked_by_current_state_or_evidence`, even when
 another surface is missing or capped. With no confirmed blocker, any non-clear
 surface returns `not_eligible_incomplete_evidence`. Only seven complete-clear
@@ -132,8 +132,11 @@ identity, hierarchy, and evidence. This prevents a later decision-contract
 revision from reusing an earlier-stage fingerprint. It preserves the
 deterministic child-first target order and supplies bounded, surface-aware
 actions for every blocked or incomplete surface. Identity-shape and hierarchy
-reconciliation failures never tell an operator to attach an unrelated receipt
-or merely increase a cap. `operator_review_required` remains true,
+reconciliation failures never tell an operator to attach an unrelated receipt.
+Adjustable row caps, hard catalog limits, and structural hierarchy failures have
+distinct guidance. External non-archived descendants remain blockers, but the
+tool requires each one to be separately assessed as an exact target before it
+suggests any disposition. `operator_review_required` remains true,
 `automated_retirement_eligible` and `safe_to_archive_or_retire` remain false,
 and the response explicitly states that it is not an archive authorization.
 No archive, deactivate, rename, retarget, or other GAM mutation is exposed or
