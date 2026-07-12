@@ -221,9 +221,9 @@ fn find_tools_pairs_apply_results_with_plan_or_preview() {
 }
 
 #[test]
-fn find_tools_read_only_filter_excludes_local_scratchpad_writes() {
+fn find_tools_read_only_filter_partitions_all_scratchpad_tools() {
     let mut process = StdioMcpProcess::start(env!("CARGO_BIN_EXE_google-ad-manager-mcp"));
-    let response = process.call_tool(
+    let read_only_response = process.call_tool(
         125,
         "find_tools",
         json!({
@@ -233,27 +233,74 @@ fn find_tools_read_only_filter_excludes_local_scratchpad_writes() {
             "limit":100
         }),
     );
-    let data = &response["result"]["structuredContent"]["data"];
-    let allowed = data["openai_allowed_tools"]
+    let read_only_data = &read_only_response["result"]["structuredContent"]["data"];
+    assert_eq!(read_only_data["openai_allowed_tools"], json!([]));
+
+    let mutating_response = process.call_tool(
+        126,
+        "find_tools",
+        json!({
+            "query":"scratchpad",
+            "group":"scratchpad",
+            "read_only":false,
+            "limit":100
+        }),
+    );
+    let mutating_data = &mutating_response["result"]["structuredContent"]["data"];
+    let mut mutating_allowed = mutating_data["openai_allowed_tools"]
         .as_array()
-        .expect("allowed tools");
-    for mutating_name in [
-        "gam_scratchpad_open_session",
-        "gam_scratchpad_close_session",
-        "gam_scratchpad_drop_table",
-        "gam_scratchpad_ingest_network_catalog",
-        "gam_scratchpad_ingest_report_result_rows",
-        "gam_scratchpad_ingest_soap_line_items",
+        .expect("allowed tools")
+        .iter()
+        .map(|name| name.as_str().expect("allowed tool name"))
+        .collect::<Vec<_>>();
+    mutating_allowed.sort_unstable();
+    assert_eq!(
+        mutating_allowed,
+        vec![
+            "gam_scratchpad_close_session",
+            "gam_scratchpad_drop_table",
+            "gam_scratchpad_export_evidence_bundle",
+            "gam_scratchpad_ingest_network_catalog",
+            "gam_scratchpad_ingest_report_result_rows",
+            "gam_scratchpad_ingest_soap_line_items",
+            "gam_scratchpad_list_sessions",
+            "gam_scratchpad_list_tables",
+            "gam_scratchpad_open_session",
+            "gam_scratchpad_query"
+        ]
+    );
+}
+
+#[test]
+fn find_tools_read_only_filter_includes_plans_and_previews() {
+    let mut process = StdioMcpProcess::start(env!("CARGO_BIN_EXE_google-ad-manager-mcp"));
+    for (offset, query, expected_tool) in [
+        (0, "gam rest write plan", "gam_rest_write_plan"),
+        (1, "gam soap trafficking plan", "gam_soap_trafficking_plan"),
+        (
+            2,
+            "gam yield group exclusions preview",
+            "gam_yield_group_exclusions_preview",
+        ),
     ] {
+        let response = process.call_tool(
+            127 + offset,
+            "find_tools",
+            json!({
+                "query":query,
+                "group":"trafficking",
+                "read_only":true,
+                "limit":10
+            }),
+        );
+        let data = &response["result"]["structuredContent"]["data"];
         assert!(
-            !allowed.contains(&json!(mutating_name)),
-            "read-only discovery allowed {mutating_name}: {data}"
+            data["openai_allowed_tools"]
+                .as_array()
+                .is_some_and(|allowed| allowed.contains(&json!(expected_tool))),
+            "query '{query}' did not return {expected_tool}: {data}"
         );
     }
-    assert!(allowed.contains(&json!("gam_scratchpad_list_sessions")));
-    assert!(allowed.contains(&json!("gam_scratchpad_list_tables")));
-    assert!(allowed.contains(&json!("gam_scratchpad_query")));
-    assert!(allowed.contains(&json!("gam_scratchpad_export_evidence_bundle")));
 }
 
 #[test]

@@ -46,11 +46,14 @@ returned, limit, and truncation state.
 The default `include_schema=false` response omits schemas and hosted-client
 metadata and stays within the toolkit's 32 KiB compact-selection budget. Set
 `include_schema=true` only after discovery has narrowed the candidates.
-`read_only=true` excludes Google Ad Manager mutations and local scratchpad state
-changes. Scratchpad query, listing, and evidence export remain available, while
-session creation/closure, table drops, and ingestion require an unfiltered or
-`read_only=false` search. Those tool-local writes are labelled mutating (or
-destructive for drop/close) without implying an upstream GAM write.
+Omit `read_only` to search all tools. Set `read_only=true` to search only
+non-mutating execution paths, including plans, previews, and no-mutation proof
+reads. Every current scratchpad tool is excluded because the pinned scratchpad
+runtime may create, refresh, or prune local session state even during queries,
+listings, and evidence export. Set `read_only=false` to search only write-like
+or local-state-mutating tools; it does not mean both classes. Scratchpad close
+and drop operations are labelled destructive, while every other scratchpad
+tool is labelled mutating, without implying an upstream GAM write.
 
 Apply discovery is plan-first:
 
@@ -60,7 +63,8 @@ Apply discovery is plan-first:
 - `gam_yield_group_exclusions_apply` adds
   `gam_yield_group_exclusions_preview` as required.
 
-Companions are non-mutating and do not increase semantic match counts. A search
+Companions are non-mutating, can be added to the allowed-tool list for a
+write-like apply result, and do not increase semantic match counts. A search
 that returns no tools adds a bounded `search_recovery` record with available
 groups, fail-closed reason codes when relevant, and representative retry
 queries. Recovery never recommends turning off `read_only` merely to produce a
