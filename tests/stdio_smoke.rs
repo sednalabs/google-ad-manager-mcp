@@ -193,18 +193,18 @@ fn find_tools_is_semantic_compact_and_recoverable() {
 #[test]
 fn find_tools_operator_language_defaults_to_plan_only() {
     let mut process = StdioMcpProcess::start(env!("CARGO_BIN_EXE_google-ad-manager-mcp"));
-    for (offset, query, expected_plan) in [
-        (0, "pause a line item", "gam_soap_trafficking_plan"),
-        (1, "resume a line item", "gam_soap_trafficking_plan"),
-        (2, "archive a line item", "gam_soap_trafficking_plan"),
-        (3, "deactivate an ad unit", "gam_rest_write_plan"),
-        (4, "archive an ad unit", "gam_rest_write_plan"),
+    for (offset, query, expected_plan, explicit_null) in [
+        (0, "pause a line item", "gam_soap_trafficking_plan", false),
+        (1, "resume a line item", "gam_soap_trafficking_plan", false),
+        (2, "archive a line item", "gam_soap_trafficking_plan", false),
+        (3, "deactivate an ad unit", "gam_rest_write_plan", false),
+        (4, "archive an ad unit", "gam_rest_write_plan", true),
     ] {
-        let response = process.call_tool(
-            340 + offset,
-            "find_tools",
-            json!({"query":query,"group":"trafficking","limit":1}),
-        );
+        let mut arguments = json!({"query":query,"group":"trafficking","limit":1});
+        if explicit_null {
+            arguments["read_only"] = Value::Null;
+        }
+        let response = process.call_tool(340 + offset, "find_tools", arguments);
         let data = &response["result"]["structuredContent"]["data"];
         assert_eq!(data["read_only"], true, "query: {query}; data: {data}");
         let direct = direct_results(data);
@@ -377,7 +377,7 @@ fn find_tools_rejects_zero_and_preserves_toolkit_limit_diagnostics() {
         &truncated_query,
         "query_input",
         query_terminal_marker,
-        false,
+        true,
     );
 }
 

@@ -38,8 +38,8 @@
             ]
           },
           "read_only": {
-            "default": null,
-            "description": "Filter by mutation behavior: omit or true for only non-mutating execution\npaths, including previews but excluding all current scratchpad tools; false\nfor only write-like or local-state-mutating tools.",
+            "default": true,
+            "description": "Filter by mutation behavior: omit, null, or true for only non-mutating\nexecution paths, including previews but excluding all current scratchpad\ntools; false for only write-like or local-state-mutating tools.",
             "type": [
               "boolean",
               "null"
