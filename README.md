@@ -284,7 +284,8 @@ the same strict inventory, toolkit-normalized exact `group`, and `read_only`
 filter. Recovery keeps the compatible string array at `retry.example_queries`,
 reports `active_filter`, and marks
 `retry.example_queries_validated_under_active_filter=true`; an invalid group can
-therefore return no examples while still listing valid alternatives.
+therefore return no examples while still listing alternatives from the complete
+strict list-visible inventory under the active `read_only` filter.
 Stateful recovery examples begin with executable entry points: report runs
 before completed-result pagination, and scratchpad session opening before
 ingestion into that session.
