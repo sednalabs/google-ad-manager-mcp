@@ -15,6 +15,7 @@ All tools return Contract V1 envelopes: `ok/data/meta` on success and
 | `gam_network_catalog_list` | List one curated network collection: `ad_units`, `orders`, `line_items`, `placements`, `private_auctions`, `private_auction_deals`, or `reports`. |
 | `gam_exchange_protection_probe` | Read-only proof for exact ad-unit exchange/yield/protection exposure, with explicit partial-proof states. |
 | `gam_ad_unit_dependency_probe` | Read-only proof for exact ad-unit dependencies across placements and SOAP line-item inventory targeting. |
+| `gam_ad_unit_retirement_assessment` | Read-only exact-identity, hierarchy, and freshness-bound evidence assessment for conservative ad-unit retirement review. |
 | `gam_report_run` | Run a saved Ad Manager report, optionally wait, and optionally fetch the first result page. |
 | `gam_report_operation_poll` | Wait on an existing asynchronous report operation without starting another report run, then optionally fetch the first result page. |
 | `gam_report_result_rows` | Fetch rows from a completed report result resource. |

@@ -134,12 +134,7 @@ pub(crate) fn build_tool_inventory() -> Result<ToolInventory, ToolInventoryError
                 "start",
             ],
         )
-        .with_risk_posture(GuardedActionPosture {
-            operation_class: GuardedActionOperationClass::Mutating,
-            requires_runtime_enablement: false,
-            writes_enabled_by_default: true,
-            post_apply_readback_required: false,
-        }),
+        .with_risk_posture(report_run_posture()),
         cap(
             "gam_report_operation_poll",
             "reports",
@@ -156,7 +151,8 @@ pub(crate) fn build_tool_inventory() -> Result<ToolInventory, ToolInventoryError
                 "resume",
                 "completion",
             ],
-        ),
+        )
+        .with_risk_posture(report_poll_posture()),
         cap(
             "gam_report_result_rows",
             "reports",
@@ -397,6 +393,19 @@ pub(crate) fn build_tool_inventory() -> Result<ToolInventory, ToolInventoryError
             false,
         ),
     ])
+}
+
+pub(crate) const fn report_run_posture() -> GuardedActionPosture {
+    GuardedActionPosture {
+        operation_class: GuardedActionOperationClass::Mutating,
+        requires_runtime_enablement: false,
+        writes_enabled_by_default: true,
+        post_apply_readback_required: false,
+    }
+}
+
+pub(crate) const fn report_poll_posture() -> GuardedActionPosture {
+    GuardedActionPosture::read_only()
 }
 
 fn cap<const N: usize>(

@@ -139,8 +139,24 @@ impl AdManagerServer {
         &self.settings
     }
 
+    /// Returns the posture for starting a saved report run, which creates an
+    /// upstream report operation.
+    pub fn report_run_posture() -> GuardedActionPosture {
+        tool_surface::report_run_posture()
+    }
+
+    /// Returns the posture for polling an existing report operation with GET.
+    pub fn report_poll_posture() -> GuardedActionPosture {
+        tool_surface::report_poll_posture()
+    }
+
+    /// Compatibility alias for the report-start posture.
+    #[deprecated(
+        since = "0.1.0",
+        note = "use report_run_posture() for report start or report_poll_posture() for GET-only polling"
+    )]
     pub fn report_posture() -> GuardedActionPosture {
-        GuardedActionPosture::read_only()
+        Self::report_run_posture()
     }
 
     pub fn write_preview_posture() -> GuardedActionPosture {
@@ -165,6 +181,7 @@ impl ServerHandler for AdManagerServer {
 #[cfg(test)]
 mod tests {
     use super::{AdManagerServer, Settings};
+    use mcp_toolkit_core::guarded_action::GuardedActionOperationClass;
     use mcp_toolkit_core::tool_inventory::{ToolInventoryPolicy, ToolOperation};
 
     #[test]
@@ -193,5 +210,34 @@ mod tests {
                 .inventory()
                 .is_allowed("gam_report_run", ToolOperation::List, &policy)
         );
+    }
+
+    #[test]
+    fn public_report_postures_match_inventory_effect_metadata() {
+        let server = AdManagerServer::new(Settings::default()).expect("server");
+        let capabilities = server.inventory().capabilities();
+        let run = capabilities
+            .iter()
+            .find(|capability| capability.name() == "gam_report_run")
+            .expect("report run capability");
+        let poll = capabilities
+            .iter()
+            .find(|capability| capability.name() == "gam_report_operation_poll")
+            .expect("report poll capability");
+        let run_posture = run.risk_posture().expect("report run posture");
+        let poll_posture = poll.risk_posture().expect("report poll posture");
+
+        assert!(!run.read_only());
+        assert_eq!(
+            run_posture.operation_class,
+            GuardedActionOperationClass::Mutating
+        );
+        assert_eq!(AdManagerServer::report_run_posture(), *run_posture);
+        assert!(poll.read_only());
+        assert_eq!(
+            poll_posture.operation_class,
+            GuardedActionOperationClass::Read
+        );
+        assert_eq!(AdManagerServer::report_poll_posture(), *poll_posture);
     }
 }
