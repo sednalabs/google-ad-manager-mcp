@@ -279,6 +279,9 @@ companion; SOAP apply discovery additionally offers the payload builder when it
 is useful. Empty searches return available groups and bounded retry examples
 without relaxing `read_only`. Set `include_schema=true` only after narrowing the
 result set when full tool schemas are required.
+`read_only=true` excludes both provider mutations and local scratchpad state
+changes such as opening, ingesting, dropping, or closing data; scratchpad query,
+listing, and evidence-export tools remain discoverable.
 
 ## Upstream Scope
 

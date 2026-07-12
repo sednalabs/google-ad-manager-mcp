@@ -1,4 +1,4 @@
-use mcp_toolkit_core::guarded_action::GuardedActionPosture;
+use mcp_toolkit_core::guarded_action::{GuardedActionOperationClass, GuardedActionPosture};
 use mcp_toolkit_core::tool_inventory::{
     ToolCapability, ToolDiscoveryMetadata, ToolInventory, ToolInventoryError,
 };
@@ -265,17 +265,19 @@ pub(crate) fn build_tool_inventory() -> Result<ToolInventory, ToolInventoryError
         )
         .with_read_only(false)
         .with_risk_posture(GuardedActionPosture::guarded_apply()),
-        cap(
+        local_state_write_cap(
             "gam_scratchpad_open_session",
             "scratchpad",
             "Open or refresh a bounded local DuckDB scratchpad session for Ad Manager evidence work.",
             ["google", "ad-manager", "scratchpad", "duckdb", "session"],
+            false,
         ),
-        cap(
+        local_state_write_cap(
             "gam_scratchpad_close_session",
             "scratchpad",
             "Close an Ad Manager scratchpad session and remove its local database.",
             ["google", "ad-manager", "scratchpad", "close", "cleanup"],
+            true,
         ),
         cap(
             "gam_scratchpad_list_sessions",
@@ -289,11 +291,12 @@ pub(crate) fn build_tool_inventory() -> Result<ToolInventory, ToolInventoryError
             "List tables in an Ad Manager scratchpad session.",
             ["google", "ad-manager", "scratchpad", "tables", "schema"],
         ),
-        cap(
+        local_state_write_cap(
             "gam_scratchpad_drop_table",
             "scratchpad",
             "Drop one table from an Ad Manager scratchpad session.",
             ["google", "ad-manager", "scratchpad", "drop", "table"],
+            true,
         ),
         cap(
             "gam_scratchpad_query",
@@ -301,19 +304,21 @@ pub(crate) fn build_tool_inventory() -> Result<ToolInventory, ToolInventoryError
             "Run bounded read-only DuckDB SQL against an Ad Manager scratchpad session.",
             ["google", "ad-manager", "scratchpad", "sql", "query"],
         ),
-        cap(
+        local_state_write_cap(
             "gam_scratchpad_ingest_network_catalog",
             "scratchpad",
             "Fetch one Ad Manager network catalog page and ingest it into a scratchpad table.",
             ["google", "ad-manager", "scratchpad", "ingest", "catalog"],
+            false,
         ),
-        cap(
+        local_state_write_cap(
             "gam_scratchpad_ingest_report_result_rows",
             "scratchpad",
             "Fetch one Ad Manager report-result page and ingest it into a scratchpad table.",
             ["google", "ad-manager", "scratchpad", "ingest", "reports"],
+            false,
         ),
-        cap(
+        local_state_write_cap(
             "gam_scratchpad_ingest_soap_line_items",
             "scratchpad",
             "Run a bounded LineItemService SOAP query and ingest parsed delivery rows into a scratchpad table.",
@@ -329,6 +334,7 @@ pub(crate) fn build_tool_inventory() -> Result<ToolInventory, ToolInventoryError
                 "analysis",
                 "audit",
             ],
+            false,
         ),
         cap(
             "gam_scratchpad_export_evidence_bundle",
@@ -350,6 +356,27 @@ fn cap<const N: usize>(
         .with_read_only(true)
         .with_risk_posture(GuardedActionPosture::read_only())
         .with_discovery(ToolDiscoveryMetadata::new(description, keywords))
+}
+
+fn local_state_write_cap<const N: usize>(
+    name: &'static str,
+    group: &'static str,
+    description: &'static str,
+    keywords: [&'static str; N],
+    destructive: bool,
+) -> ToolCapability {
+    cap(name, group, description, keywords)
+        .with_read_only(false)
+        .with_risk_posture(GuardedActionPosture {
+            operation_class: if destructive {
+                GuardedActionOperationClass::Destructive
+            } else {
+                GuardedActionOperationClass::Mutating
+            },
+            requires_runtime_enablement: false,
+            writes_enabled_by_default: true,
+            post_apply_readback_required: false,
+        })
 }
 
 #[cfg(test)]
@@ -400,7 +427,7 @@ mod tests {
             &ToolSearchFilter {
                 query: Some("scratchpad line item delivery soap".to_string()),
                 group: Some("scratchpad".to_string()),
-                read_only: Some(true),
+                read_only: Some(false),
                 limit: Some(10),
             },
             ToolOperation::List,
@@ -411,6 +438,68 @@ mod tests {
                 .iter()
                 .any(|result| result.name == "gam_scratchpad_ingest_soap_line_items")
         );
+    }
+
+    #[test]
+    fn read_only_scratchpad_discovery_excludes_local_state_writes() {
+        let inventory = build_tool_inventory().expect("inventory");
+        let read_only = inventory.search(
+            &ToolSearchFilter {
+                query: Some("scratchpad".to_string()),
+                group: Some("scratchpad".to_string()),
+                read_only: Some(true),
+                limit: Some(100),
+            },
+            ToolOperation::List,
+            &ToolInventoryPolicy::strict(),
+        );
+        let names = read_only
+            .iter()
+            .map(|result| result.name.as_str())
+            .collect::<Vec<_>>();
+        for mutating_name in [
+            "gam_scratchpad_open_session",
+            "gam_scratchpad_close_session",
+            "gam_scratchpad_drop_table",
+            "gam_scratchpad_ingest_network_catalog",
+            "gam_scratchpad_ingest_report_result_rows",
+            "gam_scratchpad_ingest_soap_line_items",
+        ] {
+            assert!(
+                !names.contains(&mutating_name),
+                "read-only names: {names:?}"
+            );
+        }
+        assert!(names.contains(&"gam_scratchpad_query"));
+        assert!(names.contains(&"gam_scratchpad_export_evidence_bundle"));
+
+        let local_writes = inventory.search(
+            &ToolSearchFilter {
+                query: Some("scratchpad".to_string()),
+                group: Some("scratchpad".to_string()),
+                read_only: Some(false),
+                limit: Some(100),
+            },
+            ToolOperation::List,
+            &ToolInventoryPolicy::strict(),
+        );
+        for mutating_name in [
+            "gam_scratchpad_open_session",
+            "gam_scratchpad_close_session",
+            "gam_scratchpad_drop_table",
+            "gam_scratchpad_ingest_network_catalog",
+            "gam_scratchpad_ingest_report_result_rows",
+            "gam_scratchpad_ingest_soap_line_items",
+        ] {
+            let result = local_writes
+                .iter()
+                .find(|result| result.name == mutating_name)
+                .unwrap_or_else(|| panic!("missing local-state write {mutating_name}"));
+            let posture = result.risk_posture.expect("local-state write posture");
+            assert!(posture.operation_class.is_write_like());
+            assert!(!posture.requires_runtime_enablement);
+            assert!(posture.writes_enabled_by_default);
+        }
     }
 
     #[test]
