@@ -163,6 +163,10 @@ The provider rejects `limit=0` before inventory search. The public default is
 20; larger values flow into the toolkit unchanged so its hard maximum of 100,
 `match_summary.result_limit`, and `result_limit_clamped` diagnostics remain
 authoritative.
+Oversized query or group inputs retain bounded compact responses, report their
+input truncation reason, mark recovery fail-closed, and do not echo the full
+input. Current full-group contracts also require guided dependency edges and
+allowed-tool names to remain intact within the compact budget.
 
 Companion edges describe a guided sequence, not server-side invocation proof.
 Each record exposes `required_for_guided_sequence` and
