@@ -130,13 +130,22 @@ The initial first-class tool set is:
 
 `find_tools` is also exposed for deferred-loading and `tool_search` clients. It
 uses the toolkit's additive ranked search path and compact serializer by
-default. The provider layer adds only domain workflow relationships: REST and
-SOAP plans before apply, yield-group preview before apply, the optional SOAP
-payload builder, and bounded empty-result recovery. Match counts remain about
-semantic inventory results; companion and recovery records are reported as
-separate OpenAI extra results so safety guidance does not inflate search counts.
-Full schemas and hosted-client metadata are emitted only when
-`include_schema=true`.
+default. The provider layer adds only domain workflow relationships: REST plan
+before apply, optional SOAP payload builder before SOAP plan, SOAP plan before
+SOAP apply, yield-group preview before apply, and bounded empty-result recovery.
+The provider computes transitive prerequisites in deterministic topological
+order, so direct SOAP plan discovery adds the builder and direct SOAP apply
+discovery adds builder then plan. Already-selected semantic tools are not
+duplicated as companions. Match counts remain about semantic inventory results;
+companion and recovery records are separate OpenAI extra results so guidance
+does not inflate search counts. Full schemas and hosted-client metadata are
+emitted only when `include_schema=true`.
+
+Companion edges describe a guided sequence, not server-side invocation proof.
+Each record exposes `required_for_guided_sequence` and
+`server_call_enforced:false`. Apply independently revalidates its exact request
+and token and retains runtime, scope, confirmation, and readback gates; no
+companion record claims that the builder, plan, or preview call occurred.
 
 The deliberately grouped tool is `gam_network_catalog_list`. It keeps the
 surface compact while still covering the curated network collections that
@@ -214,10 +223,13 @@ workflows through an operation enum:
 - preview URLs
 - forecasts
 
-SOAP plans are no-mutation previews. SOAP apply always requires the full Ad
-Manager manage scope because the legacy SOAP API does not support the newer
-read-only scope. Mutating SOAP apply also requires explicit write-mode
-enablement and operator context.
+SOAP plans are no-mutation previews. Discovery guides callers through optional
+builder, plan, then apply, but it does not enforce or prove those calls. SOAP
+apply independently validates the exact request and token, always requires the
+full Ad Manager manage scope because the legacy SOAP API does not support the
+newer read-only scope, and retains runtime, confirmation, and readback gates.
+Mutating SOAP apply also requires explicit write-mode enablement and operator
+context.
 
 `gam_soap_payload_build` is a no-mutation helper that sits before those tools.
 It renders bounded, validated templates for common read, line-item action,

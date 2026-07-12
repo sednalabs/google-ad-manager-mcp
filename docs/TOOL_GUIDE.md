@@ -56,20 +56,31 @@ include both non-mutating and mutating tools. Scratchpad close and drop
 operations are labelled destructive, while every other scratchpad tool is
 labelled mutating, without implying an upstream GAM write.
 
-Apply discovery is plan-first:
+Discovery adds guided dependency edges:
 
-- `gam_rest_write_apply` adds `gam_rest_write_plan` as a required companion;
-- `gam_soap_trafficking_apply` adds `gam_soap_trafficking_plan` as required and
-  `gam_soap_payload_build` as optional;
-- `gam_yield_group_exclusions_apply` adds
-  `gam_yield_group_exclusions_preview` as required.
+- `gam_rest_write_plan` precedes `gam_rest_write_apply` and is required for the
+  guided sequence;
+- `gam_soap_payload_build` precedes `gam_soap_trafficking_plan` and is optional
+  in the guided sequence;
+- `gam_soap_trafficking_plan` precedes `gam_soap_trafficking_apply` and is
+  required for the guided sequence;
+- `gam_yield_group_exclusions_preview` precedes
+  `gam_yield_group_exclusions_apply` and is required for the guided sequence.
 
-Companions are non-mutating, can be added to the allowed-tool list for a
-write-like apply result, and do not increase semantic match counts. A search
-that returns no tools adds a bounded `search_recovery` record with available
-groups, fail-closed reason codes when relevant, and representative retry
-queries. Recovery never recommends turning off `read_only` merely to produce a
-match.
+SOAP prerequisites are transitive: direct plan discovery adds the builder;
+direct apply discovery adds builder then plan. Companion names and edges are
+deduplicated when related tools are already semantic results. Companions are
+non-mutating, can be added to the allowed-tool list, and do not increase
+semantic match counts.
+
+Every companion record uses `required_for_guided_sequence` and
+`server_call_enforced:false`. This ordering is guidance and does not prove that
+the companion tool was invoked. Apply independently revalidates its exact
+request and token and retains runtime, scope, confirmation, and readback gates.
+A search that returns no tools adds a bounded `search_recovery` record with
+available groups, fail-closed reason codes when relevant, and representative
+retry queries. Recovery never recommends turning off `read_only` merely to
+produce a match.
 
 ## `gam_network_catalog_list`
 
@@ -417,7 +428,9 @@ allowlist instead of pretending those workflows exist in REST.
 `gam_soap_payload_build` is a no-upstream-call helper for the most common inner
 SOAP `payload_xml` fragments. It returns the matching SOAP operation, generated
 payload XML, warnings, and the next `gam_soap_trafficking_plan` request shape.
-It is intentionally a template renderer, not a live GAM operation.
+It is intentionally a template renderer, not a live GAM operation. Discovery
+guides the optional builder before plan and the plan before apply; the server
+does not treat those discovery edges as proof that either companion call ran.
 
 Payload templates currently exposed:
 
