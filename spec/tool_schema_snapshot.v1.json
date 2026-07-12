@@ -2,7 +2,7 @@
   "schema": "mcp_tool_schema_snapshot",
   "tools": [
     {
-      "description": "Semantically search Google Ad Manager MCP tools with ranked matches, plan-before-apply companions, completeness metadata, and empty-result recovery.",
+      "description": "Semantically search Google Ad Manager MCP tools with ranked matches, guided dependency edges, completeness metadata, and empty-result recovery.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
