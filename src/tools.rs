@@ -7250,6 +7250,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn completed_report_without_result_is_terminal_and_preserves_evidence() {
+        let operation_name = "networks/123/operations/reports/runs/789";
+        let (base_url, requests, server) = serve_report_http_sequence(vec![(
+            200,
+            json!({
+                "name":operation_name,
+                "done":true,
+                "response":{}
+            }),
+        )]);
+        let client = AdManagerClient::for_test_api_base_url(base_url);
+        let server_under_test = AdManagerServer::new(crate::Settings::default())
+            .expect("build missing-result report server")
+            .with_test_client(client);
+        let result = server_under_test
+            .gam_report_operation_poll(Parameters(ReportOperationPollArgs {
+                operation_name: operation_name.to_string(),
+                fetch_first_page: Some(false),
+                result_page_size: None,
+                poll_timeout_ms: Some(1_000),
+                initial_poll_interval_ms: Some(0),
+            }))
+            .await
+            .expect("poll missing-result report operation");
+        let response = result
+            .structured_content
+            .expect("structured missing-result response");
+        assert_eq!(response["ok"], false);
+        assert_eq!(response["error"]["code"], "report_run_missing_result");
+        assert_eq!(response["error"]["detail"]["terminal"], true);
+        assert_eq!(response["error"]["detail"]["continuation_available"], false);
+        assert_eq!(
+            response["error"]["detail"]["operation"]["name"],
+            operation_name
+        );
+        assert!(response["error"]["detail"].get("continuation").is_none());
+
+        server.join().expect("join missing-result report server");
+        let requests = requests.lock().expect("lock missing-result requests");
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].starts_with(&format!("GET /v1/{operation_name} ")));
+    }
+
+    #[tokio::test]
     async fn report_poll_timeout_preserves_the_get_only_continuation() {
         let operation_name = "networks/123/operations/reports/runs/789";
         let (base_url, requests, server) =
@@ -7262,9 +7306,9 @@ mod tests {
             .gam_report_operation_poll(Parameters(ReportOperationPollArgs {
                 operation_name: operation_name.to_string(),
                 fetch_first_page: Some(false),
-                result_page_size: None,
+                result_page_size: Some(25),
                 poll_timeout_ms: Some(0),
-                initial_poll_interval_ms: Some(0),
+                initial_poll_interval_ms: Some(123),
             }))
             .await
             .expect("poll report operation to timeout");
@@ -7292,6 +7336,14 @@ mod tests {
         assert_eq!(
             response["error"]["detail"]["continuation"]["arguments"]["poll_timeout_ms"],
             0
+        );
+        assert_eq!(
+            response["error"]["detail"]["continuation"]["arguments"]["result_page_size"],
+            25
+        );
+        assert_eq!(
+            response["error"]["detail"]["continuation"]["arguments"]["initial_poll_interval_ms"],
+            123
         );
         assert!(
             response["error"]["hint"]
