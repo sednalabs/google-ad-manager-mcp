@@ -45,6 +45,8 @@ pub enum AdManagerError {
         operation_name: String,
         message: String,
     },
+    #[error("report run may have started but the upstream handoff was invalid: {message}")]
+    ReportRunHandoffUncertain { message: String },
 }
 
 impl AdManagerError {
@@ -70,6 +72,7 @@ impl AdManagerError {
             Self::ReportRunTimeout { .. } => "report_run_timeout",
             Self::ReportRunMissingResult { .. } => "report_run_missing_result",
             Self::ReportRunFailed { .. } => "report_run_failed",
+            Self::ReportRunHandoffUncertain { .. } => "report_run_handoff_uncertain",
         }
     }
 
@@ -88,6 +91,7 @@ impl AdManagerError {
             Self::ReportRunTimeout { .. } => "report_poll_timeout",
             Self::ReportRunMissingResult { .. } => "report_result_missing",
             Self::ReportRunFailed { .. } => "report_operation_failed",
+            Self::ReportRunHandoffUncertain { .. } => "report_run_handoff_uncertain",
         }
     }
 
@@ -105,7 +109,8 @@ impl AdManagerError {
             | Self::ConfirmationTokenMismatch => "safety",
             Self::ReportRunTimeout { .. }
             | Self::ReportRunMissingResult { .. }
-            | Self::ReportRunFailed { .. } => "reports",
+            | Self::ReportRunFailed { .. }
+            | Self::ReportRunHandoffUncertain { .. } => "reports",
         }
     }
 
@@ -143,6 +148,9 @@ impl AdManagerError {
             }
             Self::ReportRunFailed { .. } => {
                 "Inspect the terminal operation error and the saved report definition; this completed failed operation cannot be resumed by polling."
+            }
+            Self::ReportRunHandoffUncertain { .. } => {
+                "Do not automatically start another report run. Preserve this receipt and inspect Ad Manager report activity or retry only with explicit operator approval."
             }
         }
     }

@@ -131,12 +131,22 @@ For reports:
 4. `gam_report_operation_poll` when the run used `wait_for_completion=false`
 5. `gam_report_result_rows` when pagination is needed
 
+Report handles are bound to the requested network/report. Poll timeout is
+capped at 24 hours, the initial interval normalized to at least 250 ms and capped at 30 seconds, result pages at 1,000
+rows and 512 KiB, and polling stops at an absolute deadline. If a run POST
+returns an invalid operation handoff, do not automatically run the report
+again; inspect report activity first.
+
 For REST write planning:
 
 1. `gam_trafficking_tool_matrix`
 2. `gam_rest_write_plan`
 3. `gam_rest_write_apply` only after enabling write mode, using the manage
    scope, and passing the exact confirmation token from the plan
+
+The plan receipt's `apply_rediscovery` object gives deferred-loading clients the
+exact explicit `read_only=false` discovery call and receipt paths needed for
+step 3. It does not authorize the apply.
 
 For SOAP trafficking:
 

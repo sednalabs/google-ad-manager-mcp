@@ -209,9 +209,22 @@ fn find_tools_is_semantic_compact_and_recoverable() {
             .len()
             <= 64 * 1024
     );
-    assert_eq!(
-        full["result"]["content"][0]["text"],
-        "Tool discovery completed. Use structuredContent.data for ranked tools and workflow guidance."
+    let content_projection: Value = serde_json::from_str(
+        full["result"]["content"][0]["text"]
+            .as_str()
+            .expect("content-only discovery projection"),
+    )
+    .expect("content-only discovery projection is JSON");
+    assert_eq!(content_projection["status"], "tool_discovery_completed");
+    assert!(
+        content_projection["allowed_tools"]
+            .as_array()
+            .is_some_and(|tools| tools.contains(&json!("gam_report_result_rows")))
+    );
+    assert!(
+        content_projection["schema_tools"]
+            .as_array()
+            .is_some_and(|tools| tools.contains(&json!("gam_report_result_rows")))
     );
 }
 
@@ -345,6 +358,19 @@ fn find_tools_operator_language_defaults_to_plan_only() {
                     .all(|tool| { tool.as_str().is_some_and(|name| !name.ends_with("_apply")) })),
             "default discovery exposed apply for query '{query}': {data}"
         );
+        if query.contains("ad unit") {
+            assert_eq!(
+                sorted_string_values(&data["openai_allowed_tools"]),
+                vec![
+                    "gam_ad_unit_dependency_probe",
+                    "gam_ad_unit_retirement_assessment",
+                    "gam_network_catalog_list",
+                    "gam_networks_list",
+                    "gam_rest_write_plan",
+                ]
+            );
+            assert_eq!(workflow_edges(data).len(), 4);
+        }
     }
 }
 
@@ -448,6 +474,7 @@ fn find_tools_recovery_examples_execute_under_active_filters() {
 fn find_tools_rejects_zero_and_preserves_toolkit_limit_diagnostics() {
     let mut process = StdioMcpProcess::start(env!("CARGO_BIN_EXE_google-ad-manager-mcp"));
     let invalid = process.call_tool(230, "find_tools", json!({"limit":0}));
+    assert_eq!(invalid["result"]["isError"], true);
     let invalid_result = &invalid["result"]["structuredContent"];
     assert_eq!(invalid_result["ok"], false);
     assert_eq!(invalid_result["error"]["code"], "invalid_input");
@@ -490,6 +517,34 @@ fn find_tools_rejects_zero_and_preserves_toolkit_limit_diagnostics() {
         "group_input",
         group_terminal_marker,
         true,
+    );
+
+    let prefix_normalizes_to_valid_group = process.call_tool(
+        2340,
+        "find_tools",
+        json!({
+            "query":"quasar zeppelin",
+            "group":format!("catalog{}x", " ".repeat(121)),
+            "read_only":true
+        }),
+    );
+    let normalized_prefix_data =
+        &prefix_normalizes_to_valid_group["result"]["structuredContent"]["data"];
+    assert!(
+        normalized_prefix_data.get("group").is_none() || normalized_prefix_data["group"].is_null()
+    );
+    let normalized_prefix_recovery = search_recovery(normalized_prefix_data);
+    assert_eq!(
+        normalized_prefix_recovery["active_filter"]["group"],
+        Value::Null
+    );
+    assert_eq!(
+        normalized_prefix_recovery["active_filter"]["group_supplied"],
+        true
+    );
+    assert_eq!(
+        normalized_prefix_recovery["active_filter"]["group_recognized"],
+        false
     );
 
     let query_terminal_marker = "oversized-query-terminal-marker";
@@ -651,6 +706,50 @@ fn find_tools_pairs_apply_results_with_plan_or_preview() {
         .expect("full schema map");
     assert!(schemas.contains_key("gam_rest_write_apply"));
     assert!(schemas.contains_key("gam_rest_write_plan"));
+}
+
+#[test]
+fn rest_plan_receipt_provides_explicit_apply_rediscovery() {
+    let mut process = StdioMcpProcess::start(env!("CARGO_BIN_EXE_google-ad-manager-mcp"));
+    let response = process.call_tool(
+        1250,
+        "gam_rest_write_plan",
+        json!({
+            "request": {
+                "network_code":"123",
+                "resource":"ad_units",
+                "operation":"create",
+                "resource_name":null,
+                "update_mask":null,
+                "body":{},
+                "reason":"Prepare an operator-reviewed inventory change",
+                "expected_impact":"No live impact until separately approved",
+                "rollback_note":"Archive the created unit if approved creation is later reversed",
+                "idempotency_key":"test-plan-receipt"
+            }
+        }),
+    );
+    let result = &response["result"];
+    assert_eq!(result["isError"], false);
+    let continuation = &result["structuredContent"]["data"]["preview"]["apply_rediscovery"];
+    assert_eq!(continuation["requires_explicit_operator_intent"], true);
+    assert_eq!(continuation["authorizes_mutation"], false);
+    assert_eq!(continuation["discovery_call"]["tool"], "find_tools");
+    assert_eq!(
+        continuation["discovery_call"]["arguments"],
+        json!({
+            "query":"gam_rest_write_apply",
+            "group":"trafficking",
+            "read_only":false,
+            "limit":1,
+            "include_schema":true
+        })
+    );
+    assert_eq!(continuation["apply_call"]["tool"], "gam_rest_write_apply");
+    assert_eq!(
+        continuation["apply_call"]["arguments_from_this_receipt"]["request"],
+        "structuredContent.data.preview.request"
+    );
 }
 
 #[test]
@@ -895,6 +994,18 @@ fn find_tools_read_only_filter_partitions_all_scratchpad_tools() {
     assert_eq!(
         alternatives[0]["destructive_tools"],
         json!(["gam_scratchpad_close_session", "gam_scratchpad_drop_table"])
+    );
+
+    let query_only_response = process.call_tool(
+        1251,
+        "find_tools",
+        json!({"query":"open a scratchpad for delivery evidence","read_only":true}),
+    );
+    let query_only_recovery =
+        search_recovery(&query_only_response["result"]["structuredContent"]["data"]);
+    assert_eq!(
+        query_only_recovery["local_state_alternatives"][0]["retry_filter"],
+        json!({"group":"scratchpad","read_only":false})
     );
 
     let fail_closed_response = process.call_tool(

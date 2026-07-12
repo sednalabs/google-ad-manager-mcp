@@ -18,6 +18,9 @@ const SCRATCHPAD_REST_READ_TOOLS: [&str; 2] = [
     "gam_scratchpad_ingest_report_result_rows",
 ];
 const SCRATCHPAD_MANAGE_SCOPE_READ_TOOLS: [&str; 1] = ["gam_scratchpad_ingest_soap_line_items"];
+const MAX_RECOVERY_GROUPS: usize = 16;
+const MAX_RECOVERY_EXAMPLE_QUERIES: usize = 8;
+const MAX_RECOVERY_LOCAL_STATE_TOOLS: usize = 16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct RepresentativeDiscoveryCandidate {
@@ -233,7 +236,35 @@ const WORKFLOW_DEPENDENCIES: [WorkflowDependency; 8] = [
     },
 ];
 
-pub(crate) fn workflow_companions(results: &[ToolSearchResult]) -> Vec<WorkflowCompanion> {
+const AD_UNIT_RETIREMENT_DEPENDENCIES: [WorkflowDependency; 3] = [
+    WorkflowDependency {
+        tool_name: "gam_network_catalog_list",
+        before_tool: "gam_ad_unit_dependency_probe",
+        required_for_guided_sequence: true,
+        reason: "Ad-unit retirement sequence: resolve the exact ad-unit code and canonical id before checking placement and line-item dependencies.",
+    },
+    WorkflowDependency {
+        tool_name: "gam_ad_unit_dependency_probe",
+        before_tool: "gam_ad_unit_retirement_assessment",
+        required_for_guided_sequence: true,
+        reason: "Ad-unit retirement sequence: inspect current placement and line-item dependencies before producing a freshness-bound retirement assessment.",
+    },
+    WorkflowDependency {
+        tool_name: "gam_ad_unit_retirement_assessment",
+        before_tool: "gam_rest_write_plan",
+        required_for_guided_sequence: true,
+        reason: "Ad-unit archive/deactivate sequence: review the conservative identity, hierarchy, dependency, and freshness assessment before creating any REST write plan.",
+    },
+];
+
+pub(crate) fn workflow_companions(
+    results: &[ToolSearchResult],
+    query: Option<&str>,
+) -> Vec<WorkflowCompanion> {
+    let mut dependencies = WORKFLOW_DEPENDENCIES.to_vec();
+    if is_ad_unit_retirement_intent(query) {
+        dependencies.extend(AD_UNIT_RETIREMENT_DEPENDENCIES);
+    }
     let selected = results
         .iter()
         .map(|result| result.name.as_str())
@@ -241,7 +272,7 @@ pub(crate) fn workflow_companions(results: &[ToolSearchResult]) -> Vec<WorkflowC
     let mut prerequisites = selected.clone();
     loop {
         let mut changed = false;
-        for dependency in WORKFLOW_DEPENDENCIES {
+        for dependency in dependencies.iter().copied() {
             if prerequisites.contains(dependency.before_tool) {
                 changed |= prerequisites.insert(dependency.tool_name);
             }
@@ -252,7 +283,7 @@ pub(crate) fn workflow_companions(results: &[ToolSearchResult]) -> Vec<WorkflowC
     }
 
     let mut emitted_edges = BTreeSet::new();
-    WORKFLOW_DEPENDENCIES
+    dependencies
         .into_iter()
         .filter(|dependency| prerequisites.contains(dependency.before_tool))
         .filter(|dependency| emitted_edges.insert((dependency.tool_name, dependency.before_tool)))
@@ -264,6 +295,27 @@ pub(crate) fn workflow_companions(results: &[ToolSearchResult]) -> Vec<WorkflowC
             reason: dependency.reason,
         })
         .collect()
+}
+
+fn is_ad_unit_retirement_intent(query: Option<&str>) -> bool {
+    let Some(query) = query else {
+        return false;
+    };
+    let normalized = query.to_ascii_lowercase().replace(['-', '_'], " ");
+    normalized.contains("ad unit")
+        && normalized.split_whitespace().any(|term| {
+            matches!(
+                term,
+                "archive"
+                    | "archiving"
+                    | "deactivate"
+                    | "deactivating"
+                    | "deactivation"
+                    | "retire"
+                    | "retiring"
+                    | "retirement"
+            )
+        })
 }
 
 pub(crate) fn companion_tool_names(companions: &[WorkflowCompanion]) -> Vec<&'static str> {
@@ -321,11 +373,13 @@ pub(crate) fn recovery_result_record(
         })
         .cloned()
         .collect::<Vec<_>>();
-    let example_queries = if fail_closed_reasons.is_empty() {
+    let mut example_queries = if fail_closed_reasons.is_empty() {
         validated_recovery_example_queries(inventory, filter)
     } else {
         Vec::new()
     };
+    let example_query_total = example_queries.len();
+    example_queries.truncate(MAX_RECOVERY_EXAMPLE_QUERIES);
     let local_state_alternatives = if fail_closed_reasons.is_empty() {
         local_state_alternatives(inventory, filter)
     } else {
@@ -342,8 +396,20 @@ pub(crate) fn recovery_result_record(
             "For a deliberate scratchpad workflow, review local_state_alternatives before explicitly opting into bounded MCP-local state changes.",
         );
     }
-    let recognized_group = recognized_group_filter(inventory, filter.group.as_deref());
-    let group_recognized = filter.group.is_none() || recognized_group.is_some();
+    let group_input_invalid = fail_closed_reasons
+        .iter()
+        .any(|reason| reason == "group_input");
+    let recognized_group = if group_input_invalid {
+        None
+    } else {
+        recognized_group_filter(inventory, filter.group.as_deref())
+    };
+    let group_supplied = group_input_invalid || filter.group.is_some();
+    let group_recognized =
+        !group_input_invalid && (filter.group.is_none() || recognized_group.is_some());
+    let mut groups = available_groups(inventory, filter.read_only);
+    let group_total = groups.len();
+    groups.truncate(MAX_RECOVERY_GROUPS);
     let mut recovery = json!({
         "type": "search_recovery",
         "status": "no_matches",
@@ -351,15 +417,25 @@ pub(crate) fn recovery_result_record(
         "reason_codes": fail_closed_reasons,
         "active_filter": {
             "group": recognized_group,
-            "group_supplied": filter.group.is_some(),
+            "group_supplied": group_supplied,
             "group_recognized": group_recognized,
             "read_only": filter.read_only,
         },
-        "available_groups": available_groups(inventory, filter.read_only),
+        "available_groups": groups,
+        "available_group_counts": {
+            "total": group_total,
+            "returned": std::cmp::min(group_total, MAX_RECOVERY_GROUPS),
+            "truncated": group_total > MAX_RECOVERY_GROUPS,
+        },
         "retry": {
             "example_queries_validated_under_active_filter": true,
             "guidance": guidance,
             "example_queries": example_queries,
+            "example_query_counts": {
+                "total": example_query_total,
+                "returned": std::cmp::min(example_query_total, MAX_RECOVERY_EXAMPLE_QUERIES),
+                "truncated": example_query_total > MAX_RECOVERY_EXAMPLE_QUERIES,
+            },
         },
     });
     if !local_state_alternatives.is_empty()
@@ -374,7 +450,14 @@ pub(crate) fn recovery_result_record(
 }
 
 fn local_state_alternatives(inventory: &ToolInventory, filter: &ToolSearchFilter) -> Vec<Value> {
-    if filter.group.as_deref() != Some("scratchpad") || filter.read_only != Some(true) {
+    let scratchpad_intent = filter.group.as_deref() == Some("scratchpad")
+        || filter.query.as_deref().is_some_and(|query| {
+            query
+                .to_ascii_lowercase()
+                .split(|character: char| !character.is_ascii_alphanumeric())
+                .any(|term| term == "scratchpad")
+        });
+    if !scratchpad_intent || filter.read_only != Some(true) {
         return Vec::new();
     }
 
@@ -413,6 +496,17 @@ fn local_state_alternatives(inventory: &ToolInventory, filter: &ToolSearchFilter
     rest_read_tools.sort();
     manage_scope_read_tools.sort();
 
+    let eligible_tool_total = eligible_tools.len();
+    let destructive_tool_total = destructive_tools.len();
+    let local_only_tool_total = local_only_tools.len();
+    let rest_read_tool_total = rest_read_tools.len();
+    let manage_scope_read_tool_total = manage_scope_read_tools.len();
+    eligible_tools.truncate(MAX_RECOVERY_LOCAL_STATE_TOOLS);
+    destructive_tools.truncate(MAX_RECOVERY_LOCAL_STATE_TOOLS);
+    local_only_tools.truncate(MAX_RECOVERY_LOCAL_STATE_TOOLS);
+    rest_read_tools.truncate(MAX_RECOVERY_LOCAL_STATE_TOOLS);
+    manage_scope_read_tools.truncate(MAX_RECOVERY_LOCAL_STATE_TOOLS);
+
     vec![json!({
         "type": "filter_alternative",
         "status": "available_by_explicit_opt_in",
@@ -429,10 +523,16 @@ fn local_state_alternatives(inventory: &ToolInventory, filter: &ToolSearchFilter
             "read_only": false,
         },
         "eligible_tools": eligible_tools,
+        "eligible_tool_counts": {
+            "total": eligible_tool_total,
+            "returned": std::cmp::min(eligible_tool_total, MAX_RECOVERY_LOCAL_STATE_TOOLS),
+            "truncated": eligible_tool_total > MAX_RECOVERY_LOCAL_STATE_TOOLS,
+        },
         "tool_access_classes": [
             {
                 "class": "local_only",
                 "tools": local_only_tools,
+                "tool_counts": bounded_count(local_only_tool_total, MAX_RECOVERY_LOCAL_STATE_TOOLS),
                 "upstream_call": false,
                 "scope_required": null,
                 "manage_scope_required": false
@@ -440,6 +540,7 @@ fn local_state_alternatives(inventory: &ToolInventory, filter: &ToolSearchFilter
             {
                 "class": "gam_rest_read",
                 "tools": rest_read_tools,
+                "tool_counts": bounded_count(rest_read_tool_total, MAX_RECOVERY_LOCAL_STATE_TOOLS),
                 "upstream_call": true,
                 "scope_required": "https://www.googleapis.com/auth/admanager.readonly",
                 "manage_scope_required": false
@@ -447,18 +548,28 @@ fn local_state_alternatives(inventory: &ToolInventory, filter: &ToolSearchFilter
             {
                 "class": "gam_soap_read",
                 "tools": manage_scope_read_tools,
+                "tool_counts": bounded_count(manage_scope_read_tool_total, MAX_RECOVERY_LOCAL_STATE_TOOLS),
                 "upstream_call": true,
                 "scope_required": "https://www.googleapis.com/auth/admanager",
                 "manage_scope_required": true
             }
         ],
         "destructive_tools": destructive_tools,
+        "destructive_tool_counts": bounded_count(destructive_tool_total, MAX_RECOVERY_LOCAL_STATE_TOOLS),
         "guidance": [
             "This explicit filter enables bounded local scratchpad session state only; it does not authorize or perform a Google Ad Manager mutation.",
             "Scratchpad open, query, list, ingest, and export calls may create, refresh, or prune local session state; ingest tools can also perform upstream GAM reads under the scope shown in tool_access_classes.",
             "Close-session and drop-table tools remove local state and remain distinctly labelled destructive."
         ]
     })]
+}
+
+fn bounded_count(total: usize, limit: usize) -> Value {
+    json!({
+        "total": total,
+        "returned": std::cmp::min(total, limit),
+        "truncated": total > limit,
+    })
 }
 
 fn validated_recovery_example_queries(
@@ -544,8 +655,8 @@ pub(crate) fn recognized_group_filter(
 #[cfg(test)]
 mod tests {
     use super::{
-        REPRESENTATIVE_DISCOVERY_CANDIDATES, WorkflowCompanion, available_groups,
-        companion_result_records, companion_tool_names, recognized_group_filter,
+        MAX_RECOVERY_GROUPS, REPRESENTATIVE_DISCOVERY_CANDIDATES, WorkflowCompanion,
+        available_groups, companion_result_records, companion_tool_names, recognized_group_filter,
         recovery_result_record, workflow_companions,
     };
     use crate::tool_surface::build_tool_inventory;
@@ -612,8 +723,10 @@ mod tests {
             assert_eq!(first.group.as_deref(), Some(candidate.group));
             assert_eq!(first.read_only, candidate.read_only);
 
-            let prerequisites =
-                companion_tool_names(&workflow_companions(&ranked.response.results));
+            let prerequisites = companion_tool_names(&workflow_companions(
+                &ranked.response.results,
+                Some(candidate.query),
+            ));
             match candidate.expected_tool {
                 "gam_soap_trafficking_plan" => {
                     assert_eq!(prerequisites, vec!["gam_soap_payload_build"])
@@ -645,6 +758,20 @@ mod tests {
                         "gam_report_operation_poll",
                     ]
                 ),
+                "gam_rest_write_plan"
+                    if candidate.query.contains("archive an ad unit")
+                        || candidate.query.contains("deactivate an ad unit") =>
+                {
+                    assert_eq!(
+                        prerequisites,
+                        vec![
+                            "gam_networks_list",
+                            "gam_network_catalog_list",
+                            "gam_ad_unit_dependency_probe",
+                            "gam_ad_unit_retirement_assessment",
+                        ]
+                    )
+                }
                 _ => {}
             }
         }
@@ -663,7 +790,7 @@ mod tests {
     #[test]
     fn report_rows_add_complete_cold_start_and_async_chain() {
         let results = [result("gam_report_result_rows")];
-        let companions = workflow_companions(&results);
+        let companions = workflow_companions(&results, None);
         assert_eq!(
             companion_tool_names(&companions),
             vec![
@@ -690,9 +817,50 @@ mod tests {
     }
 
     #[test]
+    fn destructive_ad_unit_intent_adds_evidence_first_retirement_chain() {
+        let results = [result("gam_rest_write_plan")];
+        let companions = workflow_companions(&results, Some("archive an ad unit"));
+        assert_eq!(
+            companion_tool_names(&companions),
+            vec![
+                "gam_networks_list",
+                "gam_network_catalog_list",
+                "gam_ad_unit_dependency_probe",
+                "gam_ad_unit_retirement_assessment",
+            ]
+        );
+        assert_eq!(
+            companion_edges(&companions),
+            vec![
+                ("gam_networks_list", "gam_network_catalog_list", true, false),
+                (
+                    "gam_network_catalog_list",
+                    "gam_ad_unit_dependency_probe",
+                    true,
+                    false,
+                ),
+                (
+                    "gam_ad_unit_dependency_probe",
+                    "gam_ad_unit_retirement_assessment",
+                    true,
+                    false,
+                ),
+                (
+                    "gam_ad_unit_retirement_assessment",
+                    "gam_rest_write_plan",
+                    true,
+                    false,
+                ),
+            ]
+        );
+
+        assert!(workflow_companions(&results, Some("create an ad unit")).is_empty());
+    }
+
+    #[test]
     fn soap_plan_adds_optional_builder_dependency() {
         let results = [result("gam_soap_trafficking_plan")];
-        let companions = workflow_companions(&results);
+        let companions = workflow_companions(&results, None);
         assert_eq!(
             companion_edges(&companions),
             vec![(
@@ -716,7 +884,7 @@ mod tests {
     #[test]
     fn soap_apply_adds_builder_then_plan_dependencies() {
         let results = [result("gam_soap_trafficking_apply")];
-        let companions = workflow_companions(&results);
+        let companions = workflow_companions(&results, None);
         assert_eq!(
             companion_tool_names(&companions),
             vec!["gam_soap_payload_build", "gam_soap_trafficking_plan"]
@@ -766,7 +934,7 @@ mod tests {
             result("gam_rest_write_apply"),
             result("gam_yield_group_exclusions_apply"),
         ];
-        let companions = workflow_companions(&results);
+        let companions = workflow_companions(&results, None);
         assert_eq!(
             companion_edges(&companions),
             vec![
@@ -804,7 +972,7 @@ mod tests {
             result("gam_soap_trafficking_plan"),
             result("gam_soap_trafficking_apply"),
         ];
-        let companions = workflow_companions(&plan_and_apply);
+        let companions = workflow_companions(&plan_and_apply, None);
         assert_eq!(
             companion_edges(&companions),
             vec![
@@ -832,7 +1000,7 @@ mod tests {
             result("gam_soap_trafficking_plan"),
             result("gam_soap_trafficking_apply"),
         ];
-        let companions = workflow_companions(&complete_sequence);
+        let companions = workflow_companions(&complete_sequence, None);
         assert_eq!(
             companion_edges(&companions),
             vec![
@@ -928,6 +1096,10 @@ mod tests {
         assert_eq!(alternative["retry_filter"]["group"], "scratchpad");
         assert_eq!(alternative["retry_filter"]["read_only"], false);
         assert_eq!(
+            alternative["eligible_tool_counts"],
+            serde_json::json!({"total":10,"returned":10,"truncated":false})
+        );
+        assert_eq!(
             alternative["eligible_tools"],
             serde_json::json!([
                 "gam_scratchpad_close_session",
@@ -947,6 +1119,10 @@ mod tests {
             serde_json::json!(["gam_scratchpad_close_session", "gam_scratchpad_drop_table"])
         );
         assert_eq!(
+            alternative["destructive_tool_counts"],
+            serde_json::json!({"total":2,"returned":2,"truncated":false})
+        );
+        assert_eq!(
             alternative["tool_access_classes"],
             serde_json::json!([
                 {
@@ -960,6 +1136,7 @@ mod tests {
                         "gam_scratchpad_open_session",
                         "gam_scratchpad_query"
                     ],
+                    "tool_counts":{"total":7,"returned":7,"truncated":false},
                     "upstream_call":false,
                     "scope_required":null,
                     "manage_scope_required":false
@@ -970,6 +1147,7 @@ mod tests {
                         "gam_scratchpad_ingest_network_catalog",
                         "gam_scratchpad_ingest_report_result_rows"
                     ],
+                    "tool_counts":{"total":2,"returned":2,"truncated":false},
                     "upstream_call":true,
                     "scope_required":"https://www.googleapis.com/auth/admanager.readonly",
                     "manage_scope_required":false
@@ -977,6 +1155,7 @@ mod tests {
                 {
                     "class":"gam_soap_read",
                     "tools":["gam_scratchpad_ingest_soap_line_items"],
+                    "tool_counts":{"total":1,"returned":1,"truncated":false},
                     "upstream_call":true,
                     "scope_required":"https://www.googleapis.com/auth/admanager",
                     "manage_scope_required":true
@@ -993,6 +1172,28 @@ mod tests {
                 .expect("scratchpad recovery serializes")
                 .len()
                 < 6 * 1024
+        );
+    }
+
+    #[test]
+    fn scratchpad_query_intent_recovers_without_internal_group_knowledge() {
+        let inventory = build_tool_inventory().expect("inventory");
+        let recovery = recovery_for_filter(
+            &inventory,
+            &ToolSearchFilter {
+                query: Some("open a scratchpad for delivery evidence".to_string()),
+                group: None,
+                read_only: Some(true),
+                limit: Some(20),
+            },
+        );
+        assert_eq!(
+            recovery["local_state_alternatives"][0]["retry_filter"],
+            serde_json::json!({"group":"scratchpad","read_only":false})
+        );
+        assert_eq!(
+            recovery["local_state_alternatives"][0]["requires_explicit_operator_intent"],
+            true
         );
     }
 
@@ -1169,6 +1370,38 @@ mod tests {
         assert_eq!(
             available_groups(&inventory, None),
             vec!["catalog", "late-group", "write-group"]
+        );
+    }
+
+    #[test]
+    fn recovery_caps_dynamic_group_lists_and_reports_truncation() {
+        let capabilities = (0..20)
+            .map(|index| {
+                ToolCapability::new(format!("visible.{index:03}"))
+                    .with_group(format!("group-{index:03}"))
+                    .with_read_only(true)
+            })
+            .collect::<Vec<_>>();
+        let inventory = ToolInventory::from_capabilities(capabilities).expect("inventory");
+        let recovery = recovery_for_filter(
+            &inventory,
+            &ToolSearchFilter {
+                query: Some("quasar zeppelin".to_string()),
+                group: None,
+                read_only: Some(true),
+                limit: Some(20),
+            },
+        );
+        assert_eq!(
+            recovery["available_groups"]
+                .as_array()
+                .expect("bounded groups")
+                .len(),
+            MAX_RECOVERY_GROUPS
+        );
+        assert_eq!(
+            recovery["available_group_counts"],
+            serde_json::json!({"total":20,"returned":16,"truncated":true})
         );
     }
 

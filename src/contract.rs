@@ -46,7 +46,7 @@ pub(crate) fn success_envelope_with_meta(data: Value, meta: Value, started: Inst
 }
 
 pub fn error(err: AdManagerError, started: Instant) -> CallToolResult {
-    CallToolResult::structured(error_envelope(&err, started))
+    CallToolResult::structured_error(error_envelope(&err, started))
 }
 
 pub(crate) fn error_envelope(err: &AdManagerError, started: Instant) -> Value {
@@ -70,7 +70,7 @@ pub(crate) fn result_contract_error(
     message: impl AsRef<str>,
     started: Instant,
 ) -> CallToolResult {
-    CallToolResult::structured(json!({
+    CallToolResult::structured_error(json!({
         "ok": false,
         "error": {
             "code": "result_contract_error",
@@ -89,7 +89,7 @@ pub(crate) fn result_contract_error(
 }
 
 pub fn error_with_detail(err: AdManagerError, detail: Value, started: Instant) -> CallToolResult {
-    CallToolResult::structured(json!({
+    CallToolResult::structured_error(json!({
         "ok": false,
         "error": {
             "code": err.code(),
@@ -106,7 +106,7 @@ pub fn error_with_detail(err: AdManagerError, detail: Value, started: Instant) -
 }
 
 pub fn scratchpad_error(err: ScratchpadError, started: Instant) -> CallToolResult {
-    CallToolResult::structured(json!({
+    CallToolResult::structured_error(json!({
         "ok": false,
         "error": {
             "code": err.code(),
@@ -450,7 +450,8 @@ fn looks_secret_bearing(token: &str, following: &[&str]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{redact_secret_text, success_with_text_summary};
+    use super::{error, redact_secret_text, result_contract_error, success_with_text_summary};
+    use crate::AdManagerError;
     use serde_json::json;
     use std::time::Instant;
 
@@ -468,6 +469,32 @@ mod tests {
         assert_ne!(
             encoded["content"][0]["text"],
             encoded["structuredContent"].to_string()
+        );
+    }
+
+    #[test]
+    fn error_helpers_set_the_rmcp_tool_error_signal() {
+        let input = error(
+            AdManagerError::invalid("field", "bad value"),
+            Instant::now(),
+        );
+        assert_eq!(input.is_error, Some(true));
+        assert_eq!(
+            input
+                .structured_content
+                .as_ref()
+                .expect("structured input error")["ok"],
+            false
+        );
+
+        let guard = result_contract_error("result", "too large", Instant::now());
+        assert_eq!(guard.is_error, Some(true));
+        assert_eq!(
+            guard
+                .structured_content
+                .as_ref()
+                .expect("structured guard error")["error"]["code"],
+            "result_contract_error"
         );
     }
 

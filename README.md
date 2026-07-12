@@ -276,6 +276,10 @@ All tool responses use Contract V1 envelopes:
 }
 ```
 
+Failed tool executions keep the same `ok:false` structured envelope and set the
+MCP `isError` signal to `true`, so clients do not have to infer failure solely
+from nested JSON.
+
 `find_tools` uses deterministic ranked natural-language discovery. Its default
 response is compact, schema-free, capped by the toolkit's 32 KiB selection
 budget, and includes match-completeness metadata. It adds guided dependency
@@ -283,7 +287,9 @@ edges without changing semantic match counts: REST plan before apply, optional
 SOAP payload builder before SOAP plan, SOAP plan before SOAP apply, and yield
 preview before yield apply. SOAP prerequisites are transitive, so direct SOAP
 apply discovery adds the builder followed by the plan. Empty searches return
-available groups and bounded retry examples without relaxing `read_only`. Each
+available groups and bounded retry examples without relaxing `read_only`. Group,
+example-query, and local-state tool lists report total, returned, and truncated
+counts so catalogue growth cannot silently erase recovery. Each
 example is retained only when the expected tool ranks first at `limit=1` under
 the same strict inventory, toolkit-normalized exact `group`, and `read_only`
 filter. Recovery keeps the compatible string array at `retry.example_queries`,
@@ -298,16 +304,27 @@ Stateful recovery examples begin with executable entry points: report runs
 before completed-result pagination, and scratchpad session opening before
 ingestion into that session.
 
+Report runs and polls bind the requested report, returned operation name,
+`metadata.report`, and final `reportResult` to one network/report identity.
+Operation bodies are read through a 64 KiB cap and projected to documented
+fields; result pages are read through a 512 KiB cap, use a maximum page size of
+1,000, and pass complete-result size guards. Poll timeouts are capped at 24
+hours, initial intervals normalized to at least 250 ms and capped at 30 seconds, and sleeps stop at an absolute deadline.
+If a successful run POST returns an invalid handoff, the error is explicitly
+not replay-safe and automatic reruns are prohibited.
+
 `limit` defaults to 20 and must be at least 1. Values above 100 are passed to
 the toolkit, which clamps `match_summary.result_limit` to 100 and reports
 `result_limit_clamped`. Set `include_schema=true` only after narrowing the result
 set when full tool schemas are required. Schema expansion is limited to five
 selected direct-plus-companion tools and fails closed above that limit.
-Free-form query text, query terms, and unrecognized group text are never
+Free-form query text, query terms, and unrecognized or truncated group text are never
 returned. `request_summary` keeps only presence, recognition, and term-count
 diagnostics. The compact selection remains within the toolkit's 32 KiB data
-budget; the complete RMCP result uses a short text summary, is capped at 64 KiB,
-and caps its structured Contract V1 envelope at 48 KiB.
+budget; the complete RMCP result includes a bounded actionable JSON text
+projection for content-only clients, is capped at 64 KiB, and caps its
+structured Contract V1 envelope at 48 KiB. Requested schemas remain in
+`structuredContent.data`.
 Omit `read_only`, set it to `null`, or set `read_only=true` to search only non-mutating execution
 paths, including plans, previews, and no-mutation proof
 reads. Every current scratchpad tool is excluded because the pinned scratchpad
@@ -316,7 +333,8 @@ listings, and evidence export. Set `read_only=false` to search only write-like
 or local-state-mutating tools. Use two explicit searches when both mutation
 classes are needed. Guided predecessors may still be
 added to an apply result's allowed-tool list.
-When an explicit `group="scratchpad", read_only=true` search has no matches,
+When an explicit `group="scratchpad", read_only=true` search, or a query with
+strong scratchpad intent under `read_only=true`, has no matches,
 recovery returns `local_state_alternatives` rather than silently relaxing the
 filter. That record makes the `read_only=false` retry explicit, limits its scope
 to bounded MCP-local scratchpad state, states that it cannot mutate GAM, and
@@ -325,7 +343,15 @@ also distinguish local-only calls, normal GAM REST reads, and the SOAP line-item
 ingest that requires the manage scope.
 Common operator phrases such as pausing or archiving a line item and
 deactivating or archiving an ad unit rank the corresponding non-mutating plan;
-they do not opt the caller into apply discovery.
+they do not opt the caller into apply discovery. Ad-unit archive, deactivate,
+retire, and retirement intent also adds the evidence-first network, catalogue,
+dependency-probe, and retirement-assessment chain before the REST plan.
+
+Plan and non-noop preview receipts include an `apply_rediscovery` continuation.
+It names the exact second `find_tools` call with `read_only=false`, points back
+to the reviewed request and confirmation token, and does not authorize a
+mutation or bypass existing runtime, scope, context, confirmation, or readback
+gates.
 
 Each `workflow_companion` record reports `required_for_guided_sequence` and
 `server_call_enforced:false`. The legacy `required` field remains as an equal

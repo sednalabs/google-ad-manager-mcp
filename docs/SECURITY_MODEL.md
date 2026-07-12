@@ -44,7 +44,16 @@ terms, return an exact group only when it matches a registered strict
 list-visible group, and otherwise expose only presence, recognition, and term
 counts. Narrow schema expansion is capped at five direct-plus-companion tools.
 The complete RMCP result is guarded at 64 KiB with a 48 KiB structured-envelope
-cap and a fixed short text summary rather than a duplicate JSON payload.
+cap and a bounded actionable JSON text projection rather than a duplicate full
+payload. Failed Contract V1 results set MCP `isError=true` as well as
+`ok:false`.
+
+Report operation and result handles are length-bounded and identity-bound. The
+run request, operation name, `metadata.report`, and final `reportResult` must
+remain in one network/report scope. Operation/result HTTP bodies and complete
+MCP results have explicit caps; polling controls have fixed maxima and an
+absolute deadline. A malformed provider handoff after a successful run POST is
+not replay-safe and must not trigger an automatic second run.
 
 ## Tool-surface restrictions
 
@@ -82,6 +91,9 @@ The write surface uses a preview/apply contract:
 - local ADC users can request that scope with
   `google-ad-manager-mcp auth login --manage-scope`
 - apply requires the confirmation token returned by the matching plan
+- plan/non-noop-preview receipts expose an explicit `apply_rediscovery` call
+  for deferred-loading clients, but that continuation is non-authorizing and
+  preserves every apply gate
 - apply requires `reason`, `expected_impact`, and `rollback_note`
 - create and patch operations attempt post-apply readback through the returned
   or target resource name
