@@ -70,7 +70,7 @@ pub(crate) const REPRESENTATIVE_DISCOVERY_CANDIDATES: [RepresentativeDiscoveryCa
         true,
     ),
     candidate(
-        "list available Google Ad Manager networks",
+        "list Google Ad Manager networks visible to the authenticated principal",
         "gam_networks_list",
         "networks",
         true,

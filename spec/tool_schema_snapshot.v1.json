@@ -2,7 +2,7 @@
   "schema": "mcp_tool_schema_snapshot",
   "tools": [
     {
-      "description": "Semantically search Google Ad Manager MCP tools with ranked matches, guided dependency edges, completeness metadata, and empty-result recovery.",
+      "description": "Semantically search Google Ad Manager MCP tools with ranked matches, guided dependency edges, completeness metadata, and filter-validated empty-result recovery.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -21,9 +21,9 @@
           },
           "limit": {
             "default": null,
-            "description": "Maximum ranked inventory matches. Defaults to 20 and is capped at 100.",
+            "description": "Maximum ranked inventory matches. Defaults to 20. Values above 100 are\ntoolkit-clamped and reported with result_limit_clamped.",
             "format": "uint",
-            "minimum": 0,
+            "minimum": 1,
             "type": [
               "integer",
               "null"
