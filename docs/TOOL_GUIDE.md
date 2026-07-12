@@ -139,10 +139,16 @@ require an explicit `read_only=false` search.
 
 Report-run starts are entry-point aware and registered as non-read-only because
 starting a saved report creates an upstream job. An explicit
-`read_only=false` report-start search therefore exposes `gam_report_run`, its
-schema, and its toolkit risk posture. When discovery identifies an existing
+`read_only=false` report-start search exposes `gam_report_run`, its schema, and
+its toolkit risk posture only when the bounded toolkit query also expresses
+explicit new-run intent. Report starts are representative rank probes but are
+never no-match recovery candidates. When discovery identifies an existing
 `operation_name` continuation, the same tool is instead emitted as a
 non-callable condition record so it cannot prompt a duplicate start.
+Continuation, status, resume, check, poll, monitor, operation-name,
+operation-handle, and wait-without-new-run language under `read_only=false` also exposes
+`gam_report_operation_poll` as a callable GET-only safe alternative in
+`openai_allowed_tools` and requested schemas.
 Existing-operation polling and completed-result retrieval remain executable
 discovery paths. Optional SOAP builder guidance remains callable. A broad
 scratchpad recovery starts with
@@ -470,18 +476,25 @@ Operation responses are read through a 64 KiB limit and projected to documented
 fields. Result pages are read through a 512 KiB limit, accept page sizes from 1
 through 1,000, validate documented object/row/page-token/count types, and pass
 model-visible and complete RMCP result guards. Poll timeouts are between 1 ms
-and 24 hours; initial intervals are between 5 and 30 seconds with bounded
+and 24 hours; startup rejects a
+`GOOGLE_AD_MANAGER_MCP_REPORT_POLL_TIMEOUT_MS` default outside that same range.
+Initial intervals are between 5 and 30 seconds with bounded
 exponential backoff. The absolute deadline covers each in-flight GET and sleep.
 Post-start timeout, transport, or provider-contract errors preserve
 `operation_name`, the optional `expected_report_name`, the last valid
-observation, and a GET-only poll continuation. Timeout continuation uses a
+observation, and a GET-only poll continuation when the GET can safely be
+retried. A definitive poll-time 4xx other than 408 or 429 returns
+remediation-required detail with no executable continuation and does not claim
+that the report operation itself is terminal. Timeout continuation uses a
 bounded larger timeout rather than repeating the expired value. Terminal
 operation errors and completed operations without a result do not offer another
 poll. Definitive 4xx run rejections are upstream API errors. Once the initial
 POST may otherwise have been dispatched, transport, body-read, response-bound,
 plausible server-status, JSON, missing, malformed, or cross-target handoff
 failures report an uncertain handoff, set `automatic_replay_safe=false`, and
-prohibit automatic reruns. An immediate terminal operation error is a redacted
+prohibit automatic reruns. Every uncertain receipt retains the canonical
+`report_name`, an explicit `dispatch_state`, and `started_new_run=null` rather
+than claiming that a new run was confirmed. An immediate terminal operation error is a redacted
 MCP error with no success continuation. If
 completion succeeds but first-page retrieval fails, the
 error instead preserves `report_result`, page size, and a

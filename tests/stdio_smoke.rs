@@ -422,11 +422,14 @@ fn find_tools_models_complete_report_cold_start_and_async_continuation() {
     );
     let existing_operation_data =
         &existing_operation_response["result"]["structuredContent"]["data"];
-    assert!(
-        !sorted_string_values(&existing_operation_data["openai_allowed_tools"])
-            .contains(&"gam_report_run")
+    assert_eq!(
+        sorted_string_values(&existing_operation_data["openai_allowed_tools"]),
+        vec!["gam_report_operation_poll"]
     );
-    assert!(!sorted_schema_names(existing_operation_data).contains(&"gam_report_run"));
+    assert_eq!(
+        sorted_schema_names(existing_operation_data),
+        vec!["gam_report_operation_poll"]
+    );
     let run_condition = existing_operation_data["results"]
         .as_array()
         .and_then(|results| {
@@ -437,8 +440,59 @@ fn find_tools_models_complete_report_cold_start_and_async_continuation() {
         .expect("existing-operation report-run condition guidance");
     assert_eq!(run_condition["callable_as_tool"], false);
     assert_eq!(run_condition["schema_exposed"], false);
-    assert_eq!(run_condition["before_tool"], "gam_report_operation_poll");
+    assert!(run_condition["before_tool"].is_null());
     assert_eq!(run_condition["tool_already_selected"], true);
+    let safe_alternative = existing_operation_data["results"]
+        .as_array()
+        .and_then(|results| {
+            results.iter().find(|result| {
+                result["type"] == "intent_safe_alternative"
+                    && result["name"] == "gam_report_operation_poll"
+            })
+        })
+        .expect("existing-operation safe poll alternative");
+    assert_eq!(safe_alternative["callable_as_tool"], true);
+    assert_eq!(safe_alternative["safe_method"], "GET");
+    assert_eq!(
+        existing_operation_data["request_summary"]["callable_safe_alternatives_added"],
+        1
+    );
+
+    let existing_operation_content: Value = serde_json::from_str(
+        existing_operation_response["result"]["content"][0]["text"]
+            .as_str()
+            .expect("existing-operation discovery content"),
+    )
+    .expect("existing-operation discovery content is JSON");
+    assert_eq!(
+        existing_operation_content["allowed_tools"],
+        json!(["gam_report_operation_poll"])
+    );
+    assert!(
+        existing_operation_content["workflow"]
+            .as_array()
+            .is_some_and(|workflow| workflow.iter().any(|record| {
+                record["selection_source"] == "intent_safe_alternative"
+                    && record["tool"] == "gam_report_operation_poll"
+                    && record["safe_method"] == "GET"
+            }))
+    );
+
+    let resume_response = process.call_tool(
+        345,
+        "find_tools",
+        json!({
+            "query":"resume report run status",
+            "group":"reports",
+            "read_only":false,
+            "limit":10
+        }),
+    );
+    let resume_data = &resume_response["result"]["structuredContent"]["data"];
+    assert_eq!(
+        sorted_string_values(&resume_data["openai_allowed_tools"]),
+        vec!["gam_report_operation_poll"]
+    );
 }
 
 #[test]
