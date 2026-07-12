@@ -333,10 +333,13 @@ listings, and evidence export. Set `read_only=false` to search only write-like
 or local-state-mutating tools. Use two explicit searches when both mutation
 classes are needed. Guided predecessors may still be
 added to an apply result's allowed-tool list.
-When an explicit `group="scratchpad", read_only=true` search, or a query with
-strong scratchpad intent under `read_only=true`, has no matches,
+When an explicit `group="scratchpad", read_only=true` search has no matches,
 recovery returns `local_state_alternatives` rather than silently relaxing the
-filter. That record makes the `read_only=false` retry explicit, limits its scope
+filter. A query with strong scratchpad intent under `read_only=true` also emits
+the same bounded `filter_alternative` alongside any weak read-only matches, so
+unrelated ranking results cannot hide the deliberate local-state continuation.
+Fail-closed searches never emit either form. The record makes the
+`read_only=false` retry explicit, limits its scope
 to bounded MCP-local scratchpad state, states that it cannot mutate GAM, and
 separately identifies destructive local close/drop tools. Its access classes
 also distinguish local-only calls, normal GAM REST reads, and the SOAP line-item

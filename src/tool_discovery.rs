@@ -2,7 +2,7 @@
 //!
 //! This module keeps semantic ranking in `mcp-toolkit-rs` and owns only the
 //! Google Ad Manager workflow relationships that the generic toolkit cannot
-//! infer, such as guided builder/plan/apply dependencies and empty-result recovery.
+//! infer, such as guided builder/plan/apply dependencies and filter recovery.
 
 use std::collections::BTreeSet;
 
@@ -358,21 +358,7 @@ pub(crate) fn recovery_result_record(
     if summary.total_matches > 0 {
         return None;
     }
-    let fail_closed_reasons = summary
-        .truncation_reasons
-        .iter()
-        .filter(|reason| {
-            matches!(
-                reason.as_str(),
-                "query_input"
-                    | "group_input"
-                    | "excluded_query_terms"
-                    | "query_intent_ambiguous"
-                    | "result_metadata"
-            )
-        })
-        .cloned()
-        .collect::<Vec<_>>();
+    let fail_closed_reasons = search_semantics_fail_closed_reasons(summary);
     let mut example_queries = if fail_closed_reasons.is_empty() {
         validated_recovery_example_queries(inventory, filter)
     } else {
@@ -447,6 +433,36 @@ pub(crate) fn recovery_result_record(
         );
     }
     Some(recovery)
+}
+
+pub(crate) fn supplemental_local_state_alternative_records(
+    inventory: &ToolInventory,
+    filter: &ToolSearchFilter,
+    summary: &ToolSearchMatchSummary,
+) -> Vec<Value> {
+    if summary.total_matches == 0 || !search_semantics_fail_closed_reasons(summary).is_empty() {
+        return Vec::new();
+    }
+
+    local_state_alternatives(inventory, filter)
+}
+
+fn search_semantics_fail_closed_reasons(summary: &ToolSearchMatchSummary) -> Vec<String> {
+    summary
+        .truncation_reasons
+        .iter()
+        .filter(|reason| {
+            matches!(
+                reason.as_str(),
+                "query_input"
+                    | "group_input"
+                    | "excluded_query_terms"
+                    | "query_intent_ambiguous"
+                    | "result_metadata"
+            )
+        })
+        .cloned()
+        .collect()
 }
 
 fn local_state_alternatives(inventory: &ToolInventory, filter: &ToolSearchFilter) -> Vec<Value> {
@@ -657,7 +673,7 @@ mod tests {
     use super::{
         MAX_RECOVERY_GROUPS, REPRESENTATIVE_DISCOVERY_CANDIDATES, WorkflowCompanion,
         available_groups, companion_result_records, companion_tool_names, recognized_group_filter,
-        recovery_result_record, workflow_companions,
+        recovery_result_record, supplemental_local_state_alternative_records, workflow_companions,
     };
     use crate::tool_surface::build_tool_inventory;
     use mcp_toolkit_core::tool_inventory::{
@@ -1178,22 +1194,37 @@ mod tests {
     #[test]
     fn scratchpad_query_intent_recovers_without_internal_group_knowledge() {
         let inventory = build_tool_inventory().expect("inventory");
-        let recovery = recovery_for_filter(
+        let filter = ToolSearchFilter {
+            query: Some("open a scratchpad for delivery evidence".to_string()),
+            group: None,
+            read_only: Some(true),
+            limit: Some(20),
+        };
+        let ranked =
+            inventory.search_ranked(&filter, ToolOperation::List, &ToolInventoryPolicy::strict());
+        assert!(ranked.match_summary.total_matches > 0);
+        let alternatives = supplemental_local_state_alternative_records(
             &inventory,
-            &ToolSearchFilter {
-                query: Some("open a scratchpad for delivery evidence".to_string()),
-                group: None,
-                read_only: Some(true),
-                limit: Some(20),
-            },
+            &filter,
+            &ranked.match_summary,
         );
         assert_eq!(
-            recovery["local_state_alternatives"][0]["retry_filter"],
+            alternatives[0]["retry_filter"],
             serde_json::json!({"group":"scratchpad","read_only":false})
         );
-        assert_eq!(
-            recovery["local_state_alternatives"][0]["requires_explicit_operator_intent"],
-            true
+        assert_eq!(alternatives[0]["requires_explicit_operator_intent"], true);
+
+        let mut fail_closed_summary = ranked.match_summary;
+        fail_closed_summary
+            .truncation_reasons
+            .push("query_input".to_string());
+        assert!(
+            supplemental_local_state_alternative_records(
+                &inventory,
+                &filter,
+                &fail_closed_summary,
+            )
+            .is_empty()
         );
     }
 

@@ -42,7 +42,7 @@ use crate::fingerprint::stable_fingerprint;
 use crate::probe_projection::{ProbeKind, bounded_probe_error, bounded_probe_success};
 use crate::tool_discovery::{
     companion_result_records, companion_tool_names, recognized_group_filter,
-    recovery_result_record, workflow_companions,
+    recovery_result_record, supplemental_local_state_alternative_records, workflow_companions,
 };
 use crate::{AdManagerError, AdManagerServer, MANAGE_SCOPE, McpError};
 use mcp_toolkit_core::guarded_action::{
@@ -564,6 +564,7 @@ fn bounded_find_tools_result(data: Value, started: Instant) -> CallToolResult {
 }
 
 fn find_tools_text_projection(data: &Value) -> String {
+    let result_values = data.get("results").and_then(Value::as_array);
     let allowed_tool_values = data.get("openai_allowed_tools").and_then(Value::as_array);
     let allowed_tool_total = allowed_tool_values.map_or(0, Vec::len);
     let allowed_tools = allowed_tool_values
@@ -572,9 +573,7 @@ fn find_tools_text_projection(data: &Value) -> String {
         .filter_map(Value::as_str)
         .take(FIND_TOOLS_TEXT_MAX_ALLOWED_TOOLS)
         .collect::<Vec<_>>();
-    let workflow_values = data
-        .get("results")
-        .and_then(Value::as_array)
+    let workflow_values = result_values
         .into_iter()
         .flatten()
         .filter(|result| result.get("type").and_then(Value::as_str) == Some("workflow_companion"))
@@ -591,32 +590,42 @@ fn find_tools_text_projection(data: &Value) -> String {
             })
         })
         .collect::<Vec<_>>();
-    let recovery = data
-        .get("results")
-        .and_then(Value::as_array)
+    let recovery_value = result_values
         .into_iter()
         .flatten()
-        .find(|result| result.get("type").and_then(Value::as_str) == Some("search_recovery"))
-        .map(|result| {
-            json!({
-                "active_filter": result.get("active_filter"),
-                "available_groups": result.get("available_groups"),
-                "available_group_counts": result.get("available_group_counts"),
-                "example_queries": result
-                    .get("retry")
-                    .and_then(|retry| retry.get("example_queries")),
-                "local_state_retry": result
-                    .get("local_state_alternatives")
-                    .and_then(Value::as_array)
-                    .and_then(|alternatives| alternatives.first())
-                    .map(|alternative| json!({
-                        "retry_filter": alternative.get("retry_filter"),
-                        "mutation_scope": alternative.get("mutation_scope"),
-                        "upstream_gam_mutation": alternative.get("upstream_gam_mutation"),
-                        "requires_explicit_operator_intent": alternative.get("requires_explicit_operator_intent"),
-                    })),
+        .find(|result| result.get("type").and_then(Value::as_str) == Some("search_recovery"));
+    let local_state_alternative = recovery_value
+        .and_then(|result| {
+            result
+                .get("local_state_alternatives")
+                .and_then(Value::as_array)
+                .and_then(|alternatives| alternatives.first())
+        })
+        .or_else(|| {
+            result_values.into_iter().flatten().find(|result| {
+                result.get("type").and_then(Value::as_str) == Some("filter_alternative")
+                    && result.get("reason_code").and_then(Value::as_str)
+                        == Some("active_filter_excludes_local_state_tools")
             })
         });
+    let recovery = recovery_value.map(|result| {
+        json!({
+            "active_filter": result.get("active_filter"),
+            "available_groups": result.get("available_groups"),
+            "available_group_counts": result.get("available_group_counts"),
+            "example_queries": result
+                .get("retry")
+                .and_then(|retry| retry.get("example_queries")),
+        })
+    });
+    let local_state_retry = local_state_alternative.map(|alternative| {
+        json!({
+            "retry_filter": alternative.get("retry_filter"),
+            "mutation_scope": alternative.get("mutation_scope"),
+            "upstream_gam_mutation": alternative.get("upstream_gam_mutation"),
+            "requires_explicit_operator_intent": alternative.get("requires_explicit_operator_intent"),
+        })
+    });
     let schema_tools = data
         .get("schemas")
         .and_then(Value::as_object)
@@ -642,6 +651,7 @@ fn find_tools_text_projection(data: &Value) -> String {
             "truncated": workflow_total > FIND_TOOLS_TEXT_MAX_WORKFLOW_EDGES,
         },
         "recovery": recovery,
+        "local_state_retry": local_state_retry,
         "schema_tools": schema_tools,
         "structured_content": "The complete ranked records and any requested schemas are in structuredContent.data.",
     });
@@ -737,6 +747,11 @@ impl AdManagerServer {
         {
             extra_results.push(recovery);
         }
+        extra_results.extend(supplemental_local_state_alternative_records(
+            self.inventory(),
+            &recovery_filter,
+            &ranked.match_summary,
+        ));
         let mut selected_names = ranked
             .response
             .results

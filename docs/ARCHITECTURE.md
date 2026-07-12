@@ -191,11 +191,13 @@ For stateful workflows, recovery orders an executable cold-start entry before
 continuations. Report discovery supplies network lookup, report catalog lookup,
 one report run, existing-operation polling, and completed-result row retrieval;
 `gam_scratchpad_open_session` precedes scratchpad ingestion.
-An explicit scratchpad search, or a query with strong scratchpad intent, under
-`read_only=true` remains empty because all
-current scratchpad calls can touch local session state. Its recovery carries a
-separate `local_state_alternatives` contract that scopes an explicit
-`read_only=false` retry to MCP-local state, denies upstream GAM mutation, and
+An explicit scratchpad-group search under `read_only=true` remains empty because
+all current scratchpad calls can touch local session state. Its recovery carries
+a separate `local_state_alternatives` contract. A query with strong scratchpad
+intent also emits that local-state option as a standalone `filter_alternative`
+when weaker read-only matches exist, so ranking noise cannot hide it. Both forms
+scope an explicit
+`read_only=false` retry to MCP-local state, deny upstream GAM mutation, and
 enumerates destructive close/drop tools without weakening the active filter.
 Provider-owned access classes distinguish local-only calls, REST reads under
 the read-only scope, and the SOAP line-item read that requires manage scope.
