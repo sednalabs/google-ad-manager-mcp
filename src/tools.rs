@@ -7095,6 +7095,28 @@ mod tests {
     type ReportRequestLog = Arc<Mutex<Vec<String>>>;
     type ReportTestServer = (String, ReportRequestLog, thread::JoinHandle<()>);
 
+    #[test]
+    fn find_tools_result_guard_fails_closed_above_the_complete_result_limit() {
+        let result = bounded_find_tools_result(
+            json!({"oversized":"x".repeat(FIND_TOOLS_MAX_RMCP_RESULT_BYTES)}),
+            Instant::now(),
+        );
+        let structured = result
+            .structured_content
+            .as_ref()
+            .expect("structured result-contract error");
+        assert_eq!(structured["ok"], false);
+        assert_eq!(structured["error"]["code"], "result_contract_error");
+        assert_eq!(structured["error"]["reason"], "result_contract_failed");
+        assert!(structured.get("data").is_none());
+        assert!(
+            serde_json::to_vec(&result)
+                .expect("bounded error serializes")
+                .len()
+                < FIND_TOOLS_MAX_RMCP_RESULT_BYTES
+        );
+    }
+
     fn serve_report_http_sequence(responses: Vec<(u16, Value)>) -> ReportTestServer {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind report test server");
         let address = listener.local_addr().expect("report test address");
