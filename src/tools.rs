@@ -872,6 +872,7 @@ impl AdManagerServer {
             limit,
             include_schema,
         } = args;
+        let group_filter_supplied = group.is_some();
         if limit == Some(0) {
             return Ok(contract::error(
                 AdManagerError::invalid("limit", "must be at least 1"),
@@ -949,6 +950,8 @@ impl AdManagerServer {
             &mut ranked.response.results,
             &preliminary_companions,
             guidance_query.filter(|_| allow_provider_guidance),
+            normalized_group.as_deref(),
+            group_filter_supplied,
             active_read_only,
         );
         let condition_only_match_count = report_resolution
@@ -3297,11 +3300,12 @@ struct ReportOperationPollOptions<'a> {
 }
 
 fn report_poll_requires_remediation(error: &AdManagerError) -> bool {
-    matches!(
-        error,
-        AdManagerError::UpstreamApi { status, .. }
-            if (400..500).contains(status) && !matches!(*status, 408 | 429)
-    )
+    matches!(error, AdManagerError::AuthBootstrap(_))
+        || matches!(
+            error,
+            AdManagerError::UpstreamApi { status, .. }
+                if (400..500).contains(status) && !matches!(*status, 408 | 429)
+        )
 }
 
 async fn poll_report_operation_tool_result(
@@ -3322,6 +3326,11 @@ async fn poll_report_operation_tool_result(
         Ok(value) => value,
         Err(failure) => {
             let remediation_required = report_poll_requires_remediation(&failure.error);
+            let remediation_action = if matches!(&failure.error, AdManagerError::AuthBootstrap(_)) {
+                "Authentication is not ready, so no report poll was sent. Correct the credential or access configuration before issuing the GET-only poll again."
+            } else {
+                "The provider definitively rejected this poll request. Correct access, operation identity, or request state before issuing another GET; the operation's terminal state was not observed."
+            };
             let continuation_timeout_ms = match &failure.error {
                 AdManagerError::ReportRunTimeout { .. } => {
                     next_report_poll_timeout_ms(duration_millis_u64(options.timeout))
@@ -3347,7 +3356,7 @@ async fn poll_report_operation_tool_result(
                     "poll_outcome": "remediation_required",
                     "continuation_available": false,
                     "operation": failure.operation,
-                    "operator_action": "The provider definitively rejected this poll request. Correct access, operation identity, or request state before issuing another GET; the operation's terminal state was not observed."
+                    "operator_action": remediation_action
                 })
             } else if let Some(continuation_timeout_ms) = continuation_timeout_ms {
                 json!({
@@ -8497,6 +8506,54 @@ mod tests {
             assert_eq!(requests.len(), 1);
             assert!(requests[0].starts_with(&format!("GET /v1/{operation_name} ")));
         }
+    }
+
+    #[tokio::test]
+    async fn report_poll_auth_bootstrap_requires_remediation_and_preserves_handle() {
+        let operation_name = "networks/123/operations/reports/runs/789";
+        let mut settings = crate::Settings::default();
+        settings.service_account_json = Some("not valid service account JSON".to_string());
+        let server_under_test =
+            AdManagerServer::new(settings).expect("build auth-bootstrap report server");
+        let result = server_under_test
+            .gam_report_operation_poll(Parameters(ReportOperationPollArgs {
+                operation_name: operation_name.to_string(),
+                expected_report_name: Some("networks/123/reports/456".to_string()),
+                fetch_first_page: Some(false),
+                result_page_size: None,
+                poll_timeout_ms: Some(1_000),
+                initial_poll_interval_ms: Some(5_000),
+            }))
+            .await
+            .expect("classify report poll auth bootstrap");
+        let response = result
+            .structured_content
+            .expect("structured auth-bootstrap response");
+        assert_eq!(response["error"]["code"], "auth_bootstrap");
+        assert_eq!(
+            response["error"]["detail"]["operation_name"],
+            operation_name
+        );
+        assert_eq!(
+            response["error"]["detail"]["expected_report_name"],
+            "networks/123/reports/456"
+        );
+        assert_eq!(
+            response["error"]["detail"]["poll_outcome"],
+            "remediation_required"
+        );
+        assert_eq!(response["error"]["detail"]["continuation_available"], false);
+        assert!(
+            response["error"]["detail"]["operator_action"]
+                .as_str()
+                .is_some_and(|action| action.contains("no report poll was sent"))
+        );
+        assert!(response["error"]["detail"].get("continuation").is_none());
+        assert!(
+            !response
+                .to_string()
+                .contains("not valid service account JSON")
+        );
     }
 
     #[tokio::test]

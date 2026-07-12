@@ -1463,20 +1463,12 @@ impl AdManagerClient {
             .content_length()
             .is_some_and(|length| length > max_response_bytes as u64)
         {
-            return Err(AdManagerError::UpstreamContract {
-                field: "upstream_response",
-                message: format!("response exceeded the {max_response_bytes}-byte safety limit"),
-            });
+            return Err(bounded_response_limit_error(status, max_response_bytes));
         }
         let mut bytes = Vec::new();
         while let Some(chunk) = response.chunk().await? {
             if bytes.len().saturating_add(chunk.len()) > max_response_bytes {
-                return Err(AdManagerError::UpstreamContract {
-                    field: "upstream_response",
-                    message: format!(
-                        "response exceeded the {max_response_bytes}-byte safety limit"
-                    ),
-                });
+                return Err(bounded_response_limit_error(status, max_response_bytes));
             }
             bytes.extend_from_slice(&chunk);
         }
@@ -1682,6 +1674,24 @@ impl AdManagerClient {
             .await
             .map_err(|err| AdManagerError::AuthBootstrap(err.to_string()))?;
         Ok(token.as_str().to_string())
+    }
+}
+
+fn bounded_response_limit_error(
+    status: reqwest::StatusCode,
+    max_response_bytes: usize,
+) -> AdManagerError {
+    let message = format!("upstream response exceeded the {max_response_bytes}-byte safety limit");
+    if status.is_success() {
+        AdManagerError::UpstreamContract {
+            field: "upstream_response",
+            message,
+        }
+    } else {
+        AdManagerError::UpstreamApi {
+            status: status.as_u16(),
+            message,
+        }
     }
 }
 
@@ -2693,22 +2703,24 @@ mod tests {
         .chain(oversized.iter().copied())
         .collect::<Vec<_>>();
         let (url, server) = serve_one_http_response(response);
-        assert!(
-            client
-                .send_json_bounded(client.http.get(url), 5)
-                .await
-                .is_err()
-        );
+        assert!(matches!(
+            client.send_json_bounded(client.http.get(url), 5).await,
+            Err(AdManagerError::UpstreamContract {
+                field: "upstream_response",
+                ..
+            })
+        ));
         server.join().expect("content-length response server");
 
         let chunked = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\nA\r\n0123456789\r\n0\r\n\r\n".to_vec();
         let (url, server) = serve_one_http_response(chunked);
-        assert!(
-            client
-                .send_json_bounded(client.http.get(url), 5)
-                .await
-                .is_err()
-        );
+        assert!(matches!(
+            client.send_json_bounded(client.http.get(url), 5).await,
+            Err(AdManagerError::UpstreamContract {
+                field: "upstream_response",
+                ..
+            })
+        ));
         server.join().expect("chunked response server");
 
         let invalid = b"not-json";
@@ -2728,6 +2740,44 @@ mod tests {
                 .is_err()
         );
         server.join().expect("invalid JSON response server");
+    }
+
+    #[tokio::test]
+    async fn bounded_json_reader_preserves_non_success_status_when_body_is_oversized() {
+        let client = AdManagerClient::from_settings(&Settings::default());
+        let body = b"0123456789";
+        let content_length_response = format!(
+            "HTTP/1.1 400 Bad Request\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        )
+        .into_bytes()
+        .into_iter()
+        .chain(body.iter().copied())
+        .collect::<Vec<_>>();
+        let (url, server) = serve_one_http_response(content_length_response);
+        let error = client
+            .send_json_bounded(client.http.get(url), 5)
+            .await
+            .expect_err("oversized 4xx Content-Length must fail");
+        server.join().expect("oversized 4xx Content-Length server");
+        assert!(matches!(
+            error,
+            AdManagerError::UpstreamApi { status: 400, ref message }
+                if message == "upstream response exceeded the 5-byte safety limit"
+        ));
+
+        let chunked_response = b"HTTP/1.1 404 Not Found\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\nA\r\n0123456789\r\n0\r\n\r\n".to_vec();
+        let (url, server) = serve_one_http_response(chunked_response);
+        let error = client
+            .send_json_bounded(client.http.get(url), 5)
+            .await
+            .expect_err("oversized chunked 4xx must fail");
+        server.join().expect("oversized chunked 4xx server");
+        assert!(matches!(
+            error,
+            AdManagerError::UpstreamApi { status: 404, ref message }
+                if message == "upstream response exceeded the 5-byte safety limit"
+        ));
     }
 
     #[tokio::test]

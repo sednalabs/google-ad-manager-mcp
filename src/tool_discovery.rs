@@ -473,7 +473,8 @@ fn report_discovery_intent(query: Option<&str>) -> ReportDiscoveryIntent {
         || normalized.contains("operation name");
     let new_run_action = terms
         .iter()
-        .any(|term| matches!(*term, "start" | "launch" | "execute" | "run"));
+        .any(|term| matches!(*term, "start" | "launch" | "execute"))
+        || (terms.contains("run") && !normalized.contains("report run status"));
     let strong_continuation_action = terms.iter().any(|term| {
         matches!(
             *term,
@@ -490,20 +491,22 @@ fn report_discovery_intent(query: Option<&str>) -> ReportDiscoveryIntent {
     });
     let wait_action = terms.contains("wait") || terms.contains("waiting");
     let canonical_operation_handle = normalized.contains("/operations/reports/runs/");
-    if canonical_operation_handle
+    let explicit_existing_operation_reference = canonical_operation_handle
         || normalized.contains("existing report operation")
         || normalized.contains("existing operation")
         || normalized.contains("operation name")
-        || normalized.contains("operation handle")
-        || normalized.contains("continue waiting")
-        || (strong_continuation_action && (report_context || operation_context))
-        || (wait_action && !new_run_action && (report_context || operation_context))
-    {
+        || normalized.contains("operation handle");
+    if explicit_existing_operation_reference {
         return ReportDiscoveryIntent::ExistingOperationContinuation;
     }
 
     if report_context && new_run_action {
         ReportDiscoveryIntent::ExplicitNewRun
+    } else if normalized.contains("continue waiting")
+        || (strong_continuation_action && (report_context || operation_context))
+        || (wait_action && (report_context || operation_context))
+    {
+        ReportDiscoveryIntent::ExistingOperationContinuation
     } else {
         ReportDiscoveryIntent::Unspecified
     }
@@ -570,6 +573,8 @@ pub(crate) fn resolve_report_discovery(
     results: &mut Vec<ToolSearchResult>,
     companions: &[WorkflowCompanion],
     query: Option<&str>,
+    active_group: Option<&str>,
+    group_filter_supplied: bool,
     read_only: Option<bool>,
 ) -> ReportDiscoveryResolution {
     let intent = report_discovery_intent(query);
@@ -580,7 +585,6 @@ pub(crate) fn resolve_report_discovery(
         .collect::<BTreeMap<_, _>>();
     let mut retained = Vec::with_capacity(results.len());
     let mut condition_only = Vec::new();
-    let mut demoted_report_run = false;
     for (index, result) in std::mem::take(results).into_iter().enumerate() {
         let contextual_companion = contextual_companions.get(result.name.as_str());
         let is_report_run = result.name == "gam_report_run";
@@ -589,7 +593,6 @@ pub(crate) fn resolve_report_discovery(
             && intent == ReportDiscoveryIntent::ExplicitNewRun
             && contextual_companion.is_none();
         if is_report_run && !report_run_callable {
-            demoted_report_run = true;
             let companion_before_tool = contextual_companion.map(|companion| companion.before_tool);
             condition_only.push(json!({
                 "type": "condition_only_match",
@@ -632,8 +635,9 @@ pub(crate) fn resolve_report_discovery(
         records: condition_only,
         callable_alternatives: Vec::new(),
     };
-    if demoted_report_run
-        && intent == ReportDiscoveryIntent::ExistingOperationContinuation
+    let report_group_selected = !group_filter_supplied || active_group == Some("reports");
+    if intent == ReportDiscoveryIntent::ExistingOperationContinuation
+        && report_group_selected
         && read_only == Some(false)
     {
         resolution
@@ -1277,6 +1281,8 @@ mod tests {
             &mut results,
             &companions,
             Some("fetch rows from a completed report result"),
+            None,
+            false,
             Some(false),
         );
         assert_eq!(
@@ -1306,8 +1312,14 @@ mod tests {
         let mut results = vec![result("gam_report_run")];
         let query = "start a campaign delivery audit with a saved report";
         let companions = workflow_companions(&results, Some(query));
-        let resolution =
-            resolve_report_discovery(&mut results, &companions, Some(query), Some(false));
+        let resolution = resolve_report_discovery(
+            &mut results,
+            &companions,
+            Some(query),
+            None,
+            false,
+            Some(false),
+        );
         assert!(resolution.records.is_empty());
         assert_eq!(results[0].name, "gam_report_run");
 
@@ -1317,6 +1329,8 @@ mod tests {
             &mut results,
             &companions,
             Some("saved report delivery audit"),
+            None,
+            false,
             Some(false),
         );
         assert!(results.is_empty());
@@ -1328,8 +1342,14 @@ mod tests {
         let mut results = vec![result("gam_report_run")];
         let query = "continue waiting for an existing report operation";
         let companions = workflow_companions(&results, Some(query));
-        let resolution =
-            resolve_report_discovery(&mut results, &companions, Some(query), Some(false));
+        let resolution = resolve_report_discovery(
+            &mut results,
+            &companions,
+            Some(query),
+            Some("reports"),
+            true,
+            Some(false),
+        );
         assert!(results.is_empty());
         assert_eq!(resolution.records[0]["name"], "gam_report_run");
         assert!(resolution.records[0]["before_tool"].is_null());
@@ -1348,12 +1368,41 @@ mod tests {
     }
 
     #[test]
-    fn report_safe_alternative_requires_a_demoted_report_start() {
+    fn existing_operation_intent_adds_safe_poll_without_a_ranked_report_start() {
         let mut results = vec![result("gam_soap_trafficking_apply")];
         let query = "check the status of an existing report operation";
         let companions = workflow_companions(&results, Some(query));
-        let resolution =
-            resolve_report_discovery(&mut results, &companions, Some(query), Some(false));
+        let resolution = resolve_report_discovery(
+            &mut results,
+            &companions,
+            Some(query),
+            Some("reports"),
+            true,
+            Some(false),
+        );
+        assert_eq!(
+            resolution.callable_alternatives,
+            vec!["gam_report_operation_poll"]
+        );
+        assert_eq!(resolution.records.len(), 1);
+        assert_eq!(resolution.records[0]["type"], "intent_safe_alternative");
+        assert_eq!(resolution.records[0]["name"], "gam_report_operation_poll");
+        assert_eq!(results[0].name, "gam_soap_trafficking_apply");
+    }
+
+    #[test]
+    fn existing_operation_intent_does_not_cross_an_unrelated_explicit_group() {
+        let mut results = vec![result("gam_soap_trafficking_apply")];
+        let query = "check the status of an existing report operation";
+        let companions = workflow_companions(&results, Some(query));
+        let resolution = resolve_report_discovery(
+            &mut results,
+            &companions,
+            Some(query),
+            Some("trafficking"),
+            true,
+            Some(false),
+        );
         assert!(resolution.callable_alternatives.is_empty());
         assert!(resolution.records.is_empty());
         assert_eq!(results[0].name, "gam_soap_trafficking_apply");
@@ -1386,6 +1435,28 @@ mod tests {
             report_discovery_intent(Some("run a saved report and wait for completion")),
             ReportDiscoveryIntent::ExplicitNewRun
         );
+        for query in [
+            "start a saved report then monitor its status",
+            "run the campaign delivery report and check its status",
+            "launch a report and inspect it until completion",
+            "execute the report then monitor the result",
+        ] {
+            assert_eq!(
+                report_discovery_intent(Some(query)),
+                ReportDiscoveryIntent::ExplicitNewRun,
+                "compound new-run query classified unsafely: {query}"
+            );
+        }
+        for query in [
+            "start a report then monitor the existing operation",
+            "run the report and check operation handle networks/123/operations/reports/runs/789",
+        ] {
+            assert_eq!(
+                report_discovery_intent(Some(query)),
+                ReportDiscoveryIntent::ExistingOperationContinuation,
+                "explicit existing-operation reference was ignored: {query}"
+            );
+        }
     }
 
     #[test]
