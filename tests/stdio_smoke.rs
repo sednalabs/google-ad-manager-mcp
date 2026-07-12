@@ -1001,10 +1001,25 @@ fn find_tools_read_only_filter_partitions_all_scratchpad_tools() {
         "find_tools",
         json!({"query":"open a scratchpad for delivery evidence","read_only":true}),
     );
-    let query_only_recovery =
-        search_recovery(&query_only_response["result"]["structuredContent"]["data"]);
+    let query_only_data = &query_only_response["result"]["structuredContent"]["data"];
+    let query_only_alternative = query_only_data["results"]
+        .as_array()
+        .expect("query-only discovery results")
+        .iter()
+        .find(|result| result["type"] == "filter_alternative")
+        .expect("query-only scratchpad filter alternative");
     assert_eq!(
-        query_only_recovery["local_state_alternatives"][0]["retry_filter"],
+        query_only_alternative["retry_filter"],
+        json!({"group":"scratchpad","read_only":false})
+    );
+    let query_only_text: Value = serde_json::from_str(
+        query_only_response["result"]["content"][0]["text"]
+            .as_str()
+            .expect("query-only content text"),
+    )
+    .expect("query-only content text is JSON");
+    assert_eq!(
+        query_only_text["local_state_retry"]["retry_filter"],
         json!({"group":"scratchpad","read_only":false})
     );
 

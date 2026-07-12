@@ -67,10 +67,12 @@ classes are needed. Scratchpad close and drop operations are labelled
 destructive, while every other scratchpad tool is labelled mutating, without
 implying an upstream GAM write.
 
-For an explicit `group="scratchpad", read_only=true` no-match, or a no-match
-with strong scratchpad query intent under `read_only=true`, recovery adds a
-machine-readable `local_state_alternatives` record. It does not change the
-active filter or add scratchpad tools to `openai_allowed_tools`; it explains the
+For an explicit `group="scratchpad", read_only=true` no-match, recovery adds a
+machine-readable `local_state_alternatives` record. Strong scratchpad query
+intent under `read_only=true` also adds the same option as a standalone
+`filter_alternative` when the ranker returns weaker read-only matches. It does
+not change the active filter or add scratchpad tools to
+`openai_allowed_tools`; it explains the
 explicit `group="scratchpad", read_only=false` retry, sets
 `mutation_scope="local_mcp_scratchpad_state"`, states
 `upstream_gam_mutation=false`, and notes that local-state writes need no separate

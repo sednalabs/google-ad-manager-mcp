@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use gcp_auth::{CustomServiceAccount, TokenProvider};
 use mcp_toolkit_auth::upstream_oauth::{
