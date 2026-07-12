@@ -51,9 +51,10 @@ non-mutating execution paths, including plans, previews, and no-mutation proof
 reads. Every current scratchpad tool is excluded because the pinned scratchpad
 runtime may create, refresh, or prune local session state even during queries,
 listings, and evidence export. Set `read_only=false` to search only write-like
-or local-state-mutating tools; it does not mean both classes. Scratchpad close
-and drop operations are labelled destructive, while every other scratchpad
-tool is labelled mutating, without implying an upstream GAM write.
+or local-state-mutating tools. `false` is still a filter; omit `read_only` to
+include both non-mutating and mutating tools. Scratchpad close and drop
+operations are labelled destructive, while every other scratchpad tool is
+labelled mutating, without implying an upstream GAM write.
 
 Apply discovery is plan-first:
 

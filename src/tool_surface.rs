@@ -620,6 +620,34 @@ mod tests {
     }
 
     #[test]
+    fn write_like_trafficking_discovery_returns_only_apply_tools() {
+        let inventory = build_tool_inventory().expect("inventory");
+        let mut names = inventory
+            .search(
+                &ToolSearchFilter {
+                    query: None,
+                    group: Some("trafficking".to_string()),
+                    read_only: Some(false),
+                    limit: Some(100),
+                },
+                ToolOperation::List,
+                &ToolInventoryPolicy::strict(),
+            )
+            .into_iter()
+            .map(|result| result.name)
+            .collect::<Vec<_>>();
+        names.sort();
+        assert_eq!(
+            names,
+            vec![
+                "gam_rest_write_apply",
+                "gam_soap_trafficking_apply",
+                "gam_yield_group_exclusions_apply",
+            ]
+        );
+    }
+
+    #[test]
     fn inventory_search_finds_write_plan_tool() {
         let inventory = build_tool_inventory().expect("inventory");
         let results = inventory.search(

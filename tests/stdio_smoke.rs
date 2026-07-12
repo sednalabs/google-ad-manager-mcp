@@ -184,6 +184,7 @@ fn find_tools_pairs_apply_results_with_plan_or_preview() {
         let allowed = data["openai_allowed_tools"]
             .as_array()
             .expect("allowed tools");
+        let results = data["results"].as_array().expect("discovery results");
         assert!(
             allowed.contains(&json!(apply_tool)),
             "query: {query}; data: {data}"
@@ -192,14 +193,29 @@ fn find_tools_pairs_apply_results_with_plan_or_preview() {
             allowed.contains(&json!(companion_tool)),
             "query: {query}; data: {data}"
         );
-        assert!(data["results"].as_array().is_some_and(|results| {
-            results.iter().any(|result| {
-                result["type"] == "workflow_companion"
-                    && result["name"] == companion_tool
-                    && result["before_tool"] == apply_tool
-                    && result["required"] == true
-            })
+        assert!(results.iter().any(|result| {
+            result["type"] == "workflow_companion"
+                && result["name"] == companion_tool
+                && result["before_tool"] == apply_tool
+                && result["required"] == true
         }));
+        for non_mutating_name in allowed.iter().filter_map(|name| {
+            name.as_str()
+                .filter(|name| name.ends_with("_plan") || name.ends_with("_preview"))
+        }) {
+            assert!(
+                results.iter().any(|result| {
+                    result["type"] == "workflow_companion" && result["name"] == non_mutating_name
+                }),
+                "non-mutating allowed tool was not a companion: {data}"
+            );
+            assert!(
+                !results.iter().any(|result| {
+                    result.get("type").is_none() && result["name"] == non_mutating_name
+                }),
+                "non-mutating allowed tool was a direct result: {data}"
+            );
+        }
     }
 
     let full = process.call_tool(
