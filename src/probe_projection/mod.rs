@@ -8,7 +8,9 @@ use serde_json::{Value, json};
 
 use crate::AdManagerError;
 use crate::contract;
-use crate::evidence::{EvidenceSource, dependency_probe_decision, guard_envelope, guarded_success};
+use crate::evidence::{
+    EvidenceSource, dependency_probe_decision, guard_error_envelope, guarded_success,
+};
 use crate::fingerprint::stable_fingerprint;
 
 mod dependency;
@@ -75,14 +77,14 @@ pub(crate) fn bounded_probe_error(
     field: &'static str,
 ) -> CallToolResult {
     let full = contract::error_envelope(&error, started);
-    if let Ok(result) = guard_envelope(full.clone()) {
+    if let Ok(result) = guard_error_envelope(full.clone()) {
         return result;
     }
     let compact = match compact_error(kind, &full) {
         Ok(value) => value,
         Err(error) => return fail_closed(field, &error, started),
     };
-    guard_envelope(compact).unwrap_or_else(|error| fail_closed(field, error, started))
+    guard_error_envelope(compact).unwrap_or_else(|error| fail_closed(field, error, started))
 }
 
 fn compact_success(kind: ProbeKind, full: &Value, meta: &Value) -> Result<Value, String> {

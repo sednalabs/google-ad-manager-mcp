@@ -45,7 +45,9 @@ pub enum AdManagerError {
         operation_name: String,
         message: String,
     },
-    #[error("report run may have started but the upstream handoff was invalid: {message}")]
+    #[error(
+        "report run request may have been dispatched but a safe operation handoff was not confirmed: {message}"
+    )]
     ReportRunHandoffUncertain { message: String },
 }
 

@@ -126,17 +126,21 @@ filter. Dynamic groups, example queries, and local-state tool lists are capped
 and include total, returned, and truncated counts. Recovery never recommends turning off `read_only` merely to produce a
 match. The only scoped exception is a clear, exact scratchpad request whose
 separate local-state record makes the opt-in, upstream reads, and scope classes
-explicit; fail-closed searches do not receive it.
+explicit; its content-only projection retains a bounded rediscovery call,
+eligible/destructive counts, and access-class context. Fail-closed searches do
+not receive it.
 Ambiguous or truncated input marks recovery fail-closed and returns no canned
 example queries. Mutating examples require an explicit `read_only=false` search.
 
 Recovery examples are entry-point aware. A broad reports recovery starts with
 `gam_report_run`, then offers `gam_report_operation_poll` and
 `gam_report_result_rows` only as explicit continuations. Guided report
-dependencies supply `gam_networks_list`, `gam_network_catalog_list` with
-`collection="reports"`, and the run/poll/result sequence without claiming that
-any tool has already executed. The run-before-poll edge is optional because an
-existing `operation_name` must be polled directly, not rerun. A broad
+dependencies supply network/catalog lookup for a direct cold-start run and the
+poll/result continuation without claiming that any tool has already executed.
+When an existing `operation_name` is already being polled, `gam_report_run` is
+emitted only as a non-callable condition record with the reason not to duplicate
+the run; it is excluded from allowed tools and schemas. Optional SOAP builder
+guidance remains callable. A broad
 scratchpad recovery starts with
 `gam_scratchpad_open_session`, then offers ingestion as an existing-session
 continuation.
@@ -442,8 +446,9 @@ operation and returns the `report_result` resource name once complete. If
 `fetch_first_page=true`, it also returns the first page of rows so the first
 successful report run is immediately useful.
 
-When `wait_for_completion=false`, the tool starts exactly one report run and
-returns its `operation_name`. Continue that same run with
+When `wait_for_completion=false`, the tool sends the provider-required empty
+POST body, starts exactly one report run, and returns its `operation_name`.
+Continue that same run with
 `gam_report_operation_poll`; do not call `gam_report_run` again merely to poll.
 The poll tool validates the existing operation name, waits for completion, and
 can fetch the first result page without creating another run. The run request,
@@ -454,16 +459,19 @@ Both the upstream handoff and caller input must match the exact
 noncanonical values are rejected before polling.
 Operation responses are read through a 64 KiB limit and projected to documented
 fields. Result pages are read through a 512 KiB limit, accept page sizes from 1
-through 1,000, and pass model-visible and complete RMCP result guards. Poll
-timeouts are capped at 24 hours, initial intervals normalized to at least 250 ms and capped at 30 seconds, and each sleep
-ends at the absolute deadline rather than overshooting it.
-Post-start timeout or transport errors preserve `operation_name` and a
-GET-only poll continuation, including the effective fetch, page-size, timeout,
-and interval controls for replay. A terminal operation error, missing result,
-or noncanonical provider result includes terminal operation evidence but no
-poll continuation. If the initial POST succeeds but its operation handoff is
-missing, malformed, or cross-target, the receipt reports an uncertain handoff,
-sets `automatic_replay_safe=false`, and prohibits automatic reruns. If
+through 1,000, validate documented object/row/page-token/count types, and pass
+model-visible and complete RMCP result guards. Poll timeouts are between 1 ms
+and 24 hours; initial intervals are between 5 and 30 seconds with bounded
+exponential backoff. The absolute deadline covers each in-flight GET and sleep.
+Post-start timeout, transport, or provider-contract errors preserve
+`operation_name`, the optional `expected_report_name`, the last valid
+observation, and a GET-only poll continuation. Timeout continuation uses a
+bounded larger timeout rather than repeating the expired value. Terminal
+operation errors and completed operations without a result do not offer another
+poll. Once the initial POST may have been dispatched, transport, body-read,
+response-bound, status, JSON, missing, malformed, or cross-target handoff
+failures all report an uncertain handoff, set `automatic_replay_safe=false`,
+and prohibit automatic reruns. If
 completion succeeds but first-page retrieval fails, the
 error instead preserves `report_result`, page size, and a
 `gam_report_result_rows` continuation.
@@ -644,7 +652,9 @@ The preview tool:
   `InventoryTargetingError.SELF_ONLY_INVENTORY_UNIT_NOT_ALLOWED`;
 - refuses to exclude an ad unit that the same yield group directly targets;
 - binds the confirmation token to the current readback fingerprint and the
-  requested ad-unit IDs and descendant-safe update payload.
+  exact schema-complete apply request, including requested ad-unit IDs,
+  `include_payload_xml`, reason, expected impact, rollback note, and idempotency
+  key, plus the descendant-safe update payload.
 
 `gam_yield_group_exclusions_apply` requires the same request, the exact
 preview confirmation token, the manage scope, write mode enabled,
