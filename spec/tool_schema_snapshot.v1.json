@@ -591,7 +591,7 @@
             ]
           },
           "operation_name": {
-            "description": "Existing report-run operation name returned by gam_report_run.",
+            "description": "Exact report-run operation name returned by gam_report_run, for example\nnetworks/123/operations/reports/runs/456.",
             "type": "string"
           },
           "poll_timeout_ms": {

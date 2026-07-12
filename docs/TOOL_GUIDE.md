@@ -111,7 +111,9 @@ Recovery examples are entry-point aware. A broad reports recovery starts with
 `gam_report_result_rows` only as explicit continuations. Guided report
 dependencies supply `gam_networks_list`, `gam_network_catalog_list` with
 `collection="reports"`, and the run/poll/result sequence without claiming that
-any tool has already executed. A broad scratchpad recovery starts with
+any tool has already executed. The run-before-poll edge is optional because an
+existing `operation_name` must be polled directly, not rerun. A broad
+scratchpad recovery starts with
 `gam_scratchpad_open_session`, then offers ingestion as an existing-session
 continuation.
 
@@ -419,6 +421,13 @@ returns its `operation_name`. Continue that same run with
 `gam_report_operation_poll`; do not call `gam_report_run` again merely to poll.
 The poll tool validates the existing operation name, waits for completion, and
 can fetch the first result page without creating another run.
+Both the upstream handoff and caller input must match the exact
+`networks/{networkCode}/operations/reports/runs/{operationId}` resource shape;
+noncanonical values are rejected before polling.
+Post-start timeout or transport errors preserve `operation_name` and a
+GET-only poll continuation. If completion succeeds but first-page retrieval
+fails, the error instead preserves `report_result` and a
+`gam_report_result_rows` continuation.
 
 Use `gam_report_result_rows` with the returned `report_result` when:
 

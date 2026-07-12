@@ -249,6 +249,14 @@ fn find_tools_models_complete_report_cold_start_and_async_continuation() {
             .as_str()
             .is_some_and(|reason| reason.contains("never starts another report run"))
     );
+    assert_eq!(run_companion["required_for_guided_sequence"], false);
+    let network_companion = poll_data["results"]
+        .as_array()
+        .expect("poll discovery results")
+        .iter()
+        .find(|result| result["name"] == "gam_networks_list")
+        .expect("network discovery companion");
+    assert_eq!(network_companion["before_tool"], "gam_network_catalog_list");
 
     let rows_response = process.call_tool(
         340,

@@ -24,7 +24,7 @@ use crate::client::{
     AdManagerClient, CatalogCollection, DEFAULT_SOAP_API_VERSION, RestWriteOperation,
     RestWritePlan, RestWriteResource, SoapTraffickingApplyResult, SoapTraffickingOperation,
     SoapTraffickingPlan, YieldGroupUpdateSoapRequest, soap_error_message_with_truncation,
-    validate_soap_api_version,
+    validate_operation_name, validate_soap_api_version,
 };
 use crate::config::{
     GCLOUD_ADC_REQUIRED_SCOPE, server_adc_credentials_path, server_cloudsdk_config_dir,
@@ -188,7 +188,8 @@ pub struct ReportRunArgs {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ReportOperationPollArgs {
-    /// Existing report-run operation name returned by gam_report_run.
+    /// Exact report-run operation name returned by gam_report_run, for example
+    /// networks/123/operations/reports/runs/456.
     pub operation_name: String,
     /// Also fetch the first page of result rows after completion. Defaults to true.
     #[serde(default = "default_report_true")]
@@ -1374,13 +1375,32 @@ impl AdManagerServer {
             .map(str::to_string);
 
         let Some(operation_name) = operation_name else {
-            return Ok(contract::error(
+            return Ok(contract::error_with_detail(
                 AdManagerError::invalid(
                     "operation.name",
                     "run response did not contain an operation name",
                 ),
+                json!({
+                    "started_new_run": true,
+                    "continuation_available": false,
+                    "reason": "upstream response omitted the report operation name"
+                }),
                 started,
             ));
+        };
+        let operation_name = match validate_operation_name(&operation_name) {
+            Ok(value) => value,
+            Err(err) => {
+                return Ok(contract::error_with_detail(
+                    err,
+                    json!({
+                        "started_new_run": true,
+                        "continuation_available": false,
+                        "reason": "upstream operation name failed canonical validation"
+                    }),
+                    started,
+                ));
+            }
         };
 
         if !wait_for_completion {
@@ -1410,12 +1430,14 @@ impl AdManagerServer {
 
         Ok(poll_report_operation_tool_result(
             self.client(),
-            &operation_name,
-            fetch_first_page,
-            args.result_page_size,
-            timeout,
-            initial_interval,
-            true,
+            ReportOperationPollOptions {
+                operation_name: &operation_name,
+                fetch_first_page,
+                result_page_size: args.result_page_size,
+                timeout,
+                initial_interval,
+                started_new_run: true,
+            },
             started,
         )
         .await)
@@ -1430,6 +1452,10 @@ impl AdManagerServer {
         Parameters(args): Parameters<ReportOperationPollArgs>,
     ) -> Result<CallToolResult, McpError> {
         let started = Instant::now();
+        let operation_name = match validate_operation_name(&args.operation_name) {
+            Ok(value) => value,
+            Err(err) => return Ok(contract::error(err, started)),
+        };
         let timeout = args
             .poll_timeout_ms
             .map(std::time::Duration::from_millis)
@@ -1441,12 +1467,14 @@ impl AdManagerServer {
 
         Ok(poll_report_operation_tool_result(
             self.client(),
-            &args.operation_name,
-            args.fetch_first_page.unwrap_or(true),
-            args.result_page_size,
-            timeout,
-            initial_interval,
-            false,
+            ReportOperationPollOptions {
+                operation_name: &operation_name,
+                fetch_first_page: args.fetch_first_page.unwrap_or(true),
+                result_page_size: args.result_page_size,
+                timeout,
+                initial_interval,
+                started_new_run: false,
+            },
             started,
         )
         .await)
@@ -2553,31 +2581,69 @@ fn default_report_true() -> Option<bool> {
     Some(true)
 }
 
-async fn poll_report_operation_tool_result(
-    client: &AdManagerClient,
-    operation_name: &str,
+#[derive(Debug, Clone, Copy)]
+struct ReportOperationPollOptions<'a> {
+    operation_name: &'a str,
     fetch_first_page: bool,
     result_page_size: Option<u32>,
     timeout: std::time::Duration,
     initial_interval: std::time::Duration,
     started_new_run: bool,
+}
+
+async fn poll_report_operation_tool_result(
+    client: &AdManagerClient,
+    options: ReportOperationPollOptions<'_>,
     started: Instant,
 ) -> CallToolResult {
     let completed = match client
-        .wait_for_report_result(operation_name, timeout, initial_interval)
+        .wait_for_report_result(
+            options.operation_name,
+            options.timeout,
+            options.initial_interval,
+        )
         .await
     {
         Ok(value) => value,
-        Err(err) => return contract::error(err, started),
+        Err(err) => {
+            return contract::error_with_detail(
+                err,
+                json!({
+                    "operation_name": options.operation_name,
+                    "started_new_run": options.started_new_run,
+                    "continuation": {
+                        "tool": "gam_report_operation_poll",
+                        "arguments": { "operation_name": options.operation_name },
+                        "starts_new_run": false
+                    }
+                }),
+                started,
+            );
+        }
     };
 
-    let first_page = if fetch_first_page {
+    let first_page = if options.fetch_first_page {
         match client
-            .get_report_result_rows(&completed.report_result, result_page_size, None)
+            .get_report_result_rows(&completed.report_result, options.result_page_size, None)
             .await
         {
             Ok(value) => Some(value),
-            Err(err) => return contract::error(err, started),
+            Err(err) => {
+                return contract::error_with_detail(
+                    err,
+                    json!({
+                        "operation_name": options.operation_name,
+                        "started_new_run": options.started_new_run,
+                        "report_result": completed.report_result,
+                        "continuation": {
+                            "tool": "gam_report_result_rows",
+                            "arguments": { "result_name": completed.report_result },
+                            "starts_new_run": false
+                        }
+                    }),
+                    started,
+                );
+            }
         }
     } else {
         None
@@ -2586,8 +2652,8 @@ async fn poll_report_operation_tool_result(
     contract::success(
         json!({
             "waited": true,
-            "started_new_run": started_new_run,
-            "operation_name": operation_name,
+            "started_new_run": options.started_new_run,
+            "operation_name": options.operation_name,
             "operation": completed.operation,
             "report_result": completed.report_result,
             "first_page": first_page,
@@ -6909,7 +6975,272 @@ async fn gcloud_version() -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::{Arc, Mutex};
+    use std::thread;
+
     use super::*;
+
+    type ReportRequestLog = Arc<Mutex<Vec<String>>>;
+    type ReportTestServer = (String, ReportRequestLog, thread::JoinHandle<()>);
+
+    fn serve_report_http_sequence(responses: Vec<(u16, Value)>) -> ReportTestServer {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind report test server");
+        let address = listener.local_addr().expect("report test address");
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let request_log = requests.clone();
+        let handle = thread::spawn(move || {
+            for (status, body) in responses {
+                let (mut stream, _) = listener.accept().expect("accept report test request");
+                let mut request = [0_u8; 8192];
+                let read = stream.read(&mut request).expect("read report test request");
+                let request_text = String::from_utf8_lossy(&request[..read]);
+                let request_line = request_text.lines().next().unwrap_or_default().to_string();
+                request_log
+                    .lock()
+                    .expect("lock report request log")
+                    .push(request_line);
+
+                let body = serde_json::to_vec(&body).expect("serialize report test response");
+                let reason = if status == 200 {
+                    "OK"
+                } else {
+                    "Upstream Error"
+                };
+                let header = format!(
+                    "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                stream
+                    .write_all(header.as_bytes())
+                    .expect("write report test headers");
+                stream.write_all(&body).expect("write report test response");
+            }
+        });
+        (format!("http://{address}/v1"), requests, handle)
+    }
+
+    #[tokio::test]
+    async fn asynchronous_report_run_posts_once_and_returns_the_poll_handle() {
+        let operation_name = "networks/123/operations/reports/runs/789";
+        let (base_url, requests, server) =
+            serve_report_http_sequence(vec![(200, json!({"name":operation_name}))]);
+        let client = AdManagerClient::for_test_api_base_url(base_url);
+        let server_under_test = AdManagerServer::new(crate::Settings::default())
+            .expect("build report test server")
+            .with_test_client(client);
+        let result = server_under_test
+            .gam_report_run(Parameters(ReportRunArgs {
+                network_code: "123".to_string(),
+                report_id: "456".to_string(),
+                wait_for_completion: Some(false),
+                fetch_first_page: None,
+                result_page_size: None,
+                poll_timeout_ms: None,
+                initial_poll_interval_ms: None,
+            }))
+            .await
+            .expect("run report tool");
+        let response = result.structured_content.expect("structured report result");
+        assert_eq!(response["ok"], true);
+        assert_eq!(response["data"]["operation_name"], operation_name);
+        assert_eq!(response["data"]["started_new_run"], true);
+        assert_eq!(response["data"]["waited"], false);
+        assert!(
+            response["data"]["next_steps"][0]
+                .as_str()
+                .is_some_and(|step| step.contains("gam_report_operation_poll"))
+        );
+
+        server.join().expect("join report test server");
+        let requests = requests.lock().expect("lock report requests");
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].starts_with("POST /v1/networks/123/reports/456:run "));
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request.starts_with("POST "))
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn report_run_rejects_a_noncanonical_upstream_operation_handle() {
+        let (base_url, requests, server) = serve_report_http_sequence(vec![(
+            200,
+            json!({"name":"networks/123/reports/456?x=/operations/reports/runs/789"}),
+        )]);
+        let client = AdManagerClient::for_test_api_base_url(base_url);
+        let server_under_test = AdManagerServer::new(crate::Settings::default())
+            .expect("build invalid-handle report server")
+            .with_test_client(client);
+        let result = server_under_test
+            .gam_report_run(Parameters(ReportRunArgs {
+                network_code: "123".to_string(),
+                report_id: "456".to_string(),
+                wait_for_completion: Some(false),
+                fetch_first_page: None,
+                result_page_size: None,
+                poll_timeout_ms: None,
+                initial_poll_interval_ms: None,
+            }))
+            .await
+            .expect("run report tool with invalid handle");
+        let response = result
+            .structured_content
+            .expect("structured invalid-handle result");
+        assert_eq!(response["ok"], false);
+        assert_eq!(response["error"]["code"], "invalid_input");
+        assert_eq!(response["error"]["detail"]["started_new_run"], true);
+        assert_eq!(response["error"]["detail"]["continuation_available"], false);
+
+        server.join().expect("join invalid-handle report server");
+        let requests = requests.lock().expect("lock invalid-handle requests");
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].starts_with("POST "));
+    }
+
+    #[tokio::test]
+    async fn report_poll_reuses_the_existing_operation_with_get_only() {
+        let operation_name = "networks/123/operations/reports/runs/789";
+        let report_result = "networks/123/reports/456/results/987";
+        let (base_url, requests, server) = serve_report_http_sequence(vec![(
+            200,
+            json!({
+                "name":operation_name,
+                "done":true,
+                "response":{"reportResult":report_result}
+            }),
+        )]);
+        let client = AdManagerClient::for_test_api_base_url(base_url);
+        let server_under_test = AdManagerServer::new(crate::Settings::default())
+            .expect("build report poll server")
+            .with_test_client(client);
+        let result = server_under_test
+            .gam_report_operation_poll(Parameters(ReportOperationPollArgs {
+                operation_name: operation_name.to_string(),
+                fetch_first_page: Some(false),
+                result_page_size: None,
+                poll_timeout_ms: Some(1_000),
+                initial_poll_interval_ms: Some(0),
+            }))
+            .await
+            .expect("poll existing report operation");
+        let response = result.structured_content.expect("structured poll result");
+        assert_eq!(response["ok"], true);
+        assert_eq!(response["data"]["operation_name"], operation_name);
+        assert_eq!(response["data"]["report_result"], report_result);
+        assert_eq!(response["data"]["started_new_run"], false);
+
+        server.join().expect("join report poll server");
+        let requests = requests.lock().expect("lock report poll requests");
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].starts_with(&format!("GET /v1/{operation_name} ")));
+        assert!(requests.iter().all(|request| !request.starts_with("POST ")));
+    }
+
+    #[tokio::test]
+    async fn report_poll_timeout_preserves_the_get_only_continuation() {
+        let operation_name = "networks/123/operations/reports/runs/789";
+        let (base_url, requests, server) =
+            serve_report_http_sequence(vec![(200, json!({"name":operation_name,"done":false}))]);
+        let client = AdManagerClient::for_test_api_base_url(base_url);
+        let server_under_test = AdManagerServer::new(crate::Settings::default())
+            .expect("build report timeout server")
+            .with_test_client(client);
+        let result = server_under_test
+            .gam_report_operation_poll(Parameters(ReportOperationPollArgs {
+                operation_name: operation_name.to_string(),
+                fetch_first_page: Some(false),
+                result_page_size: None,
+                poll_timeout_ms: Some(0),
+                initial_poll_interval_ms: Some(0),
+            }))
+            .await
+            .expect("poll report operation to timeout");
+        let response = result
+            .structured_content
+            .expect("structured timeout result");
+        assert_eq!(response["ok"], false);
+        assert_eq!(response["error"]["code"], "report_run_timeout");
+        assert_eq!(
+            response["error"]["detail"]["operation_name"],
+            operation_name
+        );
+        assert_eq!(
+            response["error"]["detail"]["continuation"]["tool"],
+            "gam_report_operation_poll"
+        );
+        assert_eq!(
+            response["error"]["detail"]["continuation"]["starts_new_run"],
+            false
+        );
+        assert!(
+            response["error"]["hint"]
+                .as_str()
+                .is_some_and(|hint| hint.contains("do not start another report run"))
+        );
+
+        server.join().expect("join report timeout server");
+        let requests = requests.lock().expect("lock report timeout requests");
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].starts_with(&format!("GET /v1/{operation_name} ")));
+    }
+
+    #[tokio::test]
+    async fn report_first_page_failure_preserves_the_result_rows_continuation() {
+        let operation_name = "networks/123/operations/reports/runs/789";
+        let report_result = "networks/123/reports/456/results/987";
+        let (base_url, requests, server) = serve_report_http_sequence(vec![
+            (
+                200,
+                json!({
+                    "name":operation_name,
+                    "done":true,
+                    "response":{"reportResult":report_result}
+                }),
+            ),
+            (500, json!({"error":"rows temporarily unavailable"})),
+        ]);
+        let client = AdManagerClient::for_test_api_base_url(base_url);
+        let server_under_test = AdManagerServer::new(crate::Settings::default())
+            .expect("build report rows server")
+            .with_test_client(client);
+        let result = server_under_test
+            .gam_report_operation_poll(Parameters(ReportOperationPollArgs {
+                operation_name: operation_name.to_string(),
+                fetch_first_page: None,
+                result_page_size: Some(10),
+                poll_timeout_ms: Some(1_000),
+                initial_poll_interval_ms: Some(0),
+            }))
+            .await
+            .expect("poll report operation with first page");
+        let response = result
+            .structured_content
+            .expect("structured first-page error");
+        assert_eq!(response["ok"], false);
+        assert_eq!(
+            response["error"]["detail"]["operation_name"],
+            operation_name
+        );
+        assert_eq!(response["error"]["detail"]["report_result"], report_result);
+        assert_eq!(
+            response["error"]["detail"]["continuation"]["tool"],
+            "gam_report_result_rows"
+        );
+        assert_eq!(
+            response["error"]["detail"]["continuation"]["arguments"]["result_name"],
+            report_result
+        );
+
+        server.join().expect("join report rows server");
+        let requests = requests.lock().expect("lock report rows requests");
+        assert_eq!(requests.len(), 2);
+        assert!(requests.iter().all(|request| request.starts_with("GET ")));
+    }
 
     fn values(value: Value) -> Map<String, Value> {
         value.as_object().expect("object").clone()

@@ -610,6 +610,8 @@ pub struct AdManagerClient {
     api_base_url: Arc<str>,
     soap_base_url: Arc<str>,
     quota_project: Option<Arc<str>>,
+    #[cfg(test)]
+    test_access_token: Option<Arc<str>>,
 }
 
 impl AdManagerClient {
@@ -637,7 +639,17 @@ impl AdManagerClient {
             api_base_url: Arc::from(settings.api_base_url.as_str()),
             soap_base_url: Arc::from(settings.soap_base_url.as_str()),
             quota_project,
+            #[cfg(test)]
+            test_access_token: None,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test_api_base_url(api_base_url: impl Into<Arc<str>>) -> Self {
+        let mut client = Self::from_settings(&Settings::default());
+        client.api_base_url = api_base_url.into();
+        client.test_access_token = Some(Arc::from("test-access-token"));
+        client
     }
 
     pub fn auth_source(&self) -> AuthSource {
@@ -1340,6 +1352,11 @@ impl AdManagerClient {
     }
 
     async fn access_token(&self) -> Result<String, AdManagerError> {
+        #[cfg(test)]
+        if let Some(token) = &self.test_access_token {
+            return Ok(token.to_string());
+        }
+
         let preferred_oauth_provider =
             if matches!(&self.auth_mode, UpstreamAuthMode::AuthorizedUserAdcFile(_)) {
                 self.oauth_token_provider().await?
@@ -1835,12 +1852,17 @@ fn validate_numeric_identifier(field: &'static str, value: &str) -> Result<Strin
     Ok(trimmed.to_string())
 }
 
-fn validate_operation_name(value: &str) -> Result<String, AdManagerError> {
+pub(crate) fn validate_operation_name(value: &str) -> Result<String, AdManagerError> {
     let trimmed = value.trim();
-    if trimmed.is_empty()
-        || !trimmed.starts_with("networks/")
-        || !trimmed.contains("/operations/reports/runs/")
-    {
+    let segments = trimmed.split('/').collect::<Vec<_>>();
+    let valid = matches!(
+        segments.as_slice(),
+        ["networks", network_code, "operations", "reports", "runs", operation_id]
+            if !network_code.is_empty()
+                && network_code.chars().all(|ch| ch.is_ascii_digit())
+                && is_resource_id_segment(operation_id)
+    );
+    if !valid {
         return Err(AdManagerError::invalid(
             "operation_name",
             "must look like networks/<networkCode>/operations/reports/runs/<operationId>",
@@ -1849,13 +1871,27 @@ fn validate_operation_name(value: &str) -> Result<String, AdManagerError> {
     Ok(trimmed.to_string())
 }
 
+fn is_resource_id_segment(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_'))
+}
+
 fn validate_report_result_name(value: &str) -> Result<String, AdManagerError> {
     let trimmed = value.trim();
-    if trimmed.is_empty()
-        || !trimmed.starts_with("networks/")
-        || !trimmed.contains("/reports/")
-        || !trimmed.contains("/results/")
-    {
+    let segments = trimmed.split('/').collect::<Vec<_>>();
+    let valid = matches!(
+        segments.as_slice(),
+        ["networks", network_code, "reports", report_id, "results", result_id]
+            if !network_code.is_empty()
+                && network_code.chars().all(|ch| ch.is_ascii_digit())
+                && !report_id.is_empty()
+                && report_id.chars().all(|ch| ch.is_ascii_digit())
+                && !result_id.is_empty()
+                && result_id.chars().all(|ch| ch.is_ascii_digit())
+    );
+    if !valid {
         return Err(AdManagerError::invalid(
             "result_name",
             "must look like networks/<networkCode>/reports/<reportId>/results/<resultId>",
@@ -2026,12 +2062,24 @@ mod tests {
     fn validates_operation_name_shape() {
         assert!(validate_operation_name("networks/123/operations/reports/runs/456").is_ok());
         assert!(validate_operation_name("reports/123").is_err());
+        assert!(
+            validate_operation_name("networks/123/reports/456?x=/operations/reports/runs/1")
+                .is_err()
+        );
+        assert!(validate_operation_name("networks/123/operations/reports/runs/456/extra").is_err());
+        assert!(validate_operation_name("networks/x/operations/reports/runs/456").is_err());
+        assert!(
+            validate_operation_name("networks/123/operations/reports/runs/run_456-abc").is_ok()
+        );
+        assert!(validate_operation_name("networks/123/operations/reports/runs/456?x=1").is_err());
     }
 
     #[test]
     fn validates_report_result_shape() {
         assert!(validate_report_result_name("networks/123/reports/456/results/789").is_ok());
         assert!(validate_report_result_name("networks/123/reports/456").is_err());
+        assert!(validate_report_result_name("networks/123/reports/456?x=/results/789").is_err());
+        assert!(validate_report_result_name("networks/123/reports/456/results/789/extra").is_err());
     }
 
     #[test]
