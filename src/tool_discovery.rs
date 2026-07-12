@@ -20,7 +20,7 @@ pub(crate) struct RepresentativeDiscoveryCandidate {
     pub read_only: bool,
 }
 
-pub(crate) const REPRESENTATIVE_DISCOVERY_CANDIDATES: [RepresentativeDiscoveryCandidate; 12] = [
+pub(crate) const REPRESENTATIVE_DISCOVERY_CANDIDATES: [RepresentativeDiscoveryCandidate; 14] = [
     candidate(
         "set up and authenticate Google Ad Manager",
         "gam_auth_status",
@@ -40,7 +40,13 @@ pub(crate) const REPRESENTATIVE_DISCOVERY_CANDIDATES: [RepresentativeDiscoveryCa
         true,
     ),
     candidate(
-        "audit campaign delivery and report rows",
+        "start a campaign delivery audit with a saved report",
+        "gam_report_run",
+        "reports",
+        true,
+    ),
+    candidate(
+        "fetch rows from a completed report result",
         "gam_report_result_rows",
         "reports",
         true,
@@ -58,7 +64,13 @@ pub(crate) const REPRESENTATIVE_DISCOVERY_CANDIDATES: [RepresentativeDiscoveryCa
         true,
     ),
     candidate(
-        "analyze line item delivery in a scratchpad",
+        "open a scratchpad session for delivery analysis",
+        "gam_scratchpad_open_session",
+        "scratchpad",
+        false,
+    ),
+    candidate(
+        "ingest line item delivery into an existing scratchpad session",
         "gam_scratchpad_ingest_soap_line_items",
         "scratchpad",
         false,
@@ -647,6 +659,45 @@ mod tests {
                 .expect("recovery serializes")
                 .len()
                 < 4 * 1024
+        );
+    }
+
+    #[test]
+    fn stateful_recovery_lists_cold_start_before_continuation() {
+        let inventory = build_tool_inventory().expect("inventory");
+
+        let reports = recovery_for_filter(
+            &inventory,
+            &ToolSearchFilter {
+                query: Some("quasar zeppelin".to_string()),
+                group: Some("reports".to_string()),
+                read_only: Some(true),
+                limit: Some(10),
+            },
+        );
+        assert_eq!(
+            recovery_queries(&reports),
+            vec![
+                "start a campaign delivery audit with a saved report",
+                "fetch rows from a completed report result",
+            ]
+        );
+
+        let scratchpad = recovery_for_filter(
+            &inventory,
+            &ToolSearchFilter {
+                query: Some("quasar zeppelin".to_string()),
+                group: Some("scratchpad".to_string()),
+                read_only: Some(false),
+                limit: Some(10),
+            },
+        );
+        assert_eq!(
+            recovery_queries(&scratchpad),
+            vec![
+                "open a scratchpad session for delivery analysis",
+                "ingest line item delivery into an existing scratchpad session",
+            ]
         );
     }
 

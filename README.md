@@ -285,6 +285,9 @@ filter. Recovery keeps the compatible string array at `retry.example_queries`,
 reports `active_filter`, and marks
 `retry.example_queries_validated_under_active_filter=true`; an invalid group can
 therefore return no examples while still listing valid alternatives.
+Stateful recovery examples begin with executable entry points: report runs
+before completed-result pagination, and scratchpad session opening before
+ingestion into that session.
 
 `limit` defaults to 20 and must be at least 1. Values above 100 are passed to
 the toolkit, which clamps `match_summary.result_limit` to 100 and reports

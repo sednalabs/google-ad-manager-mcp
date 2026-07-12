@@ -154,6 +154,9 @@ active exact `group`/`read_only` filters as the failed search, always at
 examples as validated under it. Invalid groups can have no examples while
 `available_groups` still offers filter-valid alternatives. Recovery guidance
 never recommends relaxing the safety filter.
+For stateful workflows, recovery orders an executable cold-start entry before
+continuations: `gam_report_run` precedes completed-result row retrieval, and
+`gam_scratchpad_open_session` precedes scratchpad ingestion.
 
 The provider rejects `limit=0` before inventory search. The public default is
 20; larger values flow into the toolkit unchanged so its hard maximum of 100,
