@@ -168,7 +168,8 @@ pub(crate) fn build_tool_inventory() -> Result<ToolInventory, ToolInventoryError
                 "inventory",
             ],
         )
-        .with_risk_posture(GuardedActionPosture::preview()),
+        .with_risk_posture(GuardedActionPosture::preview())
+        .with_read_only(true),
         cap(
             "gam_rest_write_apply",
             "trafficking",
@@ -217,7 +218,8 @@ pub(crate) fn build_tool_inventory() -> Result<ToolInventory, ToolInventoryError
                 "creative",
             ],
         )
-        .with_risk_posture(GuardedActionPosture::preview()),
+        .with_risk_posture(GuardedActionPosture::preview())
+        .with_read_only(true),
         cap(
             "gam_soap_trafficking_apply",
             "trafficking",
@@ -248,7 +250,8 @@ pub(crate) fn build_tool_inventory() -> Result<ToolInventory, ToolInventoryError
                 "ad-units",
             ],
         )
-        .with_risk_posture(GuardedActionPosture::preview()),
+        .with_risk_posture(GuardedActionPosture::preview())
+        .with_read_only(true),
         cap(
             "gam_yield_group_exclusions_apply",
             "trafficking",
@@ -279,17 +282,19 @@ pub(crate) fn build_tool_inventory() -> Result<ToolInventory, ToolInventoryError
             ["google", "ad-manager", "scratchpad", "close", "cleanup"],
             true,
         ),
-        cap(
+        local_state_write_cap(
             "gam_scratchpad_list_sessions",
             "scratchpad",
             "List active Ad Manager scratchpad sessions.",
             ["google", "ad-manager", "scratchpad", "sessions", "list"],
+            false,
         ),
-        cap(
+        local_state_write_cap(
             "gam_scratchpad_list_tables",
             "scratchpad",
             "List tables in an Ad Manager scratchpad session.",
             ["google", "ad-manager", "scratchpad", "tables", "schema"],
+            false,
         ),
         local_state_write_cap(
             "gam_scratchpad_drop_table",
@@ -298,11 +303,12 @@ pub(crate) fn build_tool_inventory() -> Result<ToolInventory, ToolInventoryError
             ["google", "ad-manager", "scratchpad", "drop", "table"],
             true,
         ),
-        cap(
+        local_state_write_cap(
             "gam_scratchpad_query",
             "scratchpad",
             "Run bounded read-only DuckDB SQL against an Ad Manager scratchpad session.",
             ["google", "ad-manager", "scratchpad", "sql", "query"],
+            false,
         ),
         local_state_write_cap(
             "gam_scratchpad_ingest_network_catalog",
@@ -336,11 +342,12 @@ pub(crate) fn build_tool_inventory() -> Result<ToolInventory, ToolInventoryError
             ],
             false,
         ),
-        cap(
+        local_state_write_cap(
             "gam_scratchpad_export_evidence_bundle",
             "scratchpad",
             "Export a bounded markdown evidence bundle from Ad Manager scratchpad tables.",
             ["google", "ad-manager", "scratchpad", "evidence", "markdown"],
+            false,
         ),
     ])
 }
@@ -408,7 +415,7 @@ mod tests {
             &ToolSearchFilter {
                 query: Some("scratchpad evidence markdown".to_string()),
                 group: Some("scratchpad".to_string()),
-                read_only: Some(true),
+                read_only: Some(false),
                 limit: Some(10),
             },
             ToolOperation::List,
@@ -442,11 +449,11 @@ mod tests {
     }
 
     #[test]
-    fn read_only_scratchpad_discovery_excludes_local_state_writes() {
+    fn scratchpad_discovery_metadata_matches_complete_local_state_matrix() {
         let inventory = build_tool_inventory().expect("inventory");
         let read_only = inventory.search(
             &ToolSearchFilter {
-                query: Some("scratchpad".to_string()),
+                query: None,
                 group: Some("scratchpad".to_string()),
                 read_only: Some(true),
                 limit: Some(100),
@@ -454,31 +461,14 @@ mod tests {
             ToolOperation::List,
             &ToolInventoryPolicy::strict(),
         );
-        let names = read_only
-            .iter()
-            .map(|result| result.name.as_str())
-            .collect::<Vec<_>>();
-        for mutating_name in [
-            "gam_scratchpad_open_session",
-            "gam_scratchpad_close_session",
-            "gam_scratchpad_drop_table",
-            "gam_scratchpad_ingest_network_catalog",
-            "gam_scratchpad_ingest_report_result_rows",
-            "gam_scratchpad_ingest_soap_line_items",
-        ] {
-            assert!(
-                !names.contains(&mutating_name),
-                "read-only names: {names:?}"
-            );
-        }
-        assert!(names.contains(&"gam_scratchpad_list_sessions"));
-        assert!(names.contains(&"gam_scratchpad_list_tables"));
-        assert!(names.contains(&"gam_scratchpad_query"));
-        assert!(names.contains(&"gam_scratchpad_export_evidence_bundle"));
+        assert!(
+            read_only.is_empty(),
+            "read-only scratchpad tools: {read_only:?}"
+        );
 
         let local_writes = inventory.search(
             &ToolSearchFilter {
-                query: Some("scratchpad".to_string()),
+                query: None,
                 group: Some("scratchpad".to_string()),
                 read_only: Some(false),
                 limit: Some(100),
@@ -486,41 +476,146 @@ mod tests {
             ToolOperation::List,
             &ToolInventoryPolicy::strict(),
         );
-        for (mutating_name, expected_class) in [
+        let mut actual = local_writes
+            .iter()
+            .map(|result| {
+                let posture = result.risk_posture.expect("local-state posture");
+                (
+                    result.name.as_str(),
+                    result.read_only,
+                    posture.operation_class,
+                    posture.requires_runtime_enablement,
+                    posture.writes_enabled_by_default,
+                    posture.post_apply_readback_required,
+                )
+            })
+            .collect::<Vec<_>>();
+        actual.sort_by(|left, right| left.0.cmp(right.0));
+        assert_eq!(
+            actual,
+            vec![
+                (
+                    "gam_scratchpad_close_session",
+                    false,
+                    GuardedActionOperationClass::Destructive,
+                    false,
+                    true,
+                    false,
+                ),
+                (
+                    "gam_scratchpad_drop_table",
+                    false,
+                    GuardedActionOperationClass::Destructive,
+                    false,
+                    true,
+                    false,
+                ),
+                (
+                    "gam_scratchpad_export_evidence_bundle",
+                    false,
+                    GuardedActionOperationClass::Mutating,
+                    false,
+                    true,
+                    false,
+                ),
+                (
+                    "gam_scratchpad_ingest_network_catalog",
+                    false,
+                    GuardedActionOperationClass::Mutating,
+                    false,
+                    true,
+                    false,
+                ),
+                (
+                    "gam_scratchpad_ingest_report_result_rows",
+                    false,
+                    GuardedActionOperationClass::Mutating,
+                    false,
+                    true,
+                    false,
+                ),
+                (
+                    "gam_scratchpad_ingest_soap_line_items",
+                    false,
+                    GuardedActionOperationClass::Mutating,
+                    false,
+                    true,
+                    false,
+                ),
+                (
+                    "gam_scratchpad_list_sessions",
+                    false,
+                    GuardedActionOperationClass::Mutating,
+                    false,
+                    true,
+                    false,
+                ),
+                (
+                    "gam_scratchpad_list_tables",
+                    false,
+                    GuardedActionOperationClass::Mutating,
+                    false,
+                    true,
+                    false,
+                ),
+                (
+                    "gam_scratchpad_open_session",
+                    false,
+                    GuardedActionOperationClass::Mutating,
+                    false,
+                    true,
+                    false,
+                ),
+                (
+                    "gam_scratchpad_query",
+                    false,
+                    GuardedActionOperationClass::Mutating,
+                    false,
+                    true,
+                    false,
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn read_only_discovery_includes_non_mutating_plans_and_previews() {
+        let inventory = build_tool_inventory().expect("inventory");
+        for (query, expected_name) in [
+            ("trafficking write dry run", "gam_rest_write_plan"),
             (
-                "gam_scratchpad_open_session",
-                GuardedActionOperationClass::Mutating,
+                "soap line item forecast trafficking",
+                "gam_soap_trafficking_plan",
             ),
             (
-                "gam_scratchpad_close_session",
-                GuardedActionOperationClass::Destructive,
-            ),
-            (
-                "gam_scratchpad_drop_table",
-                GuardedActionOperationClass::Destructive,
-            ),
-            (
-                "gam_scratchpad_ingest_network_catalog",
-                GuardedActionOperationClass::Mutating,
-            ),
-            (
-                "gam_scratchpad_ingest_report_result_rows",
-                GuardedActionOperationClass::Mutating,
-            ),
-            (
-                "gam_scratchpad_ingest_soap_line_items",
-                GuardedActionOperationClass::Mutating,
+                "yield group exclusions open bidding preview",
+                "gam_yield_group_exclusions_preview",
             ),
         ] {
-            let result = local_writes
+            let results = inventory.search(
+                &ToolSearchFilter {
+                    query: Some(query.to_string()),
+                    group: Some("trafficking".to_string()),
+                    read_only: Some(true),
+                    limit: Some(10),
+                },
+                ToolOperation::List,
+                &ToolInventoryPolicy::strict(),
+            );
+            let result = results
                 .iter()
-                .find(|result| result.name == mutating_name)
-                .unwrap_or_else(|| panic!("missing local-state write {mutating_name}"));
-            let posture = result.risk_posture.expect("local-state write posture");
-            assert_eq!(posture.operation_class, expected_class);
-            assert!(!posture.requires_runtime_enablement);
-            assert!(posture.writes_enabled_by_default);
-            assert!(!posture.post_apply_readback_required);
+                .find(|result| result.name == expected_name)
+                .unwrap_or_else(|| {
+                    panic!("query '{query}' did not return {expected_name}: {results:?}")
+                });
+            assert!(result.read_only);
+            assert_eq!(
+                result
+                    .risk_posture
+                    .expect("preview risk posture")
+                    .operation_class,
+                GuardedActionOperationClass::Preview
+            );
         }
     }
 

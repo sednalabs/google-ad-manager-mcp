@@ -279,9 +279,14 @@ companion; SOAP apply discovery additionally offers the payload builder when it
 is useful. Empty searches return available groups and bounded retry examples
 without relaxing `read_only`. Set `include_schema=true` only after narrowing the
 result set when full tool schemas are required.
-`read_only=true` excludes both provider mutations and local scratchpad state
-changes such as opening, ingesting, dropping, or closing data; scratchpad query,
-listing, and evidence-export tools remain discoverable.
+Omit `read_only` to search all tools. Set `read_only=true` to search only
+non-mutating execution paths, including plans, previews, and no-mutation proof
+reads. Every current scratchpad tool is excluded because the pinned scratchpad
+runtime may create, refresh, or prune local session state even during queries,
+listings, and evidence export. Set `read_only=false` to search only write-like
+or local-state-mutating tools; it does not mean both classes. Plan-first apply
+results may still add their required non-mutating companion to the allowed-tool
+list.
 
 ## Upstream Scope
 

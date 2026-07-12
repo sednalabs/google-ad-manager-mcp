@@ -76,7 +76,9 @@ pub struct FindToolsArgs {
     /// Optional exact tool group filter, such as catalog, reports, trafficking, or scratchpad.
     #[serde(default)]
     pub group: Option<String>,
-    /// Restrict discovery to non-mutating tools when true.
+    /// Filter by mutation behavior: omit for all tools; true for only non-mutating
+    /// execution paths, including previews but excluding all current scratchpad tools;
+    /// false for only write-like or local-state-mutating tools.
     #[serde(default)]
     pub read_only: Option<bool>,
     /// Maximum ranked inventory matches. Defaults to 20 and is capped at 100.
