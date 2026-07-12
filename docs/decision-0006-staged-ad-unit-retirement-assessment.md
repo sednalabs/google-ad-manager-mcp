@@ -126,9 +126,14 @@ surfaces return `evidence_complete_operator_review_required`: current identity,
 descendants, dependency, delivery, exchange/protection, site contract, and
 telemetry.
 
-The recommendation repeats the assessment fingerprint, preserves the
-deterministic child-first target order, and supplies bounded actions for every
-blocked or incomplete surface. `operator_review_required` remains true,
+The recommendation repeats the assessment fingerprint, whose preimage includes
+the versioned recommendation contract as well as the network, targets, current
+identity, hierarchy, and evidence. This prevents a later decision-contract
+revision from reusing an earlier-stage fingerprint. It preserves the
+deterministic child-first target order and supplies bounded, surface-aware
+actions for every blocked or incomplete surface. Identity-shape and hierarchy
+reconciliation failures never tell an operator to attach an unrelated receipt
+or merely increase a cap. `operator_review_required` remains true,
 `automated_retirement_eligible` and `safe_to_archive_or_retire` remain false,
 and the response explicitly states that it is not an archive authorization.
 No archive, deactivate, rename, retarget, or other GAM mutation is exposed or

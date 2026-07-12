@@ -10,6 +10,8 @@ const SURFACES: [(&str, &str); 7] = [
     ("telemetry", "state"),
 ];
 
+pub(super) const RECOMMENDATION_CONTRACT_VERSION: &str = "gam-ad-unit-retirement-recommendation-v1";
+
 pub(super) fn recommendation(
     identity: &Value,
     descendants: &Value,
@@ -73,7 +75,7 @@ pub(super) fn recommendation(
 
     let mut next_actions = states
         .iter()
-        .filter_map(|(surface, state)| next_action(surface, state))
+        .filter_map(|(surface, state)| next_action(surface, state, identity, descendants))
         .collect::<Vec<_>>();
     if observed_active_descendants
         && !states.iter().any(|(surface, state)| {
@@ -93,6 +95,7 @@ pub(super) fn recommendation(
     }
 
     json!({
+        "contract_version": RECOMMENDATION_CONTRACT_VERSION,
         "decision": decision,
         "reason": reason,
         "all_required_surfaces_complete": all_required_surfaces_complete,
@@ -115,9 +118,81 @@ pub(super) fn recommendation(
     })
 }
 
-fn next_action(surface: &str, state: &str) -> Option<Value> {
+fn next_action(surface: &str, state: &str, identity: &Value, descendants: &Value) -> Option<Value> {
+    if state == "complete_clear" {
+        return None;
+    }
+    let action = match surface {
+        "identity" => match state {
+            "complete_blocked" => {
+                "resolve the missing or mismatched exact ad-unit identity before reassessment"
+            }
+            "blocked_auth" => "restore authentication and rerun the exact identity reads",
+            "blocked_permission" => {
+                "restore exact ad-unit read permission and rerun the identity reads"
+            }
+            _ if identity
+                .get("targets")
+                .and_then(Value::as_array)
+                .is_some_and(|targets| {
+                    targets.iter().any(|target| {
+                        target
+                            .get("shape_issues")
+                            .and_then(Value::as_array)
+                            .is_some_and(|issues| !issues.is_empty())
+                    })
+                }) =>
+            {
+                "fix the reported live identity shape issues and rerun the exact reads"
+            }
+            _ => "rerun the exact live identity proof",
+        },
+        "descendants" => descendant_next_action(state, descendants),
+        _ => evidence_next_action(state),
+    };
+    Some(json!({"surface": surface, "action": action}))
+}
+
+fn descendant_next_action(state: &str, descendants: &Value) -> &'static str {
+    match state {
+        "complete_blocked" => {
+            "archive or retarget the observed active descendants before reassessment"
+        }
+        "partial_blocked" => {
+            "resolve observed active descendants and rerun the incomplete hierarchy proof"
+        }
+        "blocked_auth" => "restore authentication and rerun the hierarchy proof",
+        "blocked_permission" => "restore catalog read permission and rerun the hierarchy proof",
+        "blocked_read" => "resolve the catalog read failure and rerun the hierarchy proof",
+        "partial_capped" if descendant_limit_issue(descendants) => {
+            "rerun with a sufficient catalog budget or a narrower exact-target set"
+        }
+        "partial_capped" => {
+            "resolve the reported hierarchy, ordering, or row-shape issues and rerun the proof"
+        }
+        _ => "rerun the complete hierarchy and descendant proof",
+    }
+}
+
+fn descendant_limit_issue(descendants: &Value) -> bool {
+    descendants
+        .get("issues")
+        .and_then(Value::as_array)
+        .is_some_and(|issues| {
+            issues.iter().filter_map(Value::as_str).any(|issue| {
+                matches!(
+                    issue,
+                    "row_cap_reached"
+                        | "page_response_bytes_exceeded"
+                        | "scan_response_bytes_exceeded"
+                        | "page_cap_reached"
+                )
+            })
+        })
+}
+
+fn evidence_next_action(state: &str) -> &'static str {
     let action = match state {
-        "complete_clear" => return None,
         "complete_blocked" => "resolve the observed blocker before reassessment",
         "partial_blocked" => "resolve the observed blocker and rerun the incomplete source proof",
         "partial_capped" => "rerun the source proof without a result cap",
@@ -132,5 +207,5 @@ fn next_action(surface: &str, state: &str) -> Option<Value> {
         }
         _ => "run the required source proof and attach its exact-target receipt",
     };
-    Some(json!({"surface": surface, "action": action}))
+    action
 }

@@ -570,6 +570,29 @@ fn assessment_fingerprint_is_network_and_target_bound() {
         build("1234567", "200")["assessment_fingerprint"],
         build("1234567", "201")["assessment_fingerprint"]
     );
+    let current = build("1234567", "200");
+    let legacy_stage_four_fingerprint = crate::fingerprint::stable_fingerprint(
+        &json!({
+            "network_code":"1234567",
+            "target_ad_unit_ids":["200"],
+            "identity":identity,
+            "descendants":descendants,
+            "evidence":evidence,
+        })
+        .to_string(),
+    );
+    assert_eq!(
+        current["recommendation"]["contract_version"],
+        RECOMMENDATION_CONTRACT_VERSION
+    );
+    assert_eq!(
+        current["response_contract"]["recommendation_contract_version"],
+        RECOMMENDATION_CONTRACT_VERSION
+    );
+    assert_ne!(
+        current["assessment_fingerprint"],
+        legacy_stage_four_fingerprint
+    );
 }
 
 fn complete_evidence_summary() -> Value {
@@ -654,6 +677,52 @@ fn every_incomplete_state_prevents_operator_review_recommendation() {
             "{state}"
         );
     }
+}
+
+#[test]
+fn next_actions_distinguish_live_identity_hierarchy_and_cap_failures() {
+    let evidence = complete_evidence_summary();
+    let identity = recommendation(
+        &json!({
+            "proof_state":"not_run",
+            "targets":[{"shape_issues":["status_missing_or_invalid"]}]
+        }),
+        &json!({"proof_state":"complete_clear"}),
+        &evidence,
+        "0123456789abcdef",
+    );
+    assert_eq!(
+        identity["next_actions"][0]["action"],
+        "fix the reported live identity shape issues and rerun the exact reads"
+    );
+
+    let structural = recommendation(
+        &json!({"proof_state":"complete_clear"}),
+        &json!({
+            "proof_state":"partial_capped",
+            "issues":["parent_path_incomplete"]
+        }),
+        &evidence,
+        "0123456789abcdef",
+    );
+    assert_eq!(
+        structural["next_actions"][0]["action"],
+        "resolve the reported hierarchy, ordering, or row-shape issues and rerun the proof"
+    );
+
+    let capped = recommendation(
+        &json!({"proof_state":"complete_clear"}),
+        &json!({
+            "proof_state":"partial_capped",
+            "issues":["row_cap_reached"]
+        }),
+        &evidence,
+        "0123456789abcdef",
+    );
+    assert_eq!(
+        capped["next_actions"][0]["action"],
+        "rerun with a sufficient catalog budget or a narrower exact-target set"
+    );
 }
 
 #[test]

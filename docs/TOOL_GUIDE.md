@@ -303,7 +303,10 @@ The `recommendation` surface returns one of three fail-closed decisions:
   telemetry surfaces are all complete and clear.
 
 The response preserves the required child-first target order and provides a
-bounded next action for each incomplete or blocked surface. Every successful
+bounded, surface-aware next action for each incomplete or blocked surface. Its
+assessment fingerprint includes the versioned recommendation contract, so a
+decision-semantic change cannot silently reuse an older assessment identity.
+Every successful
 assessment still reports `mutation_performed=false`,
 `archive_or_deactivate_authorized=false`,
 `automated_retirement_eligible=false`, and

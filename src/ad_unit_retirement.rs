@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 
 use crate::{AdManagerError, fingerprint::stable_fingerprint};
 
-use decision::recommendation;
+use decision::{RECOMMENDATION_CONTRACT_VERSION, recommendation};
 use descendants::{DescendantScanInput, scan_descendants_with_reader, scoped_numeric_id};
 use inventory::{blocked_identity, summarize_identities, summarize_identity, validate_targets};
 use receipt::{
@@ -205,6 +205,7 @@ fn build_preflight_response(
     let target_count = target_ids.len();
     let assessment_fingerprint = stable_fingerprint(
         &json!({
+            "recommendation_contract_version": RECOMMENDATION_CONTRACT_VERSION,
             "network_code": &network_code,
             "target_ad_unit_ids": &target_ids,
             "identity": &identity,
@@ -243,6 +244,7 @@ fn build_preflight_response(
         },
         "response_contract": {
             "stage": "operator_review_recommendation",
+            "recommendation_contract_version": RECOMMENDATION_CONTRACT_VERSION,
             "compact": true,
             "max_targets": MAX_RETIREMENT_TARGETS,
             "max_inner_data_bytes": MAX_INNER_DATA_BYTES,

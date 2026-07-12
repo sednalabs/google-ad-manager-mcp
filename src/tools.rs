@@ -6802,6 +6802,104 @@ mod tests {
         })
     }
 
+    fn maximal_retirement_args_with_evidence() -> AdUnitRetirementAssessmentArgs {
+        const MINIMUM_ACTIVITY_WINDOW_SECONDS: u64 = 30 * 24 * 60 * 60;
+        let observed_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock after Unix epoch")
+            .as_secs();
+        let target_ad_unit_ids = (200..210).map(|id| id.to_string()).collect::<Vec<_>>();
+        serde_json::from_value(json!({
+            "network_code":"1234567",
+            "ad_unit_ids":target_ad_unit_ids,
+            "ad_unit_page_size":100,
+            "max_ad_units":100,
+            "evidence":[
+                {
+                    "network_code":"1234567",
+                    "source":"dependency_probe",
+                    "source_version":crate::evidence::EVIDENCE_PRODUCER_CONTRACT_VERSION,
+                    "state":"complete_clear",
+                    "result_hash":"0123456789abcdef",
+                    "observed_at_unix_seconds":observed_at,
+                    "ttl_seconds":3600,
+                    "target_ad_unit_ids":target_ad_unit_ids,
+                    "window_start_unix_seconds":null,
+                    "window_end_unix_seconds":null,
+                    "manual_ui_proof_included":false,
+                    "note":null,
+                    "provenance":crate::evidence::EVIDENCE_PROVENANCE,
+                    "operator_action":crate::evidence::EVIDENCE_OPERATOR_ACTION
+                },
+                {
+                    "network_code":"1234567",
+                    "source":"delivery_report",
+                    "source_version":"gam-report-v1",
+                    "state":"complete_clear",
+                    "result_hash":"sha256:0123456789abcdef",
+                    "observed_at_unix_seconds":observed_at,
+                    "ttl_seconds":3600,
+                    "target_ad_unit_ids":target_ad_unit_ids,
+                    "window_start_unix_seconds":observed_at - MINIMUM_ACTIVITY_WINDOW_SECONDS,
+                    "window_end_unix_seconds":observed_at,
+                    "manual_ui_proof_included":false,
+                    "note":null,
+                    "provenance":null,
+                    "operator_action":null
+                },
+                {
+                    "network_code":"1234567",
+                    "source":"exchange_protection_review",
+                    "source_version":crate::evidence::EVIDENCE_PRODUCER_CONTRACT_VERSION,
+                    "state":"manual_ui_proof_required",
+                    "result_hash":"fedcba9876543210",
+                    "observed_at_unix_seconds":observed_at,
+                    "ttl_seconds":3600,
+                    "target_ad_unit_ids":target_ad_unit_ids,
+                    "window_start_unix_seconds":null,
+                    "window_end_unix_seconds":null,
+                    "manual_ui_proof_included":true,
+                    "note":null,
+                    "provenance":crate::evidence::EVIDENCE_PROVENANCE,
+                    "operator_action":crate::evidence::EVIDENCE_OPERATOR_ACTION
+                },
+                {
+                    "network_code":"1234567",
+                    "source":"site_contract",
+                    "source_version":"site-contract-v1",
+                    "state":"complete_clear",
+                    "result_hash":"sha256:1111111111111111",
+                    "observed_at_unix_seconds":observed_at,
+                    "ttl_seconds":3600,
+                    "target_ad_unit_ids":target_ad_unit_ids,
+                    "window_start_unix_seconds":null,
+                    "window_end_unix_seconds":null,
+                    "manual_ui_proof_included":false,
+                    "note":null,
+                    "provenance":null,
+                    "operator_action":null
+                },
+                {
+                    "network_code":"1234567",
+                    "source":"telemetry",
+                    "source_version":"telemetry-v1",
+                    "state":"complete_clear",
+                    "result_hash":"sha256:2222222222222222",
+                    "observed_at_unix_seconds":observed_at,
+                    "ttl_seconds":3600,
+                    "target_ad_unit_ids":target_ad_unit_ids,
+                    "window_start_unix_seconds":observed_at - MINIMUM_ACTIVITY_WINDOW_SECONDS,
+                    "window_end_unix_seconds":observed_at,
+                    "manual_ui_proof_included":false,
+                    "note":null,
+                    "provenance":null,
+                    "operator_action":null
+                }
+            ]
+        }))
+        .expect("maximal retirement assessment args")
+    }
+
     #[test]
     fn split_scopes_accepts_common_delimiters() {
         assert_eq!(
@@ -7870,15 +7968,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn maximal_retirement_preflight_stays_inside_full_wire_limit() {
+    async fn maximal_retirement_assessment_with_all_evidence_stays_inside_full_wire_limit() {
         let result = ad_unit_retirement_tool_result(
-            AdUnitRetirementAssessmentArgs {
-                network_code: "1234567".to_string(),
-                ad_unit_ids: (200..210).map(|id| id.to_string()).collect(),
-                evidence: Vec::new(),
-                ad_unit_page_size: Some(100),
-                max_ad_units: Some(100),
-            },
+            maximal_retirement_args_with_evidence(),
             Instant::now(),
             |_network_code| async move { (Ok(retirement_network("100")), true) },
             |_network_code, resource_name| async move {
@@ -7940,6 +8032,10 @@ mod tests {
             .expect("maximal successful result must include structured content");
         assert_eq!(response["ok"], true);
         assert_eq!(response["data"]["identity"]["target_count"], 10);
+        assert_eq!(
+            response["data"]["recommendation"]["decision"],
+            "evidence_complete_operator_review_required"
+        );
         assert!(
             serde_json::to_vec(response)
                 .expect("serialize maximal model-visible result")
