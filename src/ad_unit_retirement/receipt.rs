@@ -108,12 +108,36 @@ pub(super) fn grade_evidence_bundle(
     let receipt_for =
         |source: EvidenceSource| receipts.iter().find(|receipt| receipt.source == source);
     Ok(json!({
-        "dependency": grade_evidence("dependency", EvidenceSource::DependencyProbe, receipt_for(EvidenceSource::DependencyProbe), network_code, target_ids, now, false)?,
-        "delivery": grade_evidence("delivery", EvidenceSource::DeliveryReport, receipt_for(EvidenceSource::DeliveryReport), network_code, target_ids, now, false)?,
-        "exchange_protection": grade_evidence("exchange_protection", EvidenceSource::ExchangeProtectionReview, receipt_for(EvidenceSource::ExchangeProtectionReview), network_code, target_ids, now, true)?,
-        "site_contract": grade_evidence("site_contract", EvidenceSource::SiteContract, receipt_for(EvidenceSource::SiteContract), network_code, target_ids, now, false)?,
-        "telemetry": grade_evidence("telemetry", EvidenceSource::Telemetry, receipt_for(EvidenceSource::Telemetry), network_code, target_ids, now, false)?,
+        "dependency": compact_complete_evidence(grade_evidence("dependency", EvidenceSource::DependencyProbe, receipt_for(EvidenceSource::DependencyProbe), network_code, target_ids, now, false)?),
+        "delivery": compact_complete_evidence(grade_evidence("delivery", EvidenceSource::DeliveryReport, receipt_for(EvidenceSource::DeliveryReport), network_code, target_ids, now, false)?),
+        "exchange_protection": compact_complete_evidence(grade_evidence("exchange_protection", EvidenceSource::ExchangeProtectionReview, receipt_for(EvidenceSource::ExchangeProtectionReview), network_code, target_ids, now, true)?),
+        "site_contract": compact_complete_evidence(grade_evidence("site_contract", EvidenceSource::SiteContract, receipt_for(EvidenceSource::SiteContract), network_code, target_ids, now, false)?),
+        "telemetry": compact_complete_evidence(grade_evidence("telemetry", EvidenceSource::Telemetry, receipt_for(EvidenceSource::Telemetry), network_code, target_ids, now, false)?),
     }))
+}
+
+fn compact_complete_evidence(evidence: Value) -> Value {
+    if !matches!(
+        evidence.get("state").and_then(Value::as_str),
+        Some("complete_clear" | "complete_blocked")
+    ) {
+        return evidence;
+    }
+    let manual_ui_proof_included = evidence
+        .get("manual_ui_proof_included")
+        .and_then(Value::as_bool)
+        .is_some_and(|included| included);
+    let mut compact = json!({
+        "state": evidence.get("state").cloned().unwrap_or(Value::Null),
+        "binding_valid": evidence.get("binding_valid").cloned().unwrap_or(Value::Null),
+        "complete_for_summary": evidence.get("complete_for_summary").cloned().unwrap_or(Value::Null),
+        "freshness_age_seconds": evidence.get("freshness_age_seconds").cloned().unwrap_or(Value::Null),
+        "receipt_binding_fingerprint": evidence.get("receipt_binding_fingerprint").cloned().unwrap_or(Value::Null),
+    });
+    if manual_ui_proof_included {
+        compact["manual_ui_proof_included"] = Value::Bool(true);
+    }
+    compact
 }
 
 pub(super) fn validate_evidence_bundle_structure(

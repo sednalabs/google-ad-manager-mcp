@@ -227,7 +227,7 @@ fn descendant_has_issue(descendants: &Value, expected: &[&str]) -> bool {
 }
 
 fn evidence_next_action(state: &str) -> &'static str {
-    let action = match state {
+    match state {
         "complete_blocked" => "resolve the observed blocker before reassessment",
         "partial_blocked" => "resolve the observed blocker and rerun the incomplete source proof",
         "partial_capped" => "rerun the source proof without a result cap",
@@ -241,6 +241,5 @@ fn evidence_next_action(state: &str) -> &'static str {
             "review the required GAM UI-only protection surfaces and provide a current receipt recording that review"
         }
         _ => "run the required source proof and attach its exact-target receipt",
-    };
-    action
+    }
 }

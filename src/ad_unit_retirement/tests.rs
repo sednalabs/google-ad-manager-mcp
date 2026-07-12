@@ -453,6 +453,64 @@ fn evidence_bundle_rejects_duplicate_sources_and_reports_missing_surfaces() {
 }
 
 #[test]
+fn complete_evidence_bundle_keeps_proof_fields_without_repeated_explanation() {
+    let mut protection = receipt(
+        EvidenceSource::ExchangeProtectionReview,
+        EvidenceState::ManualUiProofRequired,
+        3_999_900,
+    );
+    protection.manual_ui_proof_included = true;
+    let bundle = grade_evidence_bundle(
+        &[
+            receipt(
+                EvidenceSource::DependencyProbe,
+                EvidenceState::CompleteClear,
+                3_999_900,
+            ),
+            receipt(
+                EvidenceSource::DeliveryReport,
+                EvidenceState::CompleteClear,
+                3_999_900,
+            ),
+            protection,
+            receipt(
+                EvidenceSource::SiteContract,
+                EvidenceState::CompleteClear,
+                3_999_900,
+            ),
+            receipt(
+                EvidenceSource::Telemetry,
+                EvidenceState::CompleteClear,
+                3_999_900,
+            ),
+        ],
+        "1234567",
+        &["200".to_string()],
+        4_000_000,
+    )
+    .expect("complete evidence bundle");
+
+    for surface in [
+        "dependency",
+        "delivery",
+        "exchange_protection",
+        "site_contract",
+        "telemetry",
+    ] {
+        assert_eq!(bundle[surface]["state"], "complete_clear");
+        assert_eq!(bundle[surface]["binding_valid"], true);
+        assert_eq!(bundle[surface]["complete_for_summary"], true);
+        assert!(bundle[surface]["receipt_binding_fingerprint"].is_string());
+        assert!(bundle[surface].get("reason").is_none());
+        assert!(bundle[surface].get("binding_errors").is_none());
+    }
+    assert_eq!(
+        bundle["exchange_protection"]["manual_ui_proof_included"],
+        true
+    );
+}
+
+#[test]
 fn evidence_note_limit_counts_characters_not_utf8_bytes() {
     let five_hundred_multibyte_characters = "é".repeat(500);
     assert!(validate_note(Some(&five_hundred_multibyte_characters)).is_ok());
@@ -1240,6 +1298,44 @@ fn confirmed_blocker_plus_incomplete_target_is_partial_blocked() {
         json!({"proof_state":"complete_clear"}),
     ]);
     assert_eq!(complete["proof_state"], "complete_blocked");
+
+    let compact = summarize_identities(&[
+        json!({
+            "ad_unit_id":"200",
+            "proof_state":"complete_clear",
+            "identity_matches_request":true,
+            "shape_complete":true,
+            "shape_issues":[],
+            "provider_request_state":"completed",
+            "identity_fingerprint":"0123456789abcdef",
+            "current":{"status":"ACTIVE"}
+        }),
+        json!({
+            "ad_unit_id":"201",
+            "proof_state":"blocked_permission",
+            "identity_matches_request":false,
+            "shape_complete":false,
+            "shape_issues":[],
+            "provider_request_state":"attempted_no_complete_response",
+            "reason":"permission"
+        }),
+    ]);
+    assert!(
+        compact["targets"][0]
+            .get("identity_matches_request")
+            .is_none()
+    );
+    assert!(compact["targets"][0].get("shape_complete").is_none());
+    assert!(
+        compact["targets"][0]
+            .get("provider_request_state")
+            .is_none()
+    );
+    assert_eq!(
+        compact["targets"][1]["provider_request_state"],
+        "attempted_no_complete_response"
+    );
+    assert_eq!(compact["targets"][1]["reason"], "permission");
 }
 
 #[test]
