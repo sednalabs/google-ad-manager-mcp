@@ -4,7 +4,7 @@
 //! Google Ad Manager workflow relationships that the generic toolkit cannot
 //! infer, such as guided builder/plan/apply dependencies and filter recovery.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use mcp_toolkit_core::guarded_action::GuardedActionOperationClass;
 use mcp_toolkit_core::tool_inventory::{
@@ -83,7 +83,7 @@ pub(crate) const REPRESENTATIVE_DISCOVERY_CANDIDATES: [RepresentativeDiscoveryCa
         "start a campaign delivery audit with a saved report",
         "gam_report_run",
         "reports",
-        true,
+        false,
     ),
     candidate(
         "continue waiting for an existing report operation",
@@ -186,7 +186,7 @@ pub(crate) struct WorkflowCompanion {
     pub reason: &'static str,
 }
 
-// Dependency order is topological; keep the SOAP builder before the SOAP plan.
+// Declaration order is not trusted; the provider composer validates and sorts the full graph.
 const WORKFLOW_DEPENDENCIES: [WorkflowDependency; 8] = [
     WorkflowDependency {
         tool_name: "gam_networks_list",
@@ -270,19 +270,23 @@ const AD_UNIT_RETIREMENT_DEPENDENCIES: [WorkflowDependency; 3] = [
     },
 ];
 
-pub(crate) fn workflow_companions(
+pub(crate) fn compose_workflow_companions(
     results: &[ToolSearchResult],
     query: Option<&str>,
-) -> Vec<WorkflowCompanion> {
+) -> Result<Vec<WorkflowCompanion>, &'static str> {
     let mut dependencies = WORKFLOW_DEPENDENCIES.to_vec();
     if is_ad_unit_retirement_intent(query) {
         dependencies.extend(AD_UNIT_RETIREMENT_DEPENDENCIES);
     }
+    let dependencies = topologically_sorted_dependencies(dependencies)?;
     let selected = results
         .iter()
         .map(|result| result.name.as_str())
         .collect::<BTreeSet<_>>();
     let mut prerequisites = selected.clone();
+    if selected.contains("gam_report_run") && is_existing_report_operation_intent(query) {
+        prerequisites.insert("gam_report_operation_poll");
+    }
     loop {
         let mut changed = false;
         for dependency in dependencies.iter().copied() {
@@ -296,7 +300,7 @@ pub(crate) fn workflow_companions(
     }
 
     let mut emitted_edges = BTreeSet::new();
-    dependencies
+    Ok(dependencies
         .into_iter()
         .filter(|dependency| prerequisites.contains(dependency.before_tool))
         .filter(|dependency| emitted_edges.insert((dependency.tool_name, dependency.before_tool)))
@@ -308,7 +312,84 @@ pub(crate) fn workflow_companions(
             tool_already_selected: selected.contains(dependency.tool_name),
             reason: dependency.reason,
         })
-        .collect()
+        .collect())
+}
+
+fn topologically_sorted_dependencies(
+    dependencies: Vec<WorkflowDependency>,
+) -> Result<Vec<WorkflowDependency>, &'static str> {
+    let mut deduplicated = BTreeMap::new();
+    for dependency in dependencies {
+        deduplicated
+            .entry((dependency.tool_name, dependency.before_tool))
+            .or_insert(dependency);
+    }
+    let dependencies = deduplicated.into_values().collect::<Vec<_>>();
+    let mut nodes = BTreeSet::new();
+    let mut outgoing = BTreeMap::<&str, BTreeSet<&str>>::new();
+    let mut indegree = BTreeMap::<&str, usize>::new();
+    for dependency in dependencies.iter().copied() {
+        nodes.insert(dependency.tool_name);
+        nodes.insert(dependency.before_tool);
+        outgoing
+            .entry(dependency.tool_name)
+            .or_default()
+            .insert(dependency.before_tool);
+        *indegree.entry(dependency.before_tool).or_default() += 1;
+        indegree.entry(dependency.tool_name).or_default();
+    }
+
+    let mut ready = nodes
+        .iter()
+        .copied()
+        .filter(|node| indegree.get(node).copied().unwrap_or_default() == 0)
+        .collect::<BTreeSet<_>>();
+    let mut ordered_nodes = Vec::with_capacity(nodes.len());
+    while let Some(node) = ready.pop_first() {
+        ordered_nodes.push(node);
+        if let Some(successors) = outgoing.get(node) {
+            for successor in successors {
+                let successor_indegree = indegree
+                    .get_mut(successor)
+                    .expect("workflow successor has an indegree entry");
+                *successor_indegree -= 1;
+                if *successor_indegree == 0 {
+                    ready.insert(successor);
+                }
+            }
+        }
+    }
+    if ordered_nodes.len() != nodes.len() {
+        return Err("provider workflow dependency graph contains a cycle");
+    }
+
+    let node_order = ordered_nodes
+        .into_iter()
+        .enumerate()
+        .map(|(index, node)| (node, index))
+        .collect::<BTreeMap<_, _>>();
+    let mut dependencies = dependencies;
+    dependencies.sort_by_key(|dependency| {
+        (
+            *node_order
+                .get(dependency.before_tool)
+                .expect("workflow target has a topological position"),
+            *node_order
+                .get(dependency.tool_name)
+                .expect("workflow source has a topological position"),
+            dependency.tool_name,
+            dependency.before_tool,
+        )
+    });
+    Ok(dependencies)
+}
+
+#[cfg(test)]
+fn workflow_companions(
+    results: &[ToolSearchResult],
+    query: Option<&str>,
+) -> Vec<WorkflowCompanion> {
+    compose_workflow_companions(results, query).expect("static workflow graph must be acyclic")
 }
 
 fn is_ad_unit_retirement_intent(query: Option<&str>) -> bool {
@@ -330,6 +411,18 @@ fn is_ad_unit_retirement_intent(query: Option<&str>) -> bool {
                     | "retirement"
             )
         })
+}
+
+fn is_existing_report_operation_intent(query: Option<&str>) -> bool {
+    let Some(query) = query else {
+        return false;
+    };
+    let normalized = query.to_ascii_lowercase().replace(['-', '_'], " ");
+    normalized.contains("existing report operation")
+        || normalized.contains("existing operation")
+        || normalized.contains("operation name")
+        || normalized.contains("continue waiting")
+        || (normalized.contains("poll") && normalized.contains("operation"))
 }
 
 pub(crate) fn companion_tool_names(companions: &[WorkflowCompanion]) -> Vec<&'static str> {
@@ -371,11 +464,95 @@ pub(crate) fn companion_result_records(companions: &[WorkflowCompanion]) -> Vec<
                 "required_semantics": "guided_sequence_compatibility_alias",
                 "server_call_enforced": false,
                 "reason": companion.reason,
+                "effect": if !companion.callable_as_tool
+                    && companion.tool_name == "gam_report_run"
+                {
+                    Value::String("starts_upstream_job".to_string())
+                } else {
+                    Value::Null
+                },
+                "explicit_executable_recovery": if !companion.callable_as_tool
+                    && companion.tool_name == "gam_report_run"
+                {
+                    report_run_executable_recovery()
+                } else {
+                    Value::Null
+                },
                 "mutation_performed": false,
                 "safety": "non_mutating_guidance",
             })
         })
         .collect()
+}
+
+pub(crate) fn provider_guidance_allowed(summary: &ToolSearchMatchSummary) -> bool {
+    search_semantics_fail_closed_reasons(summary).is_empty()
+}
+
+pub(crate) fn remove_contextual_condition_only_direct_matches(
+    results: &mut Vec<ToolSearchResult>,
+    companions: &[WorkflowCompanion],
+) -> Vec<Value> {
+    let contextual_companions = companions
+        .iter()
+        .filter(|companion| !companion.callable_as_tool && companion.tool_already_selected)
+        .map(|companion| (companion.tool_name, *companion))
+        .collect::<BTreeMap<_, _>>();
+    let mut retained = Vec::with_capacity(results.len());
+    let mut condition_only = Vec::new();
+    for (index, result) in std::mem::take(results).into_iter().enumerate() {
+        if let Some(companion) = contextual_companions.get(result.name.as_str()) {
+            let is_report_run = result.name == "gam_report_run";
+            condition_only.push(json!({
+                "type": "condition_only_match",
+                "name": result.name,
+                "rank": index + 1,
+                "group": result.group,
+                "description": result.description,
+                "registered_read_only": result.read_only,
+                "registered_risk_posture": result.risk_posture,
+                "selection_semantics": "condition_only",
+                "callable_as_tool": false,
+                "schema_exposed": false,
+                "tool_already_selected": true,
+                "required_for_guided_sequence": companion.required_for_guided_sequence,
+                "server_call_enforced": false,
+                "before_tool": companion.before_tool,
+                "invocation_condition": if is_report_run {
+                    Value::String("only_when_no_existing_operation_name".to_string())
+                } else {
+                    Value::Null
+                },
+                "effect": if is_report_run {
+                    Value::String("starts_upstream_job".to_string())
+                } else {
+                    Value::Null
+                },
+                "reason": companion.reason,
+                "explicit_executable_recovery": if is_report_run {
+                    report_run_executable_recovery()
+                } else {
+                    Value::Null
+                },
+            }));
+        } else {
+            retained.push(result);
+        }
+    }
+    *results = retained;
+    condition_only
+}
+
+fn report_run_executable_recovery() -> Value {
+    json!({
+        "tool": "gam_report_run",
+        "condition": "only_when_no_existing_operation_name",
+        "requires_explicit_operator_intent": true,
+        "starts_upstream_job": true,
+        "automatic_replay_safe": false,
+        "required_arguments": ["network_code", "report_id"],
+        "schema_source": "tools/list",
+    })
 }
 
 pub(crate) fn recovery_result_record(
@@ -476,7 +653,7 @@ pub(crate) fn supplemental_local_state_alternative_records(
 }
 
 fn search_semantics_fail_closed_reasons(summary: &ToolSearchMatchSummary) -> Vec<String> {
-    summary
+    let mut reasons = summary
         .truncation_reasons
         .iter()
         .filter(|reason| {
@@ -490,7 +667,15 @@ fn search_semantics_fail_closed_reasons(summary: &ToolSearchMatchSummary) -> Vec
             )
         })
         .cloned()
-        .collect()
+        .collect::<Vec<_>>();
+    if !summary.excluded_query_terms.is_empty()
+        && !reasons
+            .iter()
+            .any(|reason| reason == "excluded_query_terms")
+    {
+        reasons.push("excluded_query_terms".to_string());
+    }
+    reasons
 }
 
 fn local_state_alternatives(inventory: &ToolInventory, filter: &ToolSearchFilter) -> Vec<Value> {
@@ -711,8 +896,11 @@ pub(crate) fn recognized_group_filter(
 mod tests {
     use super::{
         MAX_RECOVERY_GROUPS, REPRESENTATIVE_DISCOVERY_CANDIDATES, WorkflowCompanion,
-        available_groups, companion_result_records, companion_tool_names, recognized_group_filter,
-        recovery_result_record, supplemental_local_state_alternative_records, workflow_companions,
+        WorkflowDependency, available_groups, companion_result_records, companion_tool_names,
+        provider_guidance_allowed, recognized_group_filter, recovery_result_record,
+        remove_contextual_condition_only_direct_matches,
+        supplemental_local_state_alternative_records, topologically_sorted_dependencies,
+        workflow_companions,
     };
     use crate::tool_surface::build_tool_inventory;
     use mcp_toolkit_core::tool_inventory::{
@@ -904,6 +1092,135 @@ mod tests {
         );
 
         assert!(workflow_companions(&results, Some("create an ad unit")).is_empty());
+    }
+
+    #[test]
+    fn ad_unit_apply_composes_then_topologically_orders_the_complete_chain() {
+        let results = [result("gam_rest_write_apply")];
+        let companions = workflow_companions(&results, Some("archive an ad unit"));
+        assert_eq!(
+            companion_edges(&companions),
+            vec![
+                ("gam_networks_list", "gam_network_catalog_list", true, false),
+                (
+                    "gam_network_catalog_list",
+                    "gam_ad_unit_dependency_probe",
+                    true,
+                    false,
+                ),
+                (
+                    "gam_ad_unit_dependency_probe",
+                    "gam_ad_unit_retirement_assessment",
+                    true,
+                    false,
+                ),
+                (
+                    "gam_ad_unit_retirement_assessment",
+                    "gam_rest_write_plan",
+                    true,
+                    false,
+                ),
+                ("gam_rest_write_plan", "gam_rest_write_apply", true, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn workflow_dependency_cycles_fail_closed() {
+        let dependencies = vec![
+            WorkflowDependency {
+                tool_name: "tool_a",
+                before_tool: "tool_b",
+                callable_as_tool: true,
+                required_for_guided_sequence: true,
+                reason: "test edge",
+            },
+            WorkflowDependency {
+                tool_name: "tool_b",
+                before_tool: "tool_a",
+                callable_as_tool: true,
+                required_for_guided_sequence: true,
+                reason: "test edge",
+            },
+        ];
+        assert_eq!(
+            topologically_sorted_dependencies(dependencies),
+            Err("provider workflow dependency graph contains a cycle")
+        );
+    }
+
+    #[test]
+    fn report_run_is_condition_only_when_a_continuation_is_selected() {
+        let mut results = vec![result("gam_report_run"), result("gam_report_result_rows")];
+        let companions = workflow_companions(&results, None);
+        let condition_only =
+            remove_contextual_condition_only_direct_matches(&mut results, &companions);
+        assert_eq!(
+            results
+                .iter()
+                .map(|result| result.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["gam_report_result_rows"]
+        );
+        assert_eq!(condition_only[0]["name"], "gam_report_run");
+        assert_eq!(condition_only[0]["callable_as_tool"], false);
+        assert_eq!(condition_only[0]["schema_exposed"], false);
+        assert_eq!(condition_only[0]["effect"], "starts_upstream_job");
+        assert_eq!(
+            condition_only[0]["before_tool"],
+            "gam_report_operation_poll"
+        );
+        assert_eq!(
+            condition_only[0]["explicit_executable_recovery"]["tool"],
+            "gam_report_run"
+        );
+    }
+
+    #[test]
+    fn direct_report_run_remains_callable_without_a_selected_continuation() {
+        let mut results = vec![result("gam_report_run")];
+        let companions = workflow_companions(&results, None);
+        let condition_only =
+            remove_contextual_condition_only_direct_matches(&mut results, &companions);
+        assert!(condition_only.is_empty());
+        assert_eq!(results[0].name, "gam_report_run");
+    }
+
+    #[test]
+    fn existing_operation_intent_suppresses_a_write_filtered_report_run() {
+        let mut results = vec![result("gam_report_run")];
+        let companions = workflow_companions(
+            &results,
+            Some("continue waiting for an existing report operation"),
+        );
+        let condition_only =
+            remove_contextual_condition_only_direct_matches(&mut results, &companions);
+        assert!(results.is_empty());
+        assert_eq!(condition_only[0]["name"], "gam_report_run");
+        assert_eq!(
+            condition_only[0]["before_tool"],
+            "gam_report_operation_poll"
+        );
+    }
+
+    #[test]
+    fn excluded_intent_metadata_suppresses_provider_guidance() {
+        let inventory = build_tool_inventory().expect("inventory");
+        let mut ranked = inventory.search_ranked(
+            &ToolSearchFilter {
+                query: Some("archive an ad unit".to_string()),
+                limit: Some(10),
+                ..ToolSearchFilter::default()
+            },
+            ToolOperation::List,
+            &ToolInventoryPolicy::strict(),
+        );
+        assert!(provider_guidance_allowed(&ranked.match_summary));
+        ranked
+            .match_summary
+            .truncation_reasons
+            .push("excluded_query_terms".to_string());
+        assert!(!provider_guidance_allowed(&ranked.match_summary));
     }
 
     #[test]
@@ -1343,10 +1660,23 @@ mod tests {
         assert_eq!(
             recovery_queries(&reports),
             vec![
-                "start a campaign delivery audit with a saved report",
                 "continue waiting for an existing report operation",
                 "fetch rows from a completed report result",
             ]
+        );
+
+        let report_starts = recovery_for_filter(
+            &inventory,
+            &ToolSearchFilter {
+                query: Some("quasar zeppelin".to_string()),
+                group: Some("reports".to_string()),
+                read_only: Some(false),
+                limit: Some(10),
+            },
+        );
+        assert_eq!(
+            recovery_queries(&report_starts),
+            vec!["start a campaign delivery audit with a saved report"]
         );
 
         let scratchpad = recovery_for_filter(

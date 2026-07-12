@@ -88,6 +88,31 @@ pub(crate) fn result_contract_error(
     }))
 }
 
+pub(crate) fn result_contract_error_with_detail(
+    field: &'static str,
+    message: impl AsRef<str>,
+    detail: Value,
+    started: Instant,
+) -> CallToolResult {
+    CallToolResult::structured_error(json!({
+        "ok": false,
+        "error": {
+            "code": "result_contract_error",
+            "reason": "result_contract_failed",
+            "message": redact_secret_text(&format!(
+                "result contract failed for {field}: {}",
+                message.as_ref()
+            )),
+            "category": "safety",
+            "hint": "Preserve the returned handoff receipt and use its non-executable adjustment guidance; report an adapter defect if the minimum bounded request still fails.",
+            "detail": redact_secret_value(detail),
+        },
+        "meta": {
+            "elapsed_ms": elapsed_ms(started),
+        }
+    }))
+}
+
 pub fn error_with_detail(err: AdManagerError, detail: Value, started: Instant) -> CallToolResult {
     CallToolResult::structured_error(json!({
         "ok": false,

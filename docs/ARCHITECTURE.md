@@ -70,20 +70,26 @@ REST beta:
   sites, ad spots, and related batch state actions
 
 The report adapter treats long-running operation handles as bound capabilities,
-not free strings. `reports.run` sends a genuinely empty request body. Once that
-non-idempotent POST may have been dispatched, every transport, body-read,
-response-bound, status, JSON, or handoff failure is classified as uncertain and
-not automatically replay-safe. A run response must bind its operation to the requested
-`networks/{network}/reports/{report}` through `metadata.report`; every poll must
-echo the requested operation name; and the final `reportResult` must belong to
-that same report. Operation reads are capped at 64 KiB and projected to the
-documented name/metadata/done/error/response fields. Result-page reads are
+not free strings. `reports.run` sends a genuinely empty request body. A
+definitive 4xx rejection is an upstream API failure. Once the non-idempotent POST
+may otherwise have been dispatched, transport, body-read, response-bound,
+plausible server-status, JSON, or handoff failure is uncertain and not
+automatically replay-safe. A known requested report can supply an omitted
+`metadata.report`, while inconsistent present metadata is rejected; every poll
+must echo the requested operation name and the final `reportResult` must belong
+to that same report. The validated POST observation is the first poll
+observation, avoiding an unnecessary GET when it is already complete. Invalid
+`done`/`error`/`response` unions fail closed. Operation reads are capped at 64
+KiB and projected to the documented name/metadata/done/error/response fields.
+Result-page reads are
 capped at 512 KiB and page size 1,000, validate documented row, token, and count
 types, then pass model-visible and complete RMCP result guards. Poll controls
 require a 5-to-30-second initial interval and at most 24 hours, with bounded
 backoff. An absolute deadline bounds every in-flight GET and sleep. Each
 continuation carries the optional expected report identity; malformed poll
 observations preserve the last valid observation and remain safely GET-resumable.
+Deterministic result-size failures retain bounded operation/report/result/page
+handles and return a non-executable smaller-page adjustment.
 
 SOAP v202605 by default:
 
@@ -158,8 +164,9 @@ yield-group preview before apply; and filter-validated bounded empty-result
 recovery. Destructive ad-unit archive/deactivate/retirement intent also adds
 network and catalogue identity, dependency-probe, and retirement-assessment
 predecessors before the REST plan.
-The provider computes callable transitive prerequisites in deterministic
-topological order and models non-callable conditions separately. Direct
+The provider composes the complete applicable dependency graph, rejects cycles,
+then computes callable transitive prerequisites in deterministic topological
+order and models non-callable conditions separately. Direct
 report-operation discovery keeps the original run only as a non-callable
 cold-start condition: it is present with the reason not to rerun an existing
 operation, but is absent from allowed tools and schemas. Direct SOAP plan
@@ -173,9 +180,15 @@ semantic inventory results; companion and recovery records are separate OpenAI
 extra results so guidance does not inflate search counts. Full schemas and
 hosted-client metadata are emitted only when `include_schema=true`, and only
 when the complete direct-plus-companion selection contains at most five tools.
-Content-only clients receive a bounded actionable JSON projection with allowed
-tools, callable/condition workflow edges and reasons, recovery, and schema
-names; complete ranked records and schemas remain in structured content.
+Report-run starts use a non-read-only toolkit risk posture because they create
+an upstream job. Explicit `read_only=false` discovery exposes a direct start,
+while existing-operation continuation context replaces any ranked start with a
+non-callable condition record to prevent replay. Content-only clients receive a
+bounded actionable JSON projection with
+ordered ranked direct matches, descriptions and risk posture, allowed tools,
+callable/condition workflow edges and reasons, modern workflow fields, recovery,
+and schema names; complete ranked records and schemas remain in structured
+content.
 
 Recovery candidates are a typed static catalog covering every current tool
 group and both mutation classes where a group exposes both. Candidate examples
@@ -192,12 +205,13 @@ relaxes an upstream-safety filter merely to force a match. A clear, exact
 scratchpad request can instead expose the separately scoped local-state option
 described below; fail-closed searches cannot.
 Omitted or explicitly null `read_only` is normalized to `true` at the provider
-boundary. Ambiguous or truncated input emits no retry examples, and mutating
-candidates are eligible only under an explicit `read_only=false` filter.
-For stateful workflows, recovery orders an executable cold-start entry before
-continuations. Report discovery supplies network lookup, report catalog lookup,
-one report run, existing-operation polling, and completed-result row retrieval;
-`gam_scratchpad_open_session` precedes scratchpad ingestion.
+boundary. Ambiguous, truncated, negative, or exclusion-bearing intent emits no
+provider canned guidance, and mutating candidates are eligible only under an
+explicit `read_only=false` filter. For stateful workflows, scratchpad recovery
+orders the executable session entry before ingestion. Report-run starts are not
+canned retry examples; existing-operation polling and completed-result retrieval
+remain executable discovery paths, and continuation context suppresses duplicate
+starts.
 An explicit scratchpad-group search under `read_only=true` remains empty because
 all current scratchpad calls can touch local session state. Its recovery carries
 a separate `local_state_alternatives` contract. A query with strong scratchpad

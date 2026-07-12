@@ -54,9 +54,11 @@ metadata and stays within the toolkit's 32 KiB compact-selection budget. Set
 companion selection to at most five tools; broader schema requests fail closed.
 Unrecognized or truncated group text is omitted. The structured Contract V1
 envelope is capped at 48 KiB and the complete RMCP result at 64 KiB. A bounded
-actionable JSON text projection exposes allowed tools, workflow edges, recovery,
-and schema names to content-only clients without duplicating the full payload;
-complete records and requested schemas remain in `structuredContent.data`.
+actionable JSON text projection exposes ordered ranked direct matches with
+descriptions and risk posture, allowed tools, direct-versus-companion selection,
+modern workflow fields, recovery, and schema names to content-only clients
+without duplicating the full payload; complete records and requested schemas
+remain in `structuredContent.data`.
 Omit `read_only`, set it to `null`, or set `read_only=true` to search only non-mutating execution
 paths, including plans, previews, and no-mutation proof
 reads. Every current scratchpad tool is excluded because the pinned scratchpad
@@ -93,8 +95,10 @@ Discovery adds guided dependency edges:
 - `gam_yield_group_exclusions_preview` precedes
   `gam_yield_group_exclusions_apply` and is required for the guided sequence.
 
-SOAP prerequisites are transitive: direct plan discovery adds the builder;
-direct apply discovery adds builder then plan. Every reachable edge is emitted
+The provider composes the complete applicable dependency graph, rejects cycles,
+and then topologically sorts it deterministically. SOAP prerequisites are
+transitive: direct plan discovery adds the builder; direct apply discovery adds
+builder then plan. Every reachable edge is emitted
 even when its predecessor is already a semantic result, with
 `tool_already_selected` identifying that case. Only missing predecessor names
 are injected into allowed tools and schemas, so injection remains deduplicated
@@ -129,18 +133,18 @@ separate local-state record makes the opt-in, upstream reads, and scope classes
 explicit; its content-only projection retains a bounded rediscovery call,
 eligible/destructive counts, and access-class context. Fail-closed searches do
 not receive it.
-Ambiguous or truncated input marks recovery fail-closed and returns no canned
-example queries. Mutating examples require an explicit `read_only=false` search.
+Ambiguous, truncated, negative, or exclusion-bearing intent marks provider
+recovery fail-closed and returns no canned positive guidance. Mutating examples
+require an explicit `read_only=false` search.
 
-Recovery examples are entry-point aware. A broad reports recovery starts with
-`gam_report_run`, then offers `gam_report_operation_poll` and
-`gam_report_result_rows` only as explicit continuations. Guided report
-dependencies supply network/catalog lookup for a direct cold-start run and the
-poll/result continuation without claiming that any tool has already executed.
-When an existing `operation_name` is already being polled, `gam_report_run` is
-emitted only as a non-callable condition record with the reason not to duplicate
-the run; it is excluded from allowed tools and schemas. Optional SOAP builder
-guidance remains callable. A broad
+Report-run starts are entry-point aware and registered as non-read-only because
+starting a saved report creates an upstream job. An explicit
+`read_only=false` report-start search therefore exposes `gam_report_run`, its
+schema, and its toolkit risk posture. When discovery identifies an existing
+`operation_name` continuation, the same tool is instead emitted as a
+non-callable condition record so it cannot prompt a duplicate start.
+Existing-operation polling and completed-result retrieval remain executable
+discovery paths. Optional SOAP builder guidance remains callable. A broad
 scratchpad recovery starts with
 `gam_scratchpad_open_session`, then offers ingestion as an existing-session
 continuation.
@@ -441,8 +445,9 @@ Manager. It accepts:
 - optional wait controls
 - optional first-page fetch controls
 
-When `wait_for_completion=true`, the tool polls the Ad Manager long-running
-operation and returns the `report_result` resource name once complete. If
+When `wait_for_completion=true`, the tool consumes the validated POST response as
+the first long-running-operation observation, then polls only if needed and
+returns the `report_result` resource name once complete. If
 `fetch_first_page=true`, it also returns the first page of rows so the first
 successful report run is immediately useful.
 
@@ -450,10 +455,14 @@ When `wait_for_completion=false`, the tool sends the provider-required empty
 POST body, starts exactly one report run, and returns its `operation_name`.
 Continue that same run with
 `gam_report_operation_poll`; do not call `gam_report_run` again merely to poll.
+If the POST handoff is already complete, the tool returns the terminal result
+directly with `waited=false` and no redundant poll continuation.
 The poll tool validates the existing operation name, waits for completion, and
 can fetch the first result page without creating another run. The run request,
-returned operation, polled operation, `metadata.report`, and final
-`reportResult` must all bind to the same network/report identity.
+returned operation, polled operation, optional `metadata.report`, and final
+`reportResult` must all bind to the same network/report identity. A known
+requested report fills omitted metadata, but inconsistent present metadata and
+invalid `done`/`error`/`response` unions are rejected.
 Both the upstream handoff and caller input must match the exact
 `networks/{networkCode}/operations/reports/runs/{operationId}` resource shape;
 noncanonical values are rejected before polling.
@@ -468,13 +477,19 @@ Post-start timeout, transport, or provider-contract errors preserve
 observation, and a GET-only poll continuation. Timeout continuation uses a
 bounded larger timeout rather than repeating the expired value. Terminal
 operation errors and completed operations without a result do not offer another
-poll. Once the initial POST may have been dispatched, transport, body-read,
-response-bound, status, JSON, missing, malformed, or cross-target handoff
-failures all report an uncertain handoff, set `automatic_replay_safe=false`,
-and prohibit automatic reruns. If
+poll. Definitive 4xx run rejections are upstream API errors. Once the initial
+POST may otherwise have been dispatched, transport, body-read, response-bound,
+plausible server-status, JSON, missing, malformed, or cross-target handoff
+failures report an uncertain handoff, set `automatic_replay_safe=false`, and
+prohibit automatic reruns. An immediate terminal operation error is a redacted
+MCP error with no success continuation. If
 completion succeeds but first-page retrieval fails, the
 error instead preserves `report_result`, page size, and a
 `gam_report_result_rows` continuation.
+Deterministic upstream or final RMCP result-size failures instead preserve
+bounded operation/report/result/page handles and expose a non-executable smaller
+page adjustment. They do not repeat the rejected page size; a page already at
+size 1 has no smaller recommendation.
 
 Use `gam_report_result_rows` with the returned `report_result` when:
 
@@ -736,6 +751,10 @@ Typical flow:
 5. `gam_scratchpad_query` with read-only SQL.
 6. `gam_scratchpad_export_evidence_bundle` for a bounded markdown summary.
 7. `gam_scratchpad_close_session` when finished.
+
+Scratchpad report-row ingestion uses the same schema and runtime bounds as
+direct row retrieval: `page_size` is 1 through 1,000 and `page_token` is at most
+4,096 bytes.
 
 `gam_scratchpad_ingest_soap_line_items` accepts a bounded line-item PQL query.
 Queries must start with `WHERE`, `ORDER BY`, or `LIMIT`; the tool appends
