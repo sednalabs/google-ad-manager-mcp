@@ -8511,8 +8511,10 @@ mod tests {
     #[tokio::test]
     async fn report_poll_auth_bootstrap_requires_remediation_and_preserves_handle() {
         let operation_name = "networks/123/operations/reports/runs/789";
-        let mut settings = crate::Settings::default();
-        settings.service_account_json = Some("not valid service account JSON".to_string());
+        let settings = crate::Settings {
+            service_account_json: Some("not valid service account JSON".to_string()),
+            ..crate::Settings::default()
+        };
         let server_under_test =
             AdManagerServer::new(settings).expect("build auth-bootstrap report server");
         let result = server_under_test
