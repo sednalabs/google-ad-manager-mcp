@@ -132,10 +132,29 @@ fn find_tools_is_semantic_compact_and_recoverable() {
         })
         .expect("empty search recovery record");
     assert_eq!(recovery["status"], "no_matches");
+    assert_eq!(recovery["active_filter"]["group"], "missing-group");
+    assert_eq!(recovery["active_filter"]["read_only"], true);
+    assert_eq!(
+        recovery["retry"]["example_queries_validated_under_active_filter"],
+        true
+    );
+    assert_eq!(recovery["retry"]["example_queries"], json!([]));
+    assert_eq!(
+        recovery["available_groups"],
+        json!([
+            "catalog",
+            "discovery",
+            "networks",
+            "reports",
+            "setup",
+            "trafficking",
+        ])
+    );
     assert!(
-        recovery["available_groups"]
-            .as_array()
-            .is_some_and(|groups| !groups.is_empty())
+        serde_json::to_vec(empty_data)
+            .expect("recovery serializes")
+            .len()
+            <= 32 * 1024
     );
 
     let full = process.call_tool(
@@ -150,6 +169,148 @@ fn find_tools_is_semantic_compact_and_recoverable() {
             .is_some_and(|schemas| !schemas.is_empty())
     );
     assert!(full_data.get("openai_deferred_loading").is_some());
+}
+
+#[test]
+fn find_tools_recovery_examples_execute_under_active_filters() {
+    let mut process = StdioMcpProcess::start(env!("CARGO_BIN_EXE_google-ad-manager-mcp"));
+    let read_response = process.call_tool(
+        110,
+        "find_tools",
+        json!({"query":"quasar zeppelin","read_only":true,"limit":10}),
+    );
+    let read_data = &read_response["result"]["structuredContent"]["data"];
+    let read_recovery = search_recovery(read_data);
+    assert_eq!(read_recovery["active_filter"]["group"], Value::Null);
+    assert_eq!(read_recovery["active_filter"]["read_only"], true);
+    assert_eq!(
+        read_recovery["retry"]["example_queries_validated_under_active_filter"],
+        true
+    );
+    let read_queries = recovery_example_queries(read_recovery);
+    assert!(!read_queries.is_empty());
+    for forbidden in [
+        "apply an allowlisted REST write",
+        "apply a SOAP trafficking creative operation",
+        "apply descendant-safe yield group exclusions",
+        "analyze line item delivery in a scratchpad",
+    ] {
+        assert!(!read_queries.contains(&forbidden));
+    }
+    let mut request_id = 200_u64;
+    for query in read_queries {
+        let response = process.call_tool(
+            request_id,
+            "find_tools",
+            json!({"query":query,"read_only":true,"limit":1}),
+        );
+        request_id += 1;
+        let data = &response["result"]["structuredContent"]["data"];
+        let direct = direct_results(data);
+        assert_eq!(direct.len(), 1, "query: {query}; data: {data}");
+        assert_eq!(direct[0]["read_only"], true);
+    }
+    assert!(
+        serde_json::to_vec(read_data)
+            .expect("read-only recovery serializes")
+            .len()
+            <= 32 * 1024
+    );
+
+    let write_response = process.call_tool(
+        220,
+        "find_tools",
+        json!({
+            "query":"quasar zeppelin",
+            "group":" trafficking ",
+            "read_only":false,
+            "limit":10
+        }),
+    );
+    let write_data = &write_response["result"]["structuredContent"]["data"];
+    let write_recovery = search_recovery(write_data);
+    assert_eq!(write_recovery["active_filter"]["group"], "trafficking");
+    assert_eq!(write_recovery["active_filter"]["read_only"], false);
+    let write_queries = recovery_example_queries(write_recovery);
+    assert_eq!(
+        write_queries,
+        vec![
+            "apply an allowlisted REST write",
+            "apply a SOAP trafficking creative operation",
+            "apply descendant-safe yield group exclusions",
+        ]
+    );
+    for query in write_queries {
+        let response = process.call_tool(
+            request_id,
+            "find_tools",
+            json!({
+                "query":query,
+                "group":"trafficking",
+                "read_only":false,
+                "limit":1
+            }),
+        );
+        request_id += 1;
+        let data = &response["result"]["structuredContent"]["data"];
+        let direct = direct_results(data);
+        assert_eq!(direct.len(), 1, "query: {query}; data: {data}");
+        assert_eq!(direct[0]["group"], "trafficking");
+        assert_eq!(direct[0]["read_only"], false);
+    }
+    assert!(
+        serde_json::to_vec(write_data)
+            .expect("write recovery serializes")
+            .len()
+            <= 32 * 1024
+    );
+}
+
+#[test]
+fn find_tools_rejects_zero_and_preserves_toolkit_limit_diagnostics() {
+    let mut process = StdioMcpProcess::start(env!("CARGO_BIN_EXE_google-ad-manager-mcp"));
+    let invalid = process.call_tool(230, "find_tools", json!({"limit":0}));
+    let invalid_result = &invalid["result"]["structuredContent"];
+    assert_eq!(invalid_result["ok"], false);
+    assert_eq!(invalid_result["error"]["code"], "invalid_input");
+    assert_eq!(invalid_result["error"]["reason"], "validation_failed");
+    assert!(
+        invalid_result["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("limit") && message.contains("at least 1"))
+    );
+    assert!(invalid_result.get("data").is_none());
+
+    let clamped = process.call_tool(
+        231,
+        "find_tools",
+        json!({"group":"trafficking","limit":101}),
+    );
+    let clamped_data = &clamped["result"]["structuredContent"]["data"];
+    assert_eq!(clamped_data["match_summary"]["result_limit"], 100);
+    assert!(
+        clamped_data["match_summary"]["truncation_reasons"]
+            .as_array()
+            .is_some_and(|reasons| reasons.contains(&json!("result_limit_clamped")))
+    );
+
+    let oversized_group = format!("trafficking{}", "x".repeat(1024));
+    let truncated_group = process.call_tool(
+        232,
+        "find_tools",
+        json!({"query":"quasar zeppelin","group":oversized_group,"read_only":false}),
+    );
+    let truncated_group_data = &truncated_group["result"]["structuredContent"]["data"];
+    assert!(
+        truncated_group_data["match_summary"]["truncation_reasons"]
+            .as_array()
+            .is_some_and(|reasons| reasons.contains(&json!("group_input")))
+    );
+    let truncated_group_recovery = search_recovery(truncated_group_data);
+    assert_eq!(
+        truncated_group_recovery["active_filter"]["read_only"],
+        false
+    );
 }
 
 #[test]
@@ -647,12 +808,36 @@ fn retirement_assessment_rejects_noncanonical_targets_at_stdio_boundary() {
     }
 }
 
-fn sorted_direct_names(data: &Value) -> Vec<&str> {
-    let mut names = data["results"]
+fn search_recovery(data: &Value) -> &Value {
+    data["results"]
+        .as_array()
+        .expect("discovery results")
+        .iter()
+        .find(|result| result["type"] == "search_recovery")
+        .expect("search recovery")
+}
+
+fn recovery_example_queries(recovery: &Value) -> Vec<&str> {
+    recovery["retry"]["example_queries"]
+        .as_array()
+        .expect("example queries")
+        .iter()
+        .map(|query| query.as_str().expect("example query"))
+        .collect()
+}
+
+fn direct_results(data: &Value) -> Vec<&Value> {
+    data["results"]
         .as_array()
         .expect("discovery results")
         .iter()
         .filter(|result| result["type"] == "tool")
+        .collect()
+}
+
+fn sorted_direct_names(data: &Value) -> Vec<&str> {
+    let mut names = direct_results(data)
+        .into_iter()
         .map(|result| result["name"].as_str().expect("direct tool name"))
         .collect::<Vec<_>>();
     names.sort_unstable();

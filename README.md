@@ -278,9 +278,18 @@ edges without changing semantic match counts: REST plan before apply, optional
 SOAP payload builder before SOAP plan, SOAP plan before SOAP apply, and yield
 preview before yield apply. SOAP prerequisites are transitive, so direct SOAP
 apply discovery adds the builder followed by the plan. Empty searches return
-available groups and bounded retry examples without relaxing `read_only`. Set
-`include_schema=true` only after narrowing the result set when full tool schemas
-are required.
+available groups and bounded retry examples without relaxing `read_only`. Each
+example is retained only when the expected tool ranks first at `limit=1` under
+the same strict inventory, toolkit-normalized exact `group`, and `read_only`
+filter. Recovery keeps the compatible string array at `retry.example_queries`,
+reports `active_filter`, and marks
+`retry.example_queries_validated_under_active_filter=true`; an invalid group can
+therefore return no examples while still listing valid alternatives.
+
+`limit` defaults to 20 and must be at least 1. Values above 100 are passed to
+the toolkit, which clamps `match_summary.result_limit` to 100 and reports
+`result_limit_clamped`. Set `include_schema=true` only after narrowing the result
+set when full tool schemas are required.
 Omit `read_only` to search all tools. Set `read_only=true` to search only
 non-mutating execution paths, including plans, previews, and no-mutation proof
 reads. Every current scratchpad tool is excluded because the pinned scratchpad

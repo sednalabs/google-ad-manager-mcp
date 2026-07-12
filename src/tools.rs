@@ -81,8 +81,10 @@ pub struct FindToolsArgs {
     /// false for only write-like or local-state-mutating tools.
     #[serde(default)]
     pub read_only: Option<bool>,
-    /// Maximum ranked inventory matches. Defaults to 20 and is capped at 100.
+    /// Maximum ranked inventory matches. Defaults to 20. Values above 100 are
+    /// toolkit-clamped and reported with result_limit_clamped.
     #[serde(default)]
+    #[schemars(range(min = 1))]
     pub limit: Option<usize>,
     /// Include full tool schemas and hosted-client metadata. Defaults to false for compact agent discovery.
     #[serde(default)]
@@ -507,14 +509,20 @@ pub struct ScratchpadEvidenceBundleArgs {
 impl AdManagerServer {
     #[tool(
         name = "find_tools",
-        description = "Semantically search Google Ad Manager MCP tools with ranked matches, guided dependency edges, completeness metadata, and empty-result recovery."
+        description = "Semantically search Google Ad Manager MCP tools with ranked matches, guided dependency edges, completeness metadata, and filter-validated empty-result recovery."
     )]
     async fn find_tools(
         &self,
         Parameters(args): Parameters<FindToolsArgs>,
     ) -> Result<CallToolResult, McpError> {
         let started = Instant::now();
-        let limit = args.limit.unwrap_or(20).clamp(1, 100);
+        if args.limit == Some(0) {
+            return Ok(contract::error(
+                AdManagerError::invalid("limit", "must be at least 1"),
+                started,
+            ));
+        }
+        let limit = args.limit.unwrap_or(20);
         let filter = ToolSearchFilter {
             query: args.query.clone(),
             group: args.group.clone(),
@@ -526,11 +534,17 @@ impl AdManagerServer {
             ToolOperation::List,
             &ToolInventoryPolicy::strict(),
         );
+        let recovery_filter = ToolSearchFilter {
+            query: ranked.response.query.clone(),
+            group: ranked.response.group.clone(),
+            read_only: ranked.response.read_only,
+            limit: filter.limit,
+        };
         let companions = workflow_companions(&ranked.response.results);
         let companion_names = companion_tool_names(&companions);
         let mut extra_results = companion_result_records(&companions);
         if let Some(recovery) =
-            recovery_result_record(self.inventory(), &filter, &ranked.match_summary)
+            recovery_result_record(self.inventory(), &recovery_filter, &ranked.match_summary)
         {
             extra_results.push(recovery);
         }
