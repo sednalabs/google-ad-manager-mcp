@@ -136,6 +136,10 @@ fn find_tools_is_semantic_compact_and_recoverable() {
                 .len()
                 <= 32 * 1024
         );
+        assert!(data.get("query").is_none(), "query: {query}");
+        assert_eq!(data["request_summary"]["query_supplied"], true);
+        assert_eq!(data["request_summary"]["raw_query_returned"], false);
+        assert_complete_discovery_result_is_bounded(&response);
     }
 
     let empty = process.call_tool(
@@ -158,7 +162,9 @@ fn find_tools_is_semantic_compact_and_recoverable() {
         })
         .expect("empty search recovery record");
     assert_eq!(recovery["status"], "no_matches");
-    assert_eq!(recovery["active_filter"]["group"], "missing-group");
+    assert_eq!(recovery["active_filter"]["group"], Value::Null);
+    assert_eq!(recovery["active_filter"]["group_supplied"], true);
+    assert_eq!(recovery["active_filter"]["group_recognized"], false);
     assert_eq!(recovery["active_filter"]["read_only"], true);
     assert_eq!(
         recovery["retry"]["example_queries_validated_under_active_filter"],
@@ -186,7 +192,7 @@ fn find_tools_is_semantic_compact_and_recoverable() {
     let full = process.call_tool(
         109,
         "find_tools",
-        json!({"query":"report rows","limit":2,"include_schema":true}),
+        json!({"query":"report rows","limit":1,"include_schema":true}),
     );
     let full_data = &full["result"]["structuredContent"]["data"];
     assert!(
@@ -195,6 +201,18 @@ fn find_tools_is_semantic_compact_and_recoverable() {
             .is_some_and(|schemas| !schemas.is_empty())
     );
     assert!(full_data.get("openai_deferred_loading").is_some());
+    assert!(full_data.get("query").is_none());
+    assert_eq!(full_data["request_summary"]["raw_query_returned"], false);
+    assert!(
+        serde_json::to_vec(&full["result"])
+            .expect("complete discovery result serializes")
+            .len()
+            <= 64 * 1024
+    );
+    assert_eq!(
+        full["result"]["content"][0]["text"],
+        "Tool discovery completed. Use structuredContent.data for ranked tools and workflow guidance."
+    );
 }
 
 #[test]
@@ -264,7 +282,8 @@ fn find_tools_models_complete_report_cold_start_and_async_continuation() {
         json!({
             "query":"fetch rows from a completed report result",
             "group":"reports",
-            "limit":1
+            "limit":1,
+            "include_schema":true
         }),
     );
     let rows_data = &rows_response["result"]["structuredContent"]["data"];
@@ -283,6 +302,18 @@ fn find_tools_models_complete_report_cold_start_and_async_continuation() {
         ]
     );
     assert_eq!(workflow_edges(rows_data).len(), 4);
+    assert_eq!(
+        sorted_schema_names(rows_data),
+        vec![
+            "gam_network_catalog_list",
+            "gam_networks_list",
+            "gam_report_operation_poll",
+            "gam_report_result_rows",
+            "gam_report_run",
+        ]
+    );
+    assert_eq!(rows_data["response_limits"]["max_schema_tools"], 5);
+    assert_complete_discovery_result_is_bounded(&rows_response);
 }
 
 #[test]
@@ -474,6 +505,51 @@ fn find_tools_rejects_zero_and_preserves_toolkit_limit_diagnostics() {
         query_terminal_marker,
         true,
     );
+}
+
+#[test]
+fn find_tools_does_not_echo_free_form_request_inputs() {
+    let mut process = StdioMcpProcess::start(env!("CARGO_BIN_EXE_google-ad-manager-mcp"));
+    let query_marker = "leading-query-secret-marker";
+    let query_response = process.call_tool(
+        234,
+        "find_tools",
+        json!({"query":format!("{query_marker} inspect inventory"),"read_only":true}),
+    );
+    let query_data = &query_response["result"]["structuredContent"]["data"];
+    assert!(query_data.get("query").is_none());
+    assert_eq!(query_data["request_summary"]["query_supplied"], true);
+    assert_eq!(query_data["request_summary"]["raw_query_returned"], false);
+    assert!(
+        query_data["match_summary"]
+            .get("normalized_query_terms")
+            .is_none()
+    );
+    assert!(
+        query_data["match_summary"]
+            .get("excluded_query_terms")
+            .is_none()
+    );
+    assert!(
+        query_data["match_summary"]
+            .get("ignored_query_terms")
+            .is_none()
+    );
+    assert_complete_discovery_result_is_bounded_and_omits(&query_response, query_marker);
+
+    let group_marker = "leading-group-secret-marker";
+    let group_response = process.call_tool(
+        235,
+        "find_tools",
+        json!({"query":"quasar zeppelin","group":group_marker,"read_only":true}),
+    );
+    let group_data = &group_response["result"]["structuredContent"]["data"];
+    assert!(group_data.get("group").is_none() || group_data["group"].is_null());
+    let recovery = search_recovery(group_data);
+    assert_eq!(recovery["active_filter"]["group"], Value::Null);
+    assert_eq!(recovery["active_filter"]["group_supplied"], true);
+    assert_eq!(recovery["active_filter"]["group_recognized"], false);
+    assert_complete_discovery_result_is_bounded_and_omits(&group_response, group_marker);
 }
 
 #[test]
@@ -758,7 +834,7 @@ fn find_tools_full_schema_includes_exact_soap_dependency_tools() {
 }
 
 #[test]
-fn find_tools_broad_trafficking_keeps_edges_without_duplicate_injection() {
+fn find_tools_rejects_broad_schema_expansion() {
     let mut process = StdioMcpProcess::start(env!("CARGO_BIN_EXE_google-ad-manager-mcp"));
     let response = process.call_tool(
         134,
@@ -770,72 +846,17 @@ fn find_tools_broad_trafficking_keeps_edges_without_duplicate_injection() {
             "include_schema":true
         }),
     );
-    let data = &response["result"]["structuredContent"]["data"];
-    let expected_direct_names = vec![
-        "gam_rest_write_apply",
-        "gam_soap_trafficking_apply",
-        "gam_yield_group_exclusions_apply",
-    ];
-    let expected_allowed_names = vec![
-        "gam_rest_write_apply",
-        "gam_rest_write_plan",
-        "gam_soap_payload_build",
-        "gam_soap_trafficking_apply",
-        "gam_soap_trafficking_plan",
-        "gam_yield_group_exclusions_apply",
-        "gam_yield_group_exclusions_preview",
-    ];
-    assert_eq!(sorted_direct_names(data), expected_direct_names);
-    assert_eq!(
-        sorted_string_values(&data["openai_allowed_tools"]),
-        expected_allowed_names
+    let result = &response["result"]["structuredContent"];
+    assert_eq!(result["ok"], false);
+    assert_eq!(result["error"]["code"], "invalid_input");
+    assert_eq!(result["error"]["reason"], "validation_failed");
+    assert!(
+        result["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("no more than 5 tools"))
     );
-    assert_eq!(sorted_schema_names(data), expected_allowed_names);
-    assert_eq!(
-        workflow_edges(data),
-        vec![
-            json!({
-                "relation": "before",
-                "name": "gam_rest_write_plan",
-                "before_tool": "gam_rest_write_apply",
-                "tool_already_selected": false,
-                "required": true,
-                "required_for_guided_sequence": true,
-                "required_semantics": "guided_sequence_compatibility_alias",
-                "server_call_enforced": false,
-            }),
-            json!({
-                "relation": "before",
-                "name": "gam_soap_payload_build",
-                "before_tool": "gam_soap_trafficking_plan",
-                "tool_already_selected": false,
-                "required": false,
-                "required_for_guided_sequence": false,
-                "required_semantics": "guided_sequence_compatibility_alias",
-                "server_call_enforced": false,
-            }),
-            json!({
-                "relation": "before",
-                "name": "gam_soap_trafficking_plan",
-                "before_tool": "gam_soap_trafficking_apply",
-                "tool_already_selected": false,
-                "required": true,
-                "required_for_guided_sequence": true,
-                "required_semantics": "guided_sequence_compatibility_alias",
-                "server_call_enforced": false,
-            }),
-            json!({
-                "relation": "before",
-                "name": "gam_yield_group_exclusions_preview",
-                "before_tool": "gam_yield_group_exclusions_apply",
-                "tool_already_selected": false,
-                "required": true,
-                "required_for_guided_sequence": true,
-                "required_semantics": "guided_sequence_compatibility_alias",
-                "server_call_enforced": false,
-            }),
-        ]
-    );
+    assert!(result.get("data").is_none());
+    assert!(serde_json::to_vec(&response["result"]).unwrap().len() <= 64 * 1024);
 }
 
 #[test]
@@ -1106,9 +1127,24 @@ fn assert_discovery_input_fails_closed(
 
     let compact_data = serde_json::to_string(data).expect("compact discovery data serializes");
     assert!(compact_data.len() <= 32 * 1024);
-    let full_result = serde_json::to_string(&response["result"])
-        .expect("complete MCP discovery result serializes");
-    assert!(!full_result.contains(terminal_marker));
+    assert_complete_discovery_result_is_bounded_and_omits(response, terminal_marker);
+}
+
+fn assert_complete_discovery_result_is_bounded_and_omits(response: &Value, marker: &str) {
+    let full_result =
+        serde_json::to_vec(&response["result"]).expect("complete MCP discovery result serializes");
+    assert!(full_result.len() <= 64 * 1024);
+    assert!(
+        !String::from_utf8(full_result)
+            .expect("UTF-8 MCP discovery result")
+            .contains(marker)
+    );
+}
+
+fn assert_complete_discovery_result_is_bounded(response: &Value) {
+    let full_result =
+        serde_json::to_vec(&response["result"]).expect("complete MCP discovery result serializes");
+    assert!(full_result.len() <= 64 * 1024);
 }
 
 fn recovery_example_queries(recovery: &Value) -> Vec<&str> {

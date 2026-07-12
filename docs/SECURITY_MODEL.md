@@ -38,6 +38,14 @@ whether a low-cost access check succeeded. They must not return:
 - private keys
 - whole credential files
 
+`find_tools` also treats its free-form query and group inputs as potentially
+secret-bearing. Public discovery results omit raw query text and query-derived
+terms, return an exact group only when it matches a registered strict
+list-visible group, and otherwise expose only presence, recognition, and term
+counts. Narrow schema expansion is capped at five direct-plus-companion tools.
+The complete RMCP result is guarded at 64 KiB with a 48 KiB structured-envelope
+cap and a fixed short text summary rather than a duplicate JSON payload.
+
 ## Tool-surface restrictions
 
 The server intentionally does not expose:

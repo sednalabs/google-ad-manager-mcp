@@ -41,16 +41,20 @@ All tools return Contract V1 envelopes: `ok/data/meta` on success and
 
 `find_tools` accepts a natural-language `query` plus optional exact `group`,
 `read_only`, and `limit` filters. Deterministic ranked matching ignores common
-conversational words, reports normalized and ignored terms, and returns total,
-returned, limit, and truncation state. `limit` defaults to 20 and must be at
+conversational words and returns total, returned, limit, and truncation state.
+It does not return free-form query text or query-derived terms;
+`request_summary` contains only presence, recognition, and term counts. `limit`
+defaults to 20 and must be at
 least 1. Values above 100 are passed through so the toolkit reports a
 `match_summary.result_limit` of 100 and the `result_limit_clamped` reason.
 
 The default `include_schema=false` response omits schemas and hosted-client
 metadata and stays within the toolkit's 32 KiB compact-selection budget. Set
-`include_schema=true` only after discovery has narrowed the candidates.
-Oversized query or group inputs remain bounded, report their input truncation
-reason, mark recovery fail-closed, and do not echo the full input.
+`include_schema=true` only after discovery has narrowed the complete direct and
+companion selection to at most five tools; broader schema requests fail closed.
+Unrecognized group text is omitted. The structured Contract V1 envelope is
+capped at 48 KiB and the complete RMCP result at 64 KiB, with a short text
+summary rather than a duplicate JSON payload.
 Omit `read_only`, set it to `null`, or set `read_only=true` to search only non-mutating execution
 paths, including plans, previews, and no-mutation proof
 reads. Every current scratchpad tool is excluded because the pinned scratchpad

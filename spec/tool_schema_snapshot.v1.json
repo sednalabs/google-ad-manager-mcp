@@ -16,7 +16,7 @@
           },
           "include_schema": {
             "default": false,
-            "description": "Include full tool schemas and hosted-client metadata. Defaults to false for compact agent discovery.",
+            "description": "Include full tool schemas and hosted-client metadata when the complete\ndirect-plus-companion selection contains no more than five tools.\nDefaults to false for compact agent discovery.",
             "type": "boolean"
           },
           "limit": {

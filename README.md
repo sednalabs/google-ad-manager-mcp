@@ -301,9 +301,13 @@ ingestion into that session.
 `limit` defaults to 20 and must be at least 1. Values above 100 are passed to
 the toolkit, which clamps `match_summary.result_limit` to 100 and reports
 `result_limit_clamped`. Set `include_schema=true` only after narrowing the result
-set when full tool schemas are required.
-Oversized query or group inputs retain bounded fail-closed recovery and do not
-echo the full input.
+set when full tool schemas are required. Schema expansion is limited to five
+selected direct-plus-companion tools and fails closed above that limit.
+Free-form query text, query terms, and unrecognized group text are never
+returned. `request_summary` keeps only presence, recognition, and term-count
+diagnostics. The compact selection remains within the toolkit's 32 KiB data
+budget; the complete RMCP result uses a short text summary, is capped at 64 KiB,
+and caps its structured Contract V1 envelope at 48 KiB.
 Omit `read_only`, set it to `null`, or set `read_only=true` to search only non-mutating execution
 paths, including plans, previews, and no-mutation proof
 reads. Every current scratchpad tool is excluded because the pinned scratchpad

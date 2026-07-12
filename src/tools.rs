@@ -39,7 +39,8 @@ use crate::evidence::{
 use crate::fingerprint::stable_fingerprint;
 use crate::probe_projection::{ProbeKind, bounded_probe_error, bounded_probe_success};
 use crate::tool_discovery::{
-    companion_result_records, companion_tool_names, recovery_result_record, workflow_companions,
+    companion_result_records, companion_tool_names, recognized_group_filter,
+    recovery_result_record, workflow_companions,
 };
 use crate::{AdManagerError, AdManagerServer, MANAGE_SCOPE, McpError};
 use mcp_toolkit_core::guarded_action::{
@@ -58,6 +59,9 @@ const DEPENDENCY_LINE_ITEM_MATCH_SAMPLE_LIMIT: usize = 50;
 const DEPENDENCY_LINE_ITEM_XML_SAMPLE_BYTES: usize = 4096;
 const PROBE_DIAGNOSTIC_SAMPLE_BYTES: usize = 800;
 const PROBE_TRANSPORT_METADATA_SAMPLE_LIMIT: usize = 50;
+const FIND_TOOLS_MAX_SCHEMA_TOOLS: usize = 5;
+const FIND_TOOLS_MAX_MODEL_VISIBLE_BYTES: usize = 48 * 1024;
+const FIND_TOOLS_MAX_RMCP_RESULT_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct GetStartedArgs {}
@@ -87,7 +91,9 @@ pub struct FindToolsArgs {
     #[serde(default)]
     #[schemars(range(min = 1))]
     pub limit: Option<usize>,
-    /// Include full tool schemas and hosted-client metadata. Defaults to false for compact agent discovery.
+    /// Include full tool schemas and hosted-client metadata when the complete
+    /// direct-plus-companion selection contains no more than five tools.
+    /// Defaults to false for compact agent discovery.
     #[serde(default)]
     pub include_schema: bool,
 }
@@ -524,6 +530,33 @@ pub struct ScratchpadEvidenceBundleArgs {
     pub sample_rows_per_table: Option<u64>,
 }
 
+fn bounded_find_tools_result(data: Value, started: Instant) -> CallToolResult {
+    let result = contract::success_with_text_summary(
+        data,
+        "Tool discovery completed. Use structuredContent.data for ranked tools and workflow guidance.",
+        started,
+    );
+    let model_visible_bytes = result
+        .structured_content
+        .as_ref()
+        .and_then(|value| serde_json::to_vec(value).ok())
+        .map(|bytes| bytes.len())
+        .unwrap_or(FIND_TOOLS_MAX_MODEL_VISIBLE_BYTES + 1);
+    let wire_bytes = serde_json::to_vec(&result)
+        .map(|bytes| bytes.len())
+        .unwrap_or(FIND_TOOLS_MAX_RMCP_RESULT_BYTES + 1);
+    if model_visible_bytes > FIND_TOOLS_MAX_MODEL_VISIBLE_BYTES
+        || wire_bytes > FIND_TOOLS_MAX_RMCP_RESULT_BYTES
+    {
+        return contract::result_contract_error(
+            "find_tools",
+            "discovery exceeded its model-visible or complete RMCP result limit; narrow the query, filters, result limit, or schema request",
+            started,
+        );
+    }
+    result
+}
+
 #[tool_router(router = tool_router_ad_manager, vis = "pub")]
 impl AdManagerServer {
     #[tool(
@@ -548,7 +581,7 @@ impl AdManagerServer {
             read_only: Some(args.read_only.unwrap_or(true)),
             limit: Some(limit),
         };
-        let ranked = self.inventory().search_ranked(
+        let mut ranked = self.inventory().search_ranked(
             &filter,
             ToolOperation::List,
             &ToolInventoryPolicy::strict(),
@@ -567,14 +600,26 @@ impl AdManagerServer {
         {
             extra_results.push(recovery);
         }
+        let mut selected_names = ranked
+            .response
+            .results
+            .iter()
+            .map(|result| result.name.clone())
+            .collect::<BTreeSet<_>>();
+        selected_names.extend(companion_names.iter().map(|name| (*name).to_string()));
+        if args.include_schema && selected_names.len() > FIND_TOOLS_MAX_SCHEMA_TOOLS {
+            return Ok(contract::error(
+                AdManagerError::invalid(
+                    "include_schema",
+                    format!(
+                        "schema expansion selected {} direct and companion tools; narrow the query or filters until no more than {FIND_TOOLS_MAX_SCHEMA_TOOLS} tools are selected",
+                        selected_names.len()
+                    ),
+                ),
+                started,
+            ));
+        }
         let schemas = if args.include_schema {
-            let mut selected_names = ranked
-                .response
-                .results
-                .iter()
-                .map(|result| result.name.clone())
-                .collect::<BTreeSet<_>>();
-            selected_names.extend(companion_names.iter().map(|name| (*name).to_string()));
             let mut schema_map = serde_json::Map::new();
             for tool in self.tool_schema_snapshot() {
                 if selected_names.contains(tool.name.as_ref()) {
@@ -585,6 +630,26 @@ impl AdManagerServer {
         } else {
             None
         };
+        let request_summary = json!({
+            "query_supplied": args.query.as_ref().is_some_and(|query| !query.trim().is_empty()),
+            "group_supplied": args.group.as_ref().is_some_and(|group| !group.trim().is_empty()),
+            "group_recognized": args.group.as_ref().is_none_or(|group| {
+                group.trim().is_empty()
+                    || recognized_group_filter(self.inventory(), Some(group.as_str())).is_some()
+            }),
+            "raw_query_returned": false,
+            "query_term_counts": {
+                "normalized": ranked.match_summary.normalized_query_terms.len(),
+                "excluded": ranked.match_summary.excluded_query_terms.len(),
+                "ignored": ranked.match_summary.ignored_query_terms.len(),
+            },
+        });
+        ranked.response.query = None;
+        ranked.response.group =
+            recognized_group_filter(self.inventory(), ranked.response.group.as_deref());
+        ranked.match_summary.normalized_query_terms.clear();
+        ranked.match_summary.excluded_query_terms.clear();
+        ranked.match_summary.ignored_query_terms.clear();
         let response = ranked
             .with_schemas(schemas)
             .with_metadata_label("ranked compact tool_search metadata contract")
@@ -596,7 +661,29 @@ impl AdManagerServer {
         } else {
             response.to_compact_value()
         };
-        Ok(contract::success(value, started))
+        let Some(mut value) = value.as_object().cloned() else {
+            return Ok(contract::result_contract_error(
+                "find_tools",
+                "toolkit discovery projection was not a JSON object",
+                started,
+            ));
+        };
+        value.remove("query");
+        if let Some(Value::Object(match_summary)) = value.get_mut("match_summary") {
+            match_summary.remove("normalized_query_terms");
+            match_summary.remove("excluded_query_terms");
+            match_summary.remove("ignored_query_terms");
+        }
+        value.insert("request_summary".to_string(), request_summary);
+        value.insert(
+            "response_limits".to_string(),
+            json!({
+                "max_schema_tools": FIND_TOOLS_MAX_SCHEMA_TOOLS,
+                "max_model_visible_bytes": FIND_TOOLS_MAX_MODEL_VISIBLE_BYTES,
+                "max_rmcp_result_bytes": FIND_TOOLS_MAX_RMCP_RESULT_BYTES,
+            }),
+        );
+        Ok(bounded_find_tools_result(Value::Object(value), started))
     }
 
     #[tool(
