@@ -221,6 +221,40 @@ fn find_tools_pairs_apply_results_with_plan_or_preview() {
 }
 
 #[test]
+fn find_tools_read_only_filter_excludes_local_scratchpad_writes() {
+    let mut process = StdioMcpProcess::start(env!("CARGO_BIN_EXE_google-ad-manager-mcp"));
+    let response = process.call_tool(
+        125,
+        "find_tools",
+        json!({
+            "query":"scratchpad",
+            "group":"scratchpad",
+            "read_only":true,
+            "limit":100
+        }),
+    );
+    let data = &response["result"]["structuredContent"]["data"];
+    let allowed = data["openai_allowed_tools"]
+        .as_array()
+        .expect("allowed tools");
+    for mutating_name in [
+        "gam_scratchpad_open_session",
+        "gam_scratchpad_close_session",
+        "gam_scratchpad_drop_table",
+        "gam_scratchpad_ingest_network_catalog",
+        "gam_scratchpad_ingest_report_result_rows",
+        "gam_scratchpad_ingest_soap_line_items",
+    ] {
+        assert!(
+            !allowed.contains(&json!(mutating_name)),
+            "read-only discovery allowed {mutating_name}: {data}"
+        );
+    }
+    assert!(allowed.contains(&json!("gam_scratchpad_query")));
+    assert!(allowed.contains(&json!("gam_scratchpad_export_evidence_bundle")));
+}
+
+#[test]
 fn probe_handlers_reject_invalid_soap_versions_before_provider_access() {
     let mut process = StdioMcpProcess::start(env!("CARGO_BIN_EXE_google-ad-manager-mcp"));
     for (id, tool_name, arguments) in [

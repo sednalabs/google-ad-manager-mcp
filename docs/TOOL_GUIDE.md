@@ -46,6 +46,11 @@ returned, limit, and truncation state.
 The default `include_schema=false` response omits schemas and hosted-client
 metadata and stays within the toolkit's 32 KiB compact-selection budget. Set
 `include_schema=true` only after discovery has narrowed the candidates.
+`read_only=true` excludes Google Ad Manager mutations and local scratchpad state
+changes. Scratchpad query, listing, and evidence export remain available, while
+session creation/closure, table drops, and ingestion require an unfiltered or
+`read_only=false` search. Those tool-local writes are labelled mutating (or
+destructive for drop/close) without implying an upstream GAM write.
 
 Apply discovery is plan-first:
 
