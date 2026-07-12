@@ -44,7 +44,7 @@ query surface, or default live write operations.
 - [Decision 0003: Guarded SOAP trafficking adapter](docs/decision-0003-guarded-soap-trafficking-adapter.md)
 - [Decision 0004: Exchange and protection proof surface](docs/decision-0004-exchange-protection-proof.md)
 - [Decision 0005: Ad-unit dependency proof](docs/decision-0005-ad-unit-dependency-proof.md)
-- [Decision 0006: Staged ad-unit retirement assessment](docs/decision-0006-staged-ad-unit-retirement-assessment.md)
+- [Decision 0006: Evidence-graded ad-unit retirement assessment](docs/decision-0006-staged-ad-unit-retirement-assessment.md)
 - [Releasing](docs/RELEASING.md)
 
 ## Install
@@ -112,9 +112,9 @@ After auth is proven:
 4. `gam_ad_unit_dependency_probe` when you need read-only dependency proof
    before ad-unit cleanup, archive, or retargeting decisions
 5. `gam_ad_unit_retirement_assessment` to prove exact current identity and a
-   bounded, numeric-id-ordered hierarchy/descendant scan, then grade optional
-   exact-target evidence receipts while the final recommendation remains
-   explicitly `not_run`
+   bounded, numeric-id-ordered hierarchy/descendant scan, grade exact-target
+   evidence receipts, and return a conservative recommendation that still
+   requires explicit operator review and never authorizes a mutation
 6. `gam_report_run`
 7. `gam_report_result_rows` when a report result has more pages
 8. `gam_trafficking_tool_matrix` before planning writes

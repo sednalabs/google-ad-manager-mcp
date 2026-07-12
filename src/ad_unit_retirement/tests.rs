@@ -2,7 +2,10 @@ use std::collections::BTreeMap;
 
 use serde_json::{Value, json};
 
-use crate::evidence::{EVIDENCE_PRODUCER_CONTRACT_VERSION, EvidenceSource, EvidenceState};
+use crate::evidence::{
+    EVIDENCE_PRODUCER_CONTRACT_VERSION, EvidenceSource, EvidenceState, MAX_CONTRACT_ENVELOPE_BYTES,
+    MAX_RMCP_TRANSPORT_BYTES,
+};
 
 use super::descendants::*;
 use super::inventory::*;
@@ -566,6 +569,199 @@ fn assessment_fingerprint_is_network_and_target_bound() {
     assert_ne!(
         build("1234567", "200")["assessment_fingerprint"],
         build("1234567", "201")["assessment_fingerprint"]
+    );
+}
+
+fn complete_evidence_summary() -> Value {
+    json!({
+        "dependency":{"state":"complete_clear"},
+        "delivery":{"state":"complete_clear"},
+        "exchange_protection":{"state":"complete_clear"},
+        "site_contract":{"state":"complete_clear"},
+        "telemetry":{"state":"complete_clear"}
+    })
+}
+
+#[test]
+fn recommendation_prioritizes_confirmed_blockers_over_incomplete_surfaces() {
+    let mut evidence = complete_evidence_summary();
+    evidence["dependency"]["state"] = Value::String("partial_blocked".to_string());
+    evidence["telemetry"]["state"] = Value::String("not_run".to_string());
+    let recommendation = recommendation(
+        &json!({"proof_state":"complete_clear"}),
+        &json!({
+            "proof_state":"partial_capped",
+            "blocking_external_descendant_count":1,
+            "requires_child_first_sequence":true,
+            "required_child_first_target_order":["201","200"]
+        }),
+        &evidence,
+        "0123456789abcdef",
+    );
+
+    assert_eq!(
+        recommendation["decision"],
+        "blocked_by_current_state_or_evidence"
+    );
+    assert_eq!(recommendation["all_required_surfaces_complete"], false);
+    assert_eq!(recommendation["automated_retirement_eligible"], false);
+    assert_eq!(recommendation["safe_to_archive_or_retire"], false);
+    assert_eq!(recommendation["operator_review_required"], true);
+    assert_eq!(
+        recommendation["blocking_surfaces"],
+        json!(["descendants", "dependency"])
+    );
+    assert_eq!(
+        recommendation["required_child_first_target_order"],
+        json!(["201", "200"])
+    );
+    assert!(
+        recommendation["incomplete_surfaces"]
+            .as_array()
+            .is_some_and(|surfaces| surfaces.iter().any(|surface| {
+                surface["surface"] == "telemetry" && surface["state"] == "not_run"
+            }))
+    );
+}
+
+#[test]
+fn every_incomplete_state_prevents_operator_review_recommendation() {
+    for state in [
+        "partial_capped",
+        "blocked_auth",
+        "blocked_permission",
+        "blocked_read",
+        "unsupported_surface",
+        "invalid_binding",
+        "stale",
+        "not_run",
+        "manual_ui_proof_required",
+    ] {
+        let mut evidence = complete_evidence_summary();
+        evidence["delivery"]["state"] = Value::String(state.to_string());
+        let recommendation = recommendation(
+            &json!({"proof_state":"complete_clear"}),
+            &json!({"proof_state":"complete_clear"}),
+            &evidence,
+            "0123456789abcdef",
+        );
+        assert_eq!(
+            recommendation["decision"], "not_eligible_incomplete_evidence",
+            "{state}"
+        );
+        assert_eq!(
+            recommendation["all_required_surfaces_complete"], false,
+            "{state}"
+        );
+    }
+}
+
+#[test]
+fn representative_all_clear_recommendation_fits_model_and_wire_limits() {
+    let mut protection = receipt(
+        EvidenceSource::ExchangeProtectionReview,
+        EvidenceState::ManualUiProofRequired,
+        3_999_900,
+    );
+    protection.manual_ui_proof_included = true;
+    let evidence = grade_evidence_bundle(
+        &[
+            receipt(
+                EvidenceSource::DependencyProbe,
+                EvidenceState::CompleteClear,
+                3_999_900,
+            ),
+            receipt(
+                EvidenceSource::DeliveryReport,
+                EvidenceState::CompleteClear,
+                3_999_900,
+            ),
+            protection,
+            receipt(
+                EvidenceSource::SiteContract,
+                EvidenceState::CompleteClear,
+                3_999_900,
+            ),
+            receipt(
+                EvidenceSource::Telemetry,
+                EvidenceState::CompleteClear,
+                3_999_900,
+            ),
+        ],
+        "1234567",
+        &["200".to_string()],
+        4_000_000,
+    )
+    .expect("complete evidence bundle");
+    let response = build_preflight_response(
+        "1234567".to_string(),
+        vec!["200".to_string()],
+        json!({"proof_state":"complete_clear"}),
+        json!({
+            "proof_state":"complete_clear",
+            "blocking_external_descendant_count":0,
+            "requires_child_first_sequence":false,
+            "required_child_first_target_order":["200"]
+        }),
+        evidence,
+        ProviderRequestSummary {
+            network_attempted_count: 1,
+            effective_root_attempted_count: 1,
+            identity_attempted_count: 1,
+            descendant_page_attempted_count: 1,
+        },
+        HierarchyScanConfig {
+            page_size: 100,
+            max_ad_units: 100,
+        },
+    )
+    .expect("representative all-clear response");
+
+    assert_eq!(
+        response["recommendation"]["decision"],
+        "evidence_complete_operator_review_required"
+    );
+    assert_eq!(
+        response["recommendation"]["all_required_surfaces_complete"],
+        true
+    );
+    assert_eq!(response["recommendation"]["operator_review_required"], true);
+    assert_eq!(
+        response["recommendation"]["not_an_archive_authorization"],
+        true
+    );
+    assert_eq!(response["mutation_performed"], false);
+    assert_eq!(
+        response["authorization"]["archive_or_deactivate_authorized"],
+        false
+    );
+    assert!(response_bytes(&response) <= MAX_INNER_DATA_BYTES);
+
+    let result = crate::contract::success_with_meta(
+        response,
+        json!({
+            "mutation_performed":false,
+            "upstream_called":true,
+            "policy":{"read_only":true}
+        }),
+        std::time::Instant::now(),
+    );
+    assert!(
+        serde_json::to_vec(
+            result
+                .structured_content
+                .as_ref()
+                .expect("structured content")
+        )
+        .expect("serialize model-visible result")
+        .len()
+            <= MAX_CONTRACT_ENVELOPE_BYTES
+    );
+    assert!(
+        serde_json::to_vec(&result)
+            .expect("serialize RMCP result")
+            .len()
+            <= MAX_RMCP_TRANSPORT_BYTES
     );
 }
 
@@ -1478,7 +1674,10 @@ async fn successful_preflight_reconciles_hierarchy_and_keeps_later_surfaces_not_
     assert_eq!(response["descendants"]["proof_state"], "complete_clear");
     assert_eq!(response["evidence"]["dependency"]["state"], "not_run");
     assert_eq!(response["evidence"]["telemetry"]["state"], "not_run");
-    assert_eq!(response["recommendation"]["decision"], "not_run");
+    assert_eq!(
+        response["recommendation"]["decision"],
+        "not_eligible_incomplete_evidence"
+    );
     assert_eq!(
         response["recommendation"]["safe_to_archive_or_retire"],
         false

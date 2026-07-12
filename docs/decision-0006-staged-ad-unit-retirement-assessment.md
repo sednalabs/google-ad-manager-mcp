@@ -1,4 +1,4 @@
-# Decision 0006: Staged Ad-Unit Retirement Assessment
+# Decision 0006: Evidence-Graded Ad-Unit Retirement Assessment
 
 Ad-unit cleanup needs a decision surface that cannot turn a broad catalog
 search, caller-supplied name, partial dependency sample, or missing evidence
@@ -13,7 +13,7 @@ later proof surface explicit rather than implying it ran.
 | Resolve exact targets | `gam_ad_unit_retirement_assessment` | read | canonical network and 1-10 canonical exact ad-unit ids | REST `adUnits.get` | compact current identity, exact resource match, stable fingerprints | zero, whitespace, leading zeroes, duplicates, overflow, missing target, identity mismatch, permission or upstream failure | implemented |
 | Reconcile descendants | same | read | bounded hierarchy scan | paginated REST `adUnits.list` | target/list reconciliation, catalog-proven root-to-parent validation, bidirectional child flags, descendant state, and child-first order | byte/row/page cap, pagination or numeric-id order drift, malformed rows, sparse or cross-network ancestry | implemented |
 | Grade evidence | same | read decisioning | freshness-bound receipts | existing proof tools, reports, site contract, telemetry | source/network/target/version/hash/time binding | stale, capped, blocked, unsupported, duplicate, or mismatched receipts | implemented |
-| Return recommendation | same | read decisioning | complete identity, hierarchy, and evidence proof | staged assessment | operator-review recommendation only | any incomplete or blocked surface | planned Stage 5; returns `not_run` now |
+| Return recommendation | same | read decisioning | complete identity, hierarchy, and evidence proof | staged assessment | blocked, incomplete, or operator-review-required decision | any incomplete or blocked surface | implemented |
 | Archive or deactivate | none | mutation | not accepted | none | none | every call | out of scope |
 
 ## Exact-Identity Contract
@@ -115,6 +115,21 @@ UI-only. Optional notes are bounded, validated, and never echoed.
 Unknown receipt fields are rejected, and freshness is evaluated after all live
 identity and hierarchy reads complete.
 
-Stage 4 does not produce a retirement recommendation. The recommendation stays
-`not_run`, `safe_to_archive_or_retire` stays false, and no mutation is
-authorized or performed.
+## Final Recommendation Contract
+
+The final read-only decision has three states. Positive blockers take
+precedence: `complete_blocked`, `partial_blocked`, or an observed active
+external descendant returns `blocked_by_current_state_or_evidence`, even when
+another surface is missing or capped. With no confirmed blocker, any non-clear
+surface returns `not_eligible_incomplete_evidence`. Only seven complete-clear
+surfaces return `evidence_complete_operator_review_required`: current identity,
+descendants, dependency, delivery, exchange/protection, site contract, and
+telemetry.
+
+The recommendation repeats the assessment fingerprint, preserves the
+deterministic child-first target order, and supplies bounded actions for every
+blocked or incomplete surface. `operator_review_required` remains true,
+`automated_retirement_eligible` and `safe_to_archive_or_retire` remain false,
+and the response explicitly states that it is not an archive authorization.
+No archive, deactivate, rename, retarget, or other GAM mutation is exposed or
+performed by this workflow.

@@ -292,13 +292,24 @@ than discarded, so callers cannot attach raw reports or telemetry payloads to
 the compact contract. Freshness is evaluated after the live identity and
 hierarchy reads complete.
 
-The `recommendation` surface is intentionally returned as `not_run`. Identity,
-hierarchy, and structurally graded caller-supplied evidence do not yet establish
-retirement eligibility.
-Every successful assessment reports `mutation_performed=false`,
-`archive_or_deactivate_authorized=false`, and
-`safe_to_archive_or_retire=false`. A later stage will add conservative
-operator-review decisioning without weakening these fail-closed defaults.
+The `recommendation` surface returns one of three fail-closed decisions:
+
+- `blocked_by_current_state_or_evidence` when any surface reports a confirmed
+  blocker, including a blocker observed during an incomplete scan;
+- `not_eligible_incomplete_evidence` when no blocker is confirmed but one or
+  more required surfaces are incomplete; or
+- `evidence_complete_operator_review_required` only when current identity,
+  hierarchy, dependency, delivery, exchange/protection, site-contract, and
+  telemetry surfaces are all complete and clear.
+
+The response preserves the required child-first target order and provides a
+bounded next action for each incomplete or blocked surface. Every successful
+assessment still reports `mutation_performed=false`,
+`archive_or_deactivate_authorized=false`,
+`automated_retirement_eligible=false`, and
+`safe_to_archive_or_retire=false`. The strongest decision does not verify who
+supplied the receipts and is not an archive authorization; explicit operator
+review and any separate guarded write remain outside this tool.
 The inner data, complete model-visible Contract V1 content, and serialized RMCP
 result are independently measured against 7 KiB, 8 KiB, and 20 KiB limits.
 

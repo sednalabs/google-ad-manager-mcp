@@ -561,7 +561,7 @@ impl AdManagerServer {
                     "Call gam_network_catalog_list for ad_units, orders, line_items, placements, private_auctions, private_auction_deals, or reports.",
                     "Call gam_exchange_protection_probe when you need explicit partial-proof states for Exchange, private auction, private deal, or yield-group exposure.",
                     "Call gam_ad_unit_dependency_probe before ad-unit cleanup, archive, or retargeting work so placement and line-item dependencies are explicit.",
-                    "Call gam_ad_unit_retirement_assessment to bind one to ten exact canonical ad-unit ids to current REST identity and a bounded ordered hierarchy/descendant scan, then grade optional freshness-bound evidence receipts. The final recommendation remains explicitly not_run in the current stage.",
+                    "Call gam_ad_unit_retirement_assessment to bind one to ten exact canonical ad-unit ids to current REST identity and a bounded ordered hierarchy/descendant scan, then grade freshness-bound evidence receipts and return a conservative operator-review recommendation that never authorizes a mutation.",
                     "Call gam_report_run for saved reports and gam_report_result_rows for large paginated results.",
                     "Call gam_trafficking_tool_matrix before planning writes so the REST and SOAP trafficking surfaces are explicit.",
                     "Use gam_rest_write_plan for dry-run write plans; gam_rest_write_apply only works when the server is explicitly started with GOOGLE_AD_MANAGER_MCP_WRITE_MODE=enabled and the manage scope.",
@@ -1241,7 +1241,7 @@ impl AdManagerServer {
 
     #[tool(
         name = "gam_ad_unit_retirement_assessment",
-        description = "Read-only exact-identity, hierarchy, and freshness-bound external-evidence assessment for one to ten canonical Ad Manager ad-unit ids; the final recommendation remains not_run."
+        description = "Read-only exact-identity, hierarchy, and freshness-bound evidence assessment for one to ten canonical Ad Manager ad-unit ids, ending in a conservative non-authorizing operator-review recommendation."
     )]
     async fn gam_ad_unit_retirement_assessment(
         &self,
@@ -7854,7 +7854,10 @@ mod tests {
             response["data"]["evidence"]["dependency"]["state"],
             "not_run"
         );
-        assert_eq!(response["data"]["recommendation"]["decision"], "not_run");
+        assert_eq!(
+            response["data"]["recommendation"]["decision"],
+            "not_eligible_incomplete_evidence"
+        );
         assert_eq!(response["meta"]["mutation_performed"], false);
         assert_eq!(response["meta"]["upstream_called"], true);
         assert_eq!(response["meta"]["upstream_call_state"], "attempted_all");
