@@ -19,23 +19,20 @@ pub(super) fn recommendation(
     assessment_fingerprint: &str,
     max_ad_units: u32,
 ) -> Value {
-    let states = SURFACES
-        .iter()
-        .map(|(surface, field)| {
-            let source = match *surface {
-                "identity" => identity,
-                "descendants" => descendants,
-                _ => evidence.get(*surface).unwrap_or(&Value::Null),
-            };
-            (
-                *surface,
-                source
-                    .get(*field)
-                    .and_then(Value::as_str)
-                    .unwrap_or("not_run"),
-            )
-        })
-        .collect::<Vec<_>>();
+    let states = SURFACES.map(|(surface, field)| {
+        let source = match surface {
+            "identity" => identity,
+            "descendants" => descendants,
+            _ => evidence.get(surface).unwrap_or(&Value::Null),
+        };
+        (
+            surface,
+            source
+                .get(field)
+                .and_then(Value::as_str)
+                .unwrap_or("not_run"),
+        )
+    });
 
     let observed_non_archived_descendants = descendants
         .get("blocking_external_descendant_count")
@@ -47,7 +44,7 @@ pub(super) fn recommendation(
             matches!(*state, "complete_blocked" | "partial_blocked")
                 || (*surface == "descendants" && observed_non_archived_descendants)
         })
-        .map(|(surface, _)| Value::String((*surface).to_string()))
+        .map(|(surface, _)| Value::from(*surface))
         .collect::<Vec<_>>();
 
     let incomplete_surfaces = states
