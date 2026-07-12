@@ -167,6 +167,11 @@ For stateful workflows, recovery orders an executable cold-start entry before
 continuations. Report discovery supplies network lookup, report catalog lookup,
 one report run, existing-operation polling, and completed-result row retrieval;
 `gam_scratchpad_open_session` precedes scratchpad ingestion.
+An explicit scratchpad search under `read_only=true` remains empty because all
+current scratchpad calls can touch local session state. Its recovery carries a
+separate `local_state_alternatives` contract that scopes an explicit
+`read_only=false` retry to MCP-local state, denies upstream GAM mutation, and
+enumerates destructive close/drop tools without weakening the active filter.
 
 The provider rejects `limit=0` before inventory search. The public default is
 20; larger values flow into the toolkit unchanged so its hard maximum of 100,

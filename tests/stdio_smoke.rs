@@ -853,6 +853,20 @@ fn find_tools_read_only_filter_partitions_all_scratchpad_tools() {
     );
     let read_only_data = &read_only_response["result"]["structuredContent"]["data"];
     assert_eq!(read_only_data["openai_allowed_tools"], json!([]));
+    let recovery = search_recovery(read_only_data);
+    let alternatives = recovery["local_state_alternatives"]
+        .as_array()
+        .expect("scratchpad local-state alternatives");
+    assert_eq!(alternatives.len(), 1);
+    assert_eq!(
+        alternatives[0]["retry_filter"],
+        json!({"group":"scratchpad","read_only":false})
+    );
+    assert_eq!(alternatives[0]["upstream_gam_mutation"], false);
+    assert_eq!(
+        alternatives[0]["destructive_tools"],
+        json!(["gam_scratchpad_close_session", "gam_scratchpad_drop_table"])
+    );
 
     let mutating_response = process.call_tool(
         126,
