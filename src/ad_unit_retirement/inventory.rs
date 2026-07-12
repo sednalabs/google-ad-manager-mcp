@@ -251,10 +251,12 @@ fn compact_identity_for_list(identity: &Value) -> Value {
         object.remove("provider_request_state");
         if let Some(current) = object.get_mut("current").and_then(Value::as_object_mut) {
             current.remove("ad_unit_code_source_fingerprint");
-            if let Some(sizes) = current.get_mut("sizes").and_then(Value::as_object_mut) {
-                if sizes.get("truncated").and_then(Value::as_bool) == Some(false) {
-                    sizes.remove("source_fingerprint");
-                }
+            if let Some(sizes) = current
+                .get_mut("sizes")
+                .and_then(Value::as_object_mut)
+                .filter(|sizes| sizes.get("truncated").and_then(Value::as_bool) == Some(false))
+            {
+                sizes.remove("source_fingerprint");
             }
         }
     }
