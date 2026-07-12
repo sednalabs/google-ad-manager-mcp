@@ -299,7 +299,7 @@ the toolkit, which clamps `match_summary.result_limit` to 100 and reports
 set when full tool schemas are required.
 Oversized query or group inputs retain bounded fail-closed recovery and do not
 echo the full input.
-Omit `read_only` or set `read_only=true` to search only non-mutating execution
+Omit `read_only`, set it to `null`, or set `read_only=true` to search only non-mutating execution
 paths, including plans, previews, and no-mutation proof
 reads. Every current scratchpad tool is excluded because the pinned scratchpad
 runtime may create, refresh, or prune local session state even during queries,

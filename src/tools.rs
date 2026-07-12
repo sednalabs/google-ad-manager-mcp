@@ -76,10 +76,10 @@ pub struct FindToolsArgs {
     /// Optional exact tool group filter, such as catalog, reports, trafficking, or scratchpad.
     #[serde(default)]
     pub group: Option<String>,
-    /// Filter by mutation behavior: omit or true for only non-mutating execution
-    /// paths, including previews but excluding all current scratchpad tools; false
-    /// for only write-like or local-state-mutating tools.
-    #[serde(default)]
+    /// Filter by mutation behavior: omit, null, or true for only non-mutating
+    /// execution paths, including previews but excluding all current scratchpad
+    /// tools; false for only write-like or local-state-mutating tools.
+    #[serde(default = "default_find_tools_read_only")]
     pub read_only: Option<bool>,
     /// Maximum ranked inventory matches. Defaults to 20. Values above 100 are
     /// toolkit-clamped and reported with result_limit_clamped.
@@ -2513,6 +2513,10 @@ impl AdManagerServer {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_find_tools_read_only() -> Option<bool> {
+    Some(true)
 }
 
 async fn ad_unit_retirement_tool_result<NF, NFut, IF, IFut, LF, LFut>(

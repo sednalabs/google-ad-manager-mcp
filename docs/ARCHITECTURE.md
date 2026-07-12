@@ -155,7 +155,7 @@ examples as validated under it. Invalid groups can have no examples while
 `available_groups` still offers alternatives from the complete strict
 list-visible inventory under the active `read_only` filter. Recovery guidance
 never recommends relaxing the safety filter.
-Omitted `read_only` is normalized to `true` at the provider boundary. Ambiguous
+Omitted or explicitly null `read_only` is normalized to `true` at the provider boundary. Ambiguous
 or truncated input emits no retry examples, and mutating candidates are eligible
 only under an explicit `read_only=false` filter.
 For stateful workflows, recovery orders an executable cold-start entry before
