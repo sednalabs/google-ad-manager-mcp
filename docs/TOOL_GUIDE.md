@@ -69,7 +69,9 @@ explicit `group="scratchpad", read_only=false` retry, sets
 `upstream_gam_mutation=false`, and notes that local-state writes need no separate
 runtime write-mode switch once the caller explicitly selects this filter. It
 enumerates every eligible local-state tool and lists close-session/drop-table
-separately as destructive.
+separately as destructive. `tool_access_classes` distinguishes local-only
+calls, REST reads using the Ad Manager read-only scope, and the SOAP line-item
+read that requires the full manage scope.
 
 Discovery adds guided dependency edges:
 
@@ -112,7 +114,9 @@ string array, `active_filter` records the applied filters, and
 was produced. Invalid groups can return no examples while listing alternatives
 from the complete strict list-visible inventory under the active `read_only`
 filter. Recovery never recommends turning off `read_only` merely to produce a
-match.
+match. The only scoped exception is a clear, exact scratchpad request whose
+separate local-state record makes the opt-in, upstream reads, and scope classes
+explicit; fail-closed searches do not receive it.
 Ambiguous or truncated input marks recovery fail-closed and returns no canned
 example queries. Mutating examples require an explicit `read_only=false` search.
 

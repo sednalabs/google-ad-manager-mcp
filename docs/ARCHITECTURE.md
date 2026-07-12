@@ -158,8 +158,10 @@ active exact `group`/`read_only` filters as the failed search, always at
 `retry.example_queries` as a string array, adds `active_filter`, and marks the
 examples as validated under it. Invalid groups can have no examples while
 `available_groups` still offers alternatives from the complete strict
-list-visible inventory under the active `read_only` filter. Recovery guidance
-never recommends relaxing the safety filter.
+list-visible inventory under the active `read_only` filter. Recovery never
+relaxes an upstream-safety filter merely to force a match. A clear, exact
+scratchpad request can instead expose the separately scoped local-state option
+described below; fail-closed searches cannot.
 Omitted or explicitly null `read_only` is normalized to `true` at the provider
 boundary. Ambiguous or truncated input emits no retry examples, and mutating
 candidates are eligible only under an explicit `read_only=false` filter.
@@ -172,6 +174,8 @@ current scratchpad calls can touch local session state. Its recovery carries a
 separate `local_state_alternatives` contract that scopes an explicit
 `read_only=false` retry to MCP-local state, denies upstream GAM mutation, and
 enumerates destructive close/drop tools without weakening the active filter.
+Provider-owned access classes distinguish local-only calls, REST reads under
+the read-only scope, and the SOAP line-item read that requires manage scope.
 
 The provider rejects `limit=0` before inventory search. The public default is
 20; larger values flow into the toolkit unchanged so its hard maximum of 100,

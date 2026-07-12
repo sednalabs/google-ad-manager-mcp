@@ -864,12 +864,39 @@ fn find_tools_read_only_filter_partitions_all_scratchpad_tools() {
     );
     assert_eq!(alternatives[0]["upstream_gam_mutation"], false);
     assert_eq!(
+        alternatives[0]["tool_access_classes"][2]["class"],
+        "gam_soap_read"
+    );
+    assert_eq!(
+        alternatives[0]["tool_access_classes"][2]["manage_scope_required"],
+        true
+    );
+    assert_eq!(
         alternatives[0]["destructive_tools"],
         json!(["gam_scratchpad_close_session", "gam_scratchpad_drop_table"])
     );
 
-    let mutating_response = process.call_tool(
+    let fail_closed_response = process.call_tool(
         126,
+        "find_tools",
+        json!({
+            "query":format!("scratchpad {}", "z".repeat(64 * 1024)),
+            "group":"scratchpad",
+            "read_only":true,
+            "limit":100
+        }),
+    );
+    let fail_closed_data = &fail_closed_response["result"]["structuredContent"]["data"];
+    let fail_closed_recovery = search_recovery(fail_closed_data);
+    assert_eq!(fail_closed_recovery["fail_closed"], true);
+    assert!(
+        fail_closed_recovery
+            .get("local_state_alternatives")
+            .is_none()
+    );
+
+    let mutating_response = process.call_tool(
+        127,
         "find_tools",
         json!({
             "query":"scratchpad",
