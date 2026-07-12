@@ -8,8 +8,16 @@ pub(crate) fn build_tool_inventory() -> Result<ToolInventory, ToolInventoryError
         cap(
             "find_tools",
             "discovery",
-            "Search Google Ad Manager MCP tools by keyword, group, and read-only status.",
-            ["tool_search", "deferred", "discover", "tools", "ad-manager"],
+            "Semantically search Google Ad Manager MCP tools with ranked, plan-first, recoverable results.",
+            [
+                "tool_search",
+                "deferred",
+                "discover",
+                "semantic",
+                "workflow",
+                "tools",
+                "ad-manager",
+            ],
         ),
         cap(
             "gam_get_started",
@@ -21,7 +29,15 @@ pub(crate) fn build_tool_inventory() -> Result<ToolInventory, ToolInventoryError
             "gam_auth_status",
             "setup",
             "Inspect configured Google Ad Manager auth inputs and optionally verify upstream access.",
-            ["google", "ad-manager", "auth", "credentials", "status"],
+            [
+                "google",
+                "ad-manager",
+                "auth",
+                "authenticate",
+                "credentials",
+                "setup",
+                "status",
+            ],
         ),
         cap(
             "gam_auth_login_command",
@@ -48,6 +64,9 @@ pub(crate) fn build_tool_inventory() -> Result<ToolInventory, ToolInventoryError
                 "private-auctions",
                 "private-deals",
                 "reports",
+                "inspect",
+                "inventory",
+                "placements",
             ],
         ),
         cap(
@@ -63,6 +82,8 @@ pub(crate) fn build_tool_inventory() -> Result<ToolInventory, ToolInventoryError
                 "private-auctions",
                 "adsense",
                 "ad-units",
+                "check",
+                "audit",
             ],
         ),
         cap(
@@ -94,6 +115,7 @@ pub(crate) fn build_tool_inventory() -> Result<ToolInventory, ToolInventoryError
                 "descendants",
                 "preflight",
                 "cleanup",
+                "assess",
             ],
         ),
         cap(
@@ -106,7 +128,16 @@ pub(crate) fn build_tool_inventory() -> Result<ToolInventory, ToolInventoryError
             "gam_report_result_rows",
             "reports",
             "Fetch rows from a completed Google Ad Manager report result.",
-            ["google", "ad-manager", "reports", "rows", "fetch"],
+            [
+                "google",
+                "ad-manager",
+                "reports",
+                "rows",
+                "fetch",
+                "audit",
+                "campaign",
+                "delivery",
+            ],
         ),
         cap(
             "gam_trafficking_tool_matrix",
@@ -181,6 +212,9 @@ pub(crate) fn build_tool_inventory() -> Result<ToolInventory, ToolInventoryError
                 "orders",
                 "line-items",
                 "forecast",
+                "plan",
+                "campaign",
+                "creative",
             ],
         )
         .with_risk_posture(GuardedActionPosture::preview()),
@@ -291,6 +325,9 @@ pub(crate) fn build_tool_inventory() -> Result<ToolInventory, ToolInventoryError
                 "soap",
                 "line-items",
                 "delivery",
+                "analyze",
+                "analysis",
+                "audit",
             ],
         ),
         cap(

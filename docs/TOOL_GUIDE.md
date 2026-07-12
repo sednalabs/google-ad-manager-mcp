@@ -36,6 +36,31 @@ All tools return Contract V1 envelopes: `ok/data/meta` on success and
 | `gam_scratchpad_ingest_soap_line_items` | Run a bounded read-only SOAP line-item query and ingest parsed delivery rows into a scratchpad table. |
 | `gam_scratchpad_export_evidence_bundle` | Export bounded markdown evidence from scratchpad tables. |
 
+## `find_tools`
+
+`find_tools` accepts a natural-language `query` plus optional exact `group`,
+`read_only`, and `limit` filters. Deterministic ranked matching ignores common
+conversational words, reports normalized and ignored terms, and returns total,
+returned, limit, and truncation state.
+
+The default `include_schema=false` response omits schemas and hosted-client
+metadata and stays within the toolkit's 32 KiB compact-selection budget. Set
+`include_schema=true` only after discovery has narrowed the candidates.
+
+Apply discovery is plan-first:
+
+- `gam_rest_write_apply` adds `gam_rest_write_plan` as a required companion;
+- `gam_soap_trafficking_apply` adds `gam_soap_trafficking_plan` as required and
+  `gam_soap_payload_build` as optional;
+- `gam_yield_group_exclusions_apply` adds
+  `gam_yield_group_exclusions_preview` as required.
+
+Companions are non-mutating and do not increase semantic match counts. A search
+that returns no tools adds a bounded `search_recovery` record with available
+groups, fail-closed reason codes when relevant, and representative retry
+queries. Recovery never recommends turning off `read_only` merely to produce a
+match.
+
 ## `gam_network_catalog_list`
 
 `gam_network_catalog_list` is intentionally curated rather than generic. The

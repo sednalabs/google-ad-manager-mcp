@@ -128,7 +128,15 @@ The initial first-class tool set is:
 24. `gam_scratchpad_ingest_soap_line_items`
 25. `gam_scratchpad_export_evidence_bundle`
 
-`find_tools` is also exposed for deferred-loading and `tool_search` clients.
+`find_tools` is also exposed for deferred-loading and `tool_search` clients. It
+uses the toolkit's additive ranked search path and compact serializer by
+default. The provider layer adds only domain workflow relationships: REST and
+SOAP plans before apply, yield-group preview before apply, the optional SOAP
+payload builder, and bounded empty-result recovery. Match counts remain about
+semantic inventory results; companion and recovery records are reported as
+separate OpenAI extra results so safety guidance does not inflate search counts.
+Full schemas and hosted-client metadata are emitted only when
+`include_schema=true`.
 
 The deliberately grouped tool is `gam_network_catalog_list`. It keeps the
 surface compact while still covering the curated network collections that
