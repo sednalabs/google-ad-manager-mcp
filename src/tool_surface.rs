@@ -121,8 +121,18 @@ pub(crate) fn build_tool_inventory() -> Result<ToolInventory, ToolInventoryError
         cap(
             "gam_report_run",
             "reports",
-            "Run a saved Google Ad Manager report and optionally wait for the first result page.",
-            ["google", "ad-manager", "reports", "run", "result"],
+            "Run a saved Google Ad Manager report for delivery analysis and optionally wait for the first result page.",
+            [
+                "google",
+                "ad-manager",
+                "reports",
+                "run",
+                "result",
+                "audit",
+                "campaign",
+                "delivery",
+                "start",
+            ],
         ),
         cap(
             "gam_report_result_rows",

@@ -100,6 +100,12 @@ was produced. Invalid groups can return no examples while listing valid group
 alternatives. Recovery never recommends turning off `read_only` merely to
 produce a match.
 
+Recovery examples are entry-point aware. A broad reports recovery starts with
+`gam_report_run`, then offers `gam_report_result_rows` only as an explicit
+completed-result continuation. A broad scratchpad recovery starts with
+`gam_scratchpad_open_session`, then offers ingestion as an existing-session
+continuation.
+
 ## `gam_network_catalog_list`
 
 `gam_network_catalog_list` is intentionally curated rather than generic. The

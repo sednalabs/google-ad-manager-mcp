@@ -63,22 +63,32 @@ fn find_tools_is_semantic_compact_and_recoverable() {
         ),
         (
             3,
-            "audit campaign delivery and report rows",
-            "gam_report_result_rows",
+            "start a campaign delivery audit with a saved report",
+            "gam_report_run",
         ),
         (
             4,
+            "fetch rows from a completed report result",
+            "gam_report_result_rows",
+        ),
+        (
+            5,
             "check exchange and yield protection",
             "gam_exchange_protection_probe",
         ),
         (
-            5,
+            6,
             "assess ad units for retirement",
             "gam_ad_unit_retirement_assessment",
         ),
         (
-            6,
-            "analyze line item delivery in a scratchpad",
+            7,
+            "open a scratchpad session for delivery analysis",
+            "gam_scratchpad_open_session",
+        ),
+        (
+            8,
+            "ingest line item delivery into an existing scratchpad session",
             "gam_scratchpad_ingest_soap_line_items",
         ),
     ] {
@@ -193,7 +203,8 @@ fn find_tools_recovery_examples_execute_under_active_filters() {
         "apply an allowlisted REST write",
         "apply a SOAP trafficking creative operation",
         "apply descendant-safe yield group exclusions",
-        "analyze line item delivery in a scratchpad",
+        "open a scratchpad session for delivery analysis",
+        "ingest line item delivery into an existing scratchpad session",
     ] {
         assert!(!read_queries.contains(&forbidden));
     }
