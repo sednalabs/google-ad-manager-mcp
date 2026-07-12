@@ -185,6 +185,10 @@ fn find_tools_pairs_apply_results_with_plan_or_preview() {
             .as_array()
             .expect("allowed tools");
         let results = data["results"].as_array().expect("discovery results");
+        let direct_results = results
+            .iter()
+            .filter(|result| result["type"] == "tool")
+            .collect::<Vec<_>>();
         assert!(
             allowed.contains(&json!(apply_tool)),
             "query: {query}; data: {data}"
@@ -192,6 +196,15 @@ fn find_tools_pairs_apply_results_with_plan_or_preview() {
         assert!(
             allowed.contains(&json!(companion_tool)),
             "query: {query}; data: {data}"
+        );
+        let direct_apply = direct_results
+            .iter()
+            .find(|result| result["name"] == apply_tool)
+            .unwrap_or_else(|| panic!("apply tool was not a direct result: {data}"));
+        assert_eq!(direct_apply["read_only"], false);
+        assert_eq!(
+            direct_apply["risk_posture"]["operation_class"],
+            "guarded_apply"
         );
         assert!(results.iter().any(|result| {
             result["type"] == "workflow_companion"
@@ -210,9 +223,9 @@ fn find_tools_pairs_apply_results_with_plan_or_preview() {
                 "non-mutating allowed tool was not a companion: {data}"
             );
             assert!(
-                !results.iter().any(|result| {
-                    result.get("type").is_none() && result["name"] == non_mutating_name
-                }),
+                !direct_results
+                    .iter()
+                    .any(|result| result["name"] == non_mutating_name),
                 "non-mutating allowed tool was a direct result: {data}"
             );
         }
