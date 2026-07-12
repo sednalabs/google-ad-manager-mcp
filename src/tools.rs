@@ -22,15 +22,15 @@ use crate::ad_unit_retirement::{
 use crate::auth_ux::{gcloud_adc_login_command, shell_join_with_cloudsdk_config};
 use crate::client::{
     AdManagerClient, CatalogCollection, DEFAULT_SOAP_API_VERSION,
-    MAX_REPORT_INITIAL_POLL_INTERVAL_MS, MAX_REPORT_POLL_TIMEOUT_MS, MAX_REPORT_RESULT_PAGE_SIZE,
-    RestWriteOperation, RestWritePlan, RestWriteResource, SoapTraffickingApplyResult,
-    SoapTraffickingOperation, SoapTraffickingPlan, YieldGroupUpdateSoapRequest,
-    canonical_report_name, project_report_operation, soap_error_message_with_truncation,
-    validate_operation_name, validate_report_result_name, validate_report_run_handoff,
-    validate_soap_api_version,
+    MAX_REPORT_INITIAL_POLL_INTERVAL_MS, MAX_REPORT_RESULT_PAGE_SIZE, RestWriteOperation,
+    RestWritePlan, RestWriteResource, SoapTraffickingApplyResult, SoapTraffickingOperation,
+    SoapTraffickingPlan, YieldGroupUpdateSoapRequest, canonical_report_name,
+    project_report_operation, soap_error_message_with_truncation, validate_operation_name,
+    validate_report_result_name, validate_report_run_handoff, validate_soap_api_version,
 };
 use crate::config::{
-    GCLOUD_ADC_REQUIRED_SCOPE, server_adc_credentials_path, server_cloudsdk_config_dir,
+    GCLOUD_ADC_REQUIRED_SCOPE, MAX_REPORT_POLL_TIMEOUT_MS, server_adc_credentials_path,
+    server_cloudsdk_config_dir,
 };
 use crate::contract;
 use crate::evidence::{
@@ -44,7 +44,7 @@ use crate::probe_projection::{ProbeKind, bounded_probe_error, bounded_probe_succ
 use crate::tool_discovery::{
     companion_result_records, companion_tool_names, compose_workflow_companions,
     provider_guidance_allowed, recognized_group_filter, recovery_result_record,
-    remove_contextual_condition_only_direct_matches, supplemental_local_state_alternative_records,
+    resolve_report_discovery, supplemental_local_state_alternative_records,
 };
 use crate::{AdManagerError, AdManagerServer, MANAGE_SCOPE, McpError};
 use mcp_toolkit_core::guarded_action::{
@@ -622,7 +622,9 @@ fn find_tools_text_projection(data: &Value) -> String {
         .filter(|result| {
             matches!(
                 result.get("type").and_then(Value::as_str),
-                Some("workflow_companion") | Some("condition_only_match")
+                Some("workflow_companion")
+                    | Some("condition_only_match")
+                    | Some("intent_safe_alternative")
             )
         })
         .collect::<Vec<_>>();
@@ -636,10 +638,15 @@ fn find_tools_text_projection(data: &Value) -> String {
                     == Some("condition_only_match")
                 {
                     "ranked_condition_only_match"
+                } else if result.get("type").and_then(Value::as_str)
+                    == Some("intent_safe_alternative")
+                {
+                    "intent_safe_alternative"
                 } else {
                     "workflow_companion"
                 },
                 "tool": result.get("name").and_then(Value::as_str),
+                "relation": result.get("relation").and_then(Value::as_str),
                 "before_tool": result.get("before_tool").and_then(Value::as_str),
                 "description": result.get("description").and_then(Value::as_str),
                 "risk_posture": result
@@ -659,7 +666,7 @@ fn find_tools_text_projection(data: &Value) -> String {
                     .get("tool_already_selected")
                     .and_then(Value::as_bool),
                 "effect": result.get("effect").and_then(Value::as_str),
-                "explicit_executable_recovery": result.get("explicit_executable_recovery"),
+                "safe_method": result.get("safe_method").and_then(Value::as_str),
                 "reason": result.get("reason").and_then(Value::as_str),
             })
         })
@@ -937,11 +944,21 @@ impl AdManagerServer {
         } else {
             Vec::new()
         };
-        let condition_only_matches = remove_contextual_condition_only_direct_matches(
+        let active_read_only = ranked.response.read_only;
+        let report_resolution = resolve_report_discovery(
             &mut ranked.response.results,
             &preliminary_companions,
+            guidance_query.filter(|_| allow_provider_guidance),
+            active_read_only,
         );
-        let condition_only_match_count = condition_only_matches.len();
+        let condition_only_match_count = report_resolution
+            .records
+            .iter()
+            .filter(|record| {
+                record.get("type").and_then(Value::as_str) == Some("condition_only_match")
+            })
+            .count();
+        let callable_safe_alternative_count = report_resolution.callable_alternatives.len();
         let companions = if allow_provider_guidance {
             match compose_workflow_companions(&ranked.response.results, guidance_query) {
                 Ok(value) => value,
@@ -956,9 +973,18 @@ impl AdManagerServer {
         } else {
             Vec::new()
         };
-        let companion_names = companion_tool_names(&companions);
-        let condition_only_names = condition_only_matches
+        let mut allowed_companion_names = companion_tool_names(&companions);
+        for alternative in &report_resolution.callable_alternatives {
+            if !allowed_companion_names.contains(alternative) {
+                allowed_companion_names.push(alternative);
+            }
+        }
+        let condition_only_names = report_resolution
+            .records
             .iter()
+            .filter(|result| {
+                result.get("type").and_then(Value::as_str) == Some("condition_only_match")
+            })
             .filter_map(|result| result.get("name").and_then(Value::as_str))
             .collect::<BTreeSet<_>>();
         let mut extra_results = companion_result_records(&companions)
@@ -970,7 +996,7 @@ impl AdManagerServer {
                     .is_none_or(|name| !condition_only_names.contains(name))
             })
             .collect::<Vec<_>>();
-        extra_results.extend(condition_only_matches);
+        extra_results.extend(report_resolution.records);
         if let Some(recovery) =
             recovery_result_record(self.inventory(), &recovery_filter, &ranked.match_summary)
         {
@@ -987,7 +1013,11 @@ impl AdManagerServer {
             .iter()
             .map(|result| result.name.clone())
             .collect::<BTreeSet<_>>();
-        selected_names.extend(companion_names.iter().map(|name| (*name).to_string()));
+        selected_names.extend(
+            allowed_companion_names
+                .iter()
+                .map(|name| (*name).to_string()),
+        );
         if include_schema && selected_names.len() > FIND_TOOLS_MAX_SCHEMA_TOOLS {
             return Ok(contract::error(
                 AdManagerError::invalid(
@@ -1020,6 +1050,7 @@ impl AdManagerServer {
                 && (ranked.response.group.is_none() || normalized_group.is_some()),
             "raw_query_returned": false,
             "condition_only_direct_matches_filtered": condition_only_match_count,
+            "callable_safe_alternatives_added": callable_safe_alternative_count,
             "query_term_counts": {
                 "normalized": ranked.match_summary.normalized_query_terms.len(),
                 "excluded": ranked.match_summary.excluded_query_terms.len(),
@@ -1035,7 +1066,7 @@ impl AdManagerServer {
             .with_schemas(schemas)
             .with_metadata_label("ranked compact tool_search metadata contract")
             .into_openai_response()
-            .with_companion_allowed_tools(companion_names)
+            .with_companion_allowed_tools(allowed_companion_names)
             .with_extra_results(extra_results);
         let value = if include_schema {
             response.to_value()
@@ -1093,7 +1124,7 @@ impl AdManagerServer {
                     "Call gam_exchange_protection_probe when you need explicit partial-proof states for Exchange, private auction, private deal, or yield-group exposure.",
                     "Call gam_ad_unit_dependency_probe before ad-unit cleanup, archive, or retargeting work so placement and line-item dependencies are explicit.",
                     "Call gam_ad_unit_retirement_assessment to bind one to ten exact canonical ad-unit ids to current REST identity and a bounded ordered hierarchy/descendant scan, then grade freshness-bound evidence receipts and return a conservative operator-review recommendation that never authorizes a mutation.",
-                    "Call gam_report_run for saved reports, gam_report_operation_poll to continue an asynchronous run without starting another one, and gam_report_result_rows for large paginated results.",
+                    "Call gam_report_run only with explicit intent to start a new saved-report job, gam_report_operation_poll to continue an asynchronous run without starting another one, and gam_report_result_rows for large paginated results.",
                     "Call gam_trafficking_tool_matrix before planning writes so the REST and SOAP trafficking surfaces are explicit.",
                     "Use gam_rest_write_plan for dry-run write plans; gam_rest_write_apply only works when the server is explicitly started with GOOGLE_AD_MANAGER_MCP_WRITE_MODE=enabled and the manage scope.",
                     "Use gam_soap_trafficking_plan and gam_soap_trafficking_apply for order, line-item, creative, LICA, and forecast SOAP workflows.",
@@ -1149,7 +1180,7 @@ impl AdManagerServer {
                     "The official Google Ad Manager Beta REST API is the primary upstream surface.",
                     "The guarded SOAP layer covers production trafficking operations that are not yet available through the REST beta surface.",
                     "SOAP live calls require the full Ad Manager manage scope, including non-mutating forecast/read calls, because the legacy SOAP API does not accept the newer read-only scope.",
-                    "Saved report execution remains asynchronous; gam_report_run can wait for completion, while gam_report_operation_poll resumes an existing operation without starting a new run.",
+                    "Starting a saved report creates an upstream job and discovery exposes gam_report_run only for explicit new-run intent with read_only=false; gam_report_operation_poll resumes an existing operation without starting a new run.",
                     "Scratchpad data stays local to the MCP server process and is bounded by session, table, row, memory, SQL-size, and query-time limits."
                 ]
             }),
@@ -1857,6 +1888,9 @@ impl AdManagerServer {
                 return Ok(contract::error_with_detail(
                     err,
                     json!({
+                        "report_name": report_name,
+                        "dispatch_state": "uncertain_after_dispatch_attempt",
+                        "started_new_run": null,
                         "run_request_may_have_been_dispatched": true,
                         "continuation_available": false,
                         "automatic_replay_safe": false,
@@ -1877,7 +1911,10 @@ impl AdManagerServer {
                 return Ok(contract::error_with_detail(
                     err,
                     json!({
-                        "started_new_run": true,
+                        "report_name": report_name,
+                        "dispatch_state": "provider_response_received_handoff_uncertain",
+                        "started_new_run": null,
+                        "run_request_may_have_been_dispatched": true,
                         "continuation_available": false,
                         "automatic_replay_safe": false,
                         "operation": project_report_operation(&initial_operation),
@@ -3259,6 +3296,14 @@ struct ReportOperationPollOptions<'a> {
     wait_requested: bool,
 }
 
+fn report_poll_requires_remediation(error: &AdManagerError) -> bool {
+    matches!(
+        error,
+        AdManagerError::UpstreamApi { status, .. }
+            if (400..500).contains(status) && !matches!(*status, 408 | 429)
+    )
+}
+
 async fn poll_report_operation_tool_result(
     client: &AdManagerClient,
     options: ReportOperationPollOptions<'_>,
@@ -3276,6 +3321,7 @@ async fn poll_report_operation_tool_result(
     {
         Ok(value) => value,
         Err(failure) => {
+            let remediation_required = report_poll_requires_remediation(&failure.error);
             let continuation_timeout_ms = match &failure.error {
                 AdManagerError::ReportRunTimeout { .. } => {
                     next_report_poll_timeout_ms(duration_millis_u64(options.timeout))
@@ -3290,6 +3336,18 @@ async fn poll_report_operation_tool_result(
                     "terminal": true,
                     "continuation_available": false,
                     "operation": failure.operation
+                })
+            } else if remediation_required {
+                json!({
+                    "operation_name": options.operation_name,
+                    "expected_report_name": failure.expected_report_name.as_deref(),
+                    "started_new_run": options.started_new_run,
+                    "terminal": false,
+                    "operation_terminal_state_confirmed": false,
+                    "poll_outcome": "remediation_required",
+                    "continuation_available": false,
+                    "operation": failure.operation,
+                    "operator_action": "The provider definitively rejected this poll request. Correct access, operation identity, or request state before issuing another GET; the operation's terminal state was not observed."
                 })
             } else if let Some(continuation_timeout_ms) = continuation_timeout_ms {
                 json!({
@@ -7794,6 +7852,91 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn report_discovery_requires_explicit_start_and_preserves_safe_continuation() {
+        let server = AdManagerServer::new(crate::Settings::default()).expect("discovery server");
+
+        let explicit_start = server
+            .find_tools(Parameters(FindToolsArgs {
+                query: Some("start a campaign delivery audit with a saved report".to_string()),
+                group: Some("reports".to_string()),
+                read_only: Some(false),
+                limit: Some(1),
+                include_schema: true,
+            }))
+            .await
+            .expect("discover explicit report start")
+            .structured_content
+            .expect("explicit start discovery envelope");
+        let explicit_start = &explicit_start["data"];
+        let allowed = explicit_start["openai_allowed_tools"]
+            .as_array()
+            .expect("allowed report-start tools");
+        assert!(allowed.contains(&json!("gam_report_run")));
+        assert!(allowed.contains(&json!("gam_networks_list")));
+        assert!(allowed.contains(&json!("gam_network_catalog_list")));
+        assert!(explicit_start["schemas"].get("gam_report_run").is_some());
+
+        let continuation = server
+            .find_tools(Parameters(FindToolsArgs {
+                query: Some("check the status of an existing report operation".to_string()),
+                group: Some("reports".to_string()),
+                read_only: Some(false),
+                limit: Some(1),
+                include_schema: true,
+            }))
+            .await
+            .expect("discover safe report continuation")
+            .structured_content
+            .expect("continuation discovery envelope");
+        let continuation = &continuation["data"];
+        let allowed = continuation["openai_allowed_tools"]
+            .as_array()
+            .expect("allowed continuation tools");
+        assert!(allowed.contains(&json!("gam_report_operation_poll")));
+        assert!(!allowed.contains(&json!("gam_report_run")));
+        assert!(
+            continuation["schemas"]
+                .get("gam_report_operation_poll")
+                .is_some()
+        );
+        assert!(continuation["schemas"].get("gam_report_run").is_none());
+        let records = continuation["results"]
+            .as_array()
+            .expect("continuation records");
+        assert!(records.iter().any(|record| {
+            record["type"] == "intent_safe_alternative"
+                && record["name"] == "gam_report_operation_poll"
+                && record["relation"] == "safe_alternative"
+        }));
+        assert!(
+            records
+                .iter()
+                .all(|record| { record.get("explicit_executable_recovery").is_none() })
+        );
+
+        let default_read_only = server
+            .find_tools(Parameters(FindToolsArgs {
+                query: Some("start a campaign delivery audit with a saved report".to_string()),
+                group: Some("reports".to_string()),
+                read_only: None,
+                limit: Some(1),
+                include_schema: true,
+            }))
+            .await
+            .expect("discover report start under default read-only filter")
+            .structured_content
+            .expect("default read-only discovery envelope");
+        let default_read_only = &default_read_only["data"];
+        assert!(
+            !default_read_only["openai_allowed_tools"]
+                .as_array()
+                .expect("default allowed tools")
+                .contains(&json!("gam_report_run"))
+        );
+        assert!(default_read_only["schemas"].get("gam_report_run").is_none());
+    }
+
     #[test]
     fn report_result_guard_fails_closed_above_the_complete_result_limit() {
         let result = bounded_report_result(
@@ -8034,6 +8177,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pending_initial_report_handoff_is_reused_before_get_completion() {
+        let operation_name = "networks/123/operations/reports/runs/789";
+        let report_result = "networks/123/reports/456/results/987";
+        let (base_url, requests, server) = serve_report_http_sequence(vec![
+            (
+                200,
+                json!({
+                    "name": operation_name,
+                    "metadata": {"report": "networks/123/reports/456"},
+                    "done": false,
+                }),
+            ),
+            (
+                200,
+                json!({
+                    "name": operation_name,
+                    "metadata": {"report": "networks/123/reports/456"},
+                    "done": true,
+                    "response": {"reportResult": report_result},
+                }),
+            ),
+        ]);
+        let client = AdManagerClient::for_test_api_base_url(base_url);
+        let server_under_test = AdManagerServer::new(crate::Settings::default())
+            .expect("build pending report server")
+            .with_test_client(client);
+        let result = server_under_test
+            .gam_report_run(Parameters(ReportRunArgs {
+                network_code: "123".to_string(),
+                report_id: "456".to_string(),
+                wait_for_completion: Some(true),
+                fetch_first_page: Some(false),
+                result_page_size: None,
+                poll_timeout_ms: Some(6_000),
+                initial_poll_interval_ms: Some(5_000),
+            }))
+            .await
+            .expect("run and complete pending report");
+        let response = result
+            .structured_content
+            .expect("pending report completion response");
+        assert_eq!(response["ok"], true);
+        assert_eq!(response["data"]["started_new_run"], true);
+        assert_eq!(response["data"]["report_result"], report_result);
+
+        server.join().expect("join pending report server");
+        let requests = requests.lock().expect("lock pending report requests");
+        assert_eq!(requests.len(), 2);
+        assert!(requests[0].starts_with("POST /v1/networks/123/reports/456:run "));
+        assert!(requests[1].starts_with(&format!("GET /v1/{operation_name} ")));
+    }
+
+    #[tokio::test]
     async fn immediate_terminal_report_error_is_redacted_and_has_no_continuation() {
         let operation_name = "networks/123/operations/reports/runs/789";
         let (base_url, requests, server) = serve_report_http_sequence(vec![(
@@ -8103,7 +8299,19 @@ mod tests {
             .expect("structured invalid-handle result");
         assert_eq!(response["ok"], false);
         assert_eq!(response["error"]["code"], "report_run_handoff_uncertain");
-        assert_eq!(response["error"]["detail"]["started_new_run"], true);
+        assert_eq!(
+            response["error"]["detail"]["report_name"],
+            "networks/123/reports/456"
+        );
+        assert_eq!(
+            response["error"]["detail"]["dispatch_state"],
+            "provider_response_received_handoff_uncertain"
+        );
+        assert!(response["error"]["detail"]["started_new_run"].is_null());
+        assert_eq!(
+            response["error"]["detail"]["run_request_may_have_been_dispatched"],
+            true
+        );
         assert_eq!(response["error"]["detail"]["continuation_available"], false);
         assert_eq!(response["error"]["detail"]["automatic_replay_safe"], false);
         assert!(
@@ -8141,6 +8349,15 @@ mod tests {
         assert_eq!(result.is_error, Some(true));
         let response = result.structured_content.expect("uncertain run response");
         assert_eq!(response["error"]["code"], "report_run_handoff_uncertain");
+        assert_eq!(
+            response["error"]["detail"]["report_name"],
+            "networks/123/reports/456"
+        );
+        assert_eq!(
+            response["error"]["detail"]["dispatch_state"],
+            "uncertain_after_dispatch_attempt"
+        );
+        assert!(response["error"]["detail"]["started_new_run"].is_null());
         assert_eq!(response["error"]["detail"]["automatic_replay_safe"], false);
         assert_eq!(
             response["error"]["detail"]["run_request_may_have_been_dispatched"],
@@ -8223,6 +8440,63 @@ mod tests {
         assert_eq!(requests.len(), 1);
         assert!(requests[0].starts_with(&format!("GET /v1/{operation_name} ")));
         assert!(requests.iter().all(|request| !request.starts_with("POST ")));
+    }
+
+    #[tokio::test]
+    async fn report_poll_only_advertises_continuation_for_retryable_get_failures() {
+        let operation_name = "networks/123/operations/reports/runs/789";
+        for (status, continuation_available) in
+            [(400, false), (408, true), (429, true), (500, true)]
+        {
+            let (base_url, requests, server) =
+                serve_report_http_sequence(vec![(status, json!({"error":"poll request failed"}))]);
+            let client = AdManagerClient::for_test_api_base_url(base_url);
+            let server_under_test = AdManagerServer::new(crate::Settings::default())
+                .expect("build poll-status server")
+                .with_test_client(client);
+            let result = server_under_test
+                .gam_report_operation_poll(Parameters(ReportOperationPollArgs {
+                    operation_name: operation_name.to_string(),
+                    expected_report_name: Some("networks/123/reports/456".to_string()),
+                    fetch_first_page: Some(false),
+                    result_page_size: None,
+                    poll_timeout_ms: Some(1_000),
+                    initial_poll_interval_ms: Some(5_000),
+                }))
+                .await
+                .expect("classify poll status");
+            let response = result.structured_content.expect("poll-status response");
+            assert_eq!(response["error"]["code"], "upstream_api_error");
+            assert_eq!(
+                response["error"]["detail"]["continuation_available"], continuation_available,
+                "wrong continuation decision for status {status}"
+            );
+            if continuation_available {
+                assert_eq!(
+                    response["error"]["detail"]["continuation"]["tool"],
+                    "gam_report_operation_poll"
+                );
+                assert_eq!(
+                    response["error"]["detail"]["continuation"]["safe_method"],
+                    "GET"
+                );
+            } else {
+                assert_eq!(
+                    response["error"]["detail"]["poll_outcome"],
+                    "remediation_required"
+                );
+                assert_eq!(
+                    response["error"]["detail"]["operation_terminal_state_confirmed"],
+                    false
+                );
+                assert!(response["error"]["detail"].get("continuation").is_none());
+            }
+
+            server.join().expect("join poll-status server");
+            let requests = requests.lock().expect("lock poll-status requests");
+            assert_eq!(requests.len(), 1);
+            assert!(requests[0].starts_with(&format!("GET /v1/{operation_name} ")));
+        }
     }
 
     #[tokio::test]

@@ -49,9 +49,10 @@ Narrow schema expansion is capped at five direct-plus-companion tools.
 Toolkit-reported negative or excluded intent suppresses provider canned workflow
 and scratchpad recovery. Report starts create an upstream job and are registered
 with a non-read-only toolkit risk posture, so default read-only discovery
-excludes them. An explicit `read_only=false` search can expose the start tool,
-but existing-operation continuation intent projects it as condition-only to
-prevent duplicate report runs.
+excludes them. A `read_only=false` search exposes the start tool only when the
+bounded toolkit query expresses explicit new-run intent. Existing-operation
+continuation intent projects any ranked start as condition-only and exposes the
+GET-only poll tool as a callable safe alternative instead.
 The complete RMCP result is guarded at 64 KiB with a 48 KiB structured-envelope
 cap and a bounded actionable JSON text projection rather than a duplicate full
 payload. Failed Contract V1 results set MCP `isError=true` as well as
@@ -70,7 +71,9 @@ seeds polling. Operation/result HTTP bodies and complete MCP results have
 explicit caps, successful row payloads are shape-validated, and deterministic
 size rejection preserves bounded handles with a non-executable smaller-page
 adjustment. GET-only continuations preserve the optional expected report
-identity and the last valid observation.
+identity and the last valid observation. Definitive poll-time 4xx responses
+other than 408 and 429 require remediation and do not expose an unchanged
+executable continuation or claim that the operation itself is terminal.
 
 ## Tool-surface restrictions
 

@@ -220,7 +220,7 @@ whole credential files in tool responses.
 | `GOOGLE_AD_MANAGER_MCP_API_BASE_URL` | `https://admanager.googleapis.com/v1` | Upstream API root |
 | `GOOGLE_AD_MANAGER_MCP_SOAP_BASE_URL` | `https://ads.google.com/apis/ads/publisher` | Upstream SOAP API root before version/service |
 | `GOOGLE_AD_MANAGER_MCP_WRITE_MODE` | `preview_only` | Write runtime gate: `read_only`, `preview_only`, or `enabled` |
-| `GOOGLE_AD_MANAGER_MCP_REPORT_POLL_TIMEOUT_MS` | `300000` | Default report wait timeout |
+| `GOOGLE_AD_MANAGER_MCP_REPORT_POLL_TIMEOUT_MS` | `300000` | Default report wait timeout; startup rejects values outside 1-86400000 ms |
 | `GOOGLE_AD_MANAGER_MCP_REPORT_POLL_INITIAL_INTERVAL_MS` | `5000` | Initial report polling interval, clamped to 5000-30000 ms |
 | `GOOGLE_AD_MANAGER_MCP_SCRATCHPAD_SESSION_TTL_SECS` | `900` | Scratchpad session idle TTL |
 | `GOOGLE_AD_MANAGER_MCP_SCRATCHPAD_MAX_SESSIONS` | `64` | Maximum active scratchpad sessions |
@@ -302,8 +302,9 @@ recovery fail-closed and emits no canned positive workflow or local-state
 guidance. Mutating examples are available only when the caller explicitly sets
 `read_only=false`. Stateful scratchpad recovery begins with session opening
 before ingestion. Starting a report creates an upstream job, so
-`gam_report_run` is registered truthfully as non-read-only and requires an
-explicit `read_only=false` discovery filter. It is not a canned retry example.
+`gam_report_run` is registered truthfully as non-read-only and is callable from
+discovery only when the bounded toolkit query expresses explicit new-run intent
+and the caller sets `read_only=false`. It is not a canned retry example.
 
 Report runs send the provider-required empty POST body. Definitive 4xx run
 rejections are normal upstream API failures. Once the POST may otherwise have
@@ -324,7 +325,10 @@ initial intervals are between 5 and 30 seconds with bounded exponential backoff.
 The absolute deadline covers in-flight GETs as well as sleeps. A timed-out
 continuation increases the bounded timeout instead of replaying the expired
 value. Contract-invalid poll observations preserve the last valid observation
-and a safely resumable GET continuation. A deterministic result-size failure
+and a safely resumable GET continuation. A definitive poll-time 4xx other than
+408 or 429 instead returns remediation-required detail without an executable
+continuation and without claiming that the operation itself is terminal.
+A deterministic result-size failure
 returns bounded operation, report, result, and page handles plus a non-executable
 smaller-page adjustment; it never repeats the same oversized page request.
 
@@ -377,7 +381,11 @@ Each `workflow_companion` record reports `callable_as_tool`,
 `required_for_guided_sequence`, and `server_call_enforced:false`. An existing
 report operation keeps `gam_report_run` only as non-callable cold-start
 guidance, so it is never injected into `openai_allowed_tools` or schemas and
-cannot prompt a duplicate run. Outside that continuation context, an explicit
+cannot prompt a duplicate run. Continuation, status, resume, check, poll,
+monitor, operation-name, operation-handle, and wait-without-new-run language
+under `read_only=false` adds `gam_report_operation_poll` as a callable GET-only
+safe alternative in the allowed-tool and requested-schema projections. Outside that continuation
+context, an explicit
 `read_only=false` report-start search returns the tool and schema normally with
 its toolkit risk posture. Optional SOAP builder guidance remains callable.
 The legacy `required` field remains as an equal

@@ -28,6 +28,7 @@ pub(crate) struct RepresentativeDiscoveryCandidate {
     pub expected_tool: &'static str,
     pub group: &'static str,
     pub read_only: bool,
+    pub no_match_recovery: bool,
 }
 
 pub(crate) const REPRESENTATIVE_DISCOVERY_CANDIDATES: [RepresentativeDiscoveryCandidate; 20] = [
@@ -79,7 +80,7 @@ pub(crate) const REPRESENTATIVE_DISCOVERY_CANDIDATES: [RepresentativeDiscoveryCa
         "trafficking",
         true,
     ),
-    candidate(
+    rank_only_candidate(
         "start a campaign delivery audit with a saved report",
         "gam_report_run",
         "reports",
@@ -153,6 +154,29 @@ pub(crate) const REPRESENTATIVE_DISCOVERY_CANDIDATES: [RepresentativeDiscoveryCa
     ),
 ];
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReportDiscoveryIntent {
+    ExplicitNewRun,
+    ExistingOperationContinuation,
+    Unspecified,
+}
+
+impl ReportDiscoveryIntent {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::ExplicitNewRun => "explicit_new_run",
+            Self::ExistingOperationContinuation => "existing_operation_continuation",
+            Self::Unspecified => "unspecified",
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct ReportDiscoveryResolution {
+    pub records: Vec<Value>,
+    pub callable_alternatives: Vec<&'static str>,
+}
+
 const fn candidate(
     query: &'static str,
     expected_tool: &'static str,
@@ -164,6 +188,22 @@ const fn candidate(
         expected_tool,
         group,
         read_only,
+        no_match_recovery: true,
+    }
+}
+
+const fn rank_only_candidate(
+    query: &'static str,
+    expected_tool: &'static str,
+    group: &'static str,
+    read_only: bool,
+) -> RepresentativeDiscoveryCandidate {
+    RepresentativeDiscoveryCandidate {
+        query,
+        expected_tool,
+        group,
+        read_only,
+        no_match_recovery: false,
     }
 }
 
@@ -284,7 +324,9 @@ pub(crate) fn compose_workflow_companions(
         .map(|result| result.name.as_str())
         .collect::<BTreeSet<_>>();
     let mut prerequisites = selected.clone();
-    if selected.contains("gam_report_run") && is_existing_report_operation_intent(query) {
+    if selected.contains("gam_report_run")
+        && report_discovery_intent(query) == ReportDiscoveryIntent::ExistingOperationContinuation
+    {
         prerequisites.insert("gam_report_operation_poll");
     }
     loop {
@@ -413,16 +455,58 @@ fn is_ad_unit_retirement_intent(query: Option<&str>) -> bool {
         })
 }
 
-fn is_existing_report_operation_intent(query: Option<&str>) -> bool {
+fn report_discovery_intent(query: Option<&str>) -> ReportDiscoveryIntent {
     let Some(query) = query else {
-        return false;
+        return ReportDiscoveryIntent::Unspecified;
     };
     let normalized = query.to_ascii_lowercase().replace(['-', '_'], " ");
-    normalized.contains("existing report operation")
+    let terms = normalized
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .filter(|term| !term.is_empty())
+        .collect::<BTreeSet<_>>();
+    let report_context = terms.contains("report")
+        || terms.contains("reports")
+        || normalized.contains("campaign delivery audit");
+    let operation_context = terms.contains("operation")
+        || terms.contains("operations")
+        || terms.contains("handle")
+        || normalized.contains("operation name");
+    let new_run_action = terms
+        .iter()
+        .any(|term| matches!(*term, "start" | "launch" | "execute" | "run"));
+    let strong_continuation_action = terms.iter().any(|term| {
+        matches!(
+            *term,
+            "continue"
+                | "continuation"
+                | "resume"
+                | "status"
+                | "check"
+                | "poll"
+                | "monitor"
+                | "inspect"
+                | "view"
+        )
+    });
+    let wait_action = terms.contains("wait") || terms.contains("waiting");
+    let canonical_operation_handle = normalized.contains("/operations/reports/runs/");
+    if canonical_operation_handle
+        || normalized.contains("existing report operation")
         || normalized.contains("existing operation")
         || normalized.contains("operation name")
+        || normalized.contains("operation handle")
         || normalized.contains("continue waiting")
-        || (normalized.contains("poll") && normalized.contains("operation"))
+        || (strong_continuation_action && (report_context || operation_context))
+        || (wait_action && !new_run_action && (report_context || operation_context))
+    {
+        return ReportDiscoveryIntent::ExistingOperationContinuation;
+    }
+
+    if report_context && new_run_action {
+        ReportDiscoveryIntent::ExplicitNewRun
+    } else {
+        ReportDiscoveryIntent::Unspecified
+    }
 }
 
 pub(crate) fn companion_tool_names(companions: &[WorkflowCompanion]) -> Vec<&'static str> {
@@ -471,13 +555,6 @@ pub(crate) fn companion_result_records(companions: &[WorkflowCompanion]) -> Vec<
                 } else {
                     Value::Null
                 },
-                "explicit_executable_recovery": if !companion.callable_as_tool
-                    && companion.tool_name == "gam_report_run"
-                {
-                    report_run_executable_recovery()
-                } else {
-                    Value::Null
-                },
                 "mutation_performed": false,
                 "safety": "non_mutating_guidance",
             })
@@ -489,10 +566,13 @@ pub(crate) fn provider_guidance_allowed(summary: &ToolSearchMatchSummary) -> boo
     search_semantics_fail_closed_reasons(summary).is_empty()
 }
 
-pub(crate) fn remove_contextual_condition_only_direct_matches(
+pub(crate) fn resolve_report_discovery(
     results: &mut Vec<ToolSearchResult>,
     companions: &[WorkflowCompanion],
-) -> Vec<Value> {
+    query: Option<&str>,
+    read_only: Option<bool>,
+) -> ReportDiscoveryResolution {
+    let intent = report_discovery_intent(query);
     let contextual_companions = companions
         .iter()
         .filter(|companion| !companion.callable_as_tool && companion.tool_already_selected)
@@ -500,9 +580,17 @@ pub(crate) fn remove_contextual_condition_only_direct_matches(
         .collect::<BTreeMap<_, _>>();
     let mut retained = Vec::with_capacity(results.len());
     let mut condition_only = Vec::new();
+    let mut demoted_report_run = false;
     for (index, result) in std::mem::take(results).into_iter().enumerate() {
-        if let Some(companion) = contextual_companions.get(result.name.as_str()) {
-            let is_report_run = result.name == "gam_report_run";
+        let contextual_companion = contextual_companions.get(result.name.as_str());
+        let is_report_run = result.name == "gam_report_run";
+        let report_run_callable = is_report_run
+            && read_only == Some(false)
+            && intent == ReportDiscoveryIntent::ExplicitNewRun
+            && contextual_companion.is_none();
+        if is_report_run && !report_run_callable {
+            demoted_report_run = true;
+            let companion_before_tool = contextual_companion.map(|companion| companion.before_tool);
             condition_only.push(json!({
                 "type": "condition_only_match",
                 "name": result.name,
@@ -511,28 +599,28 @@ pub(crate) fn remove_contextual_condition_only_direct_matches(
                 "description": result.description,
                 "registered_read_only": result.read_only,
                 "registered_risk_posture": result.risk_posture,
+                "relation": "condition",
                 "selection_semantics": "condition_only",
                 "callable_as_tool": false,
                 "schema_exposed": false,
                 "tool_already_selected": true,
-                "required_for_guided_sequence": companion.required_for_guided_sequence,
+                "required_for_guided_sequence": contextual_companion
+                    .is_some_and(|companion| companion.required_for_guided_sequence),
                 "server_call_enforced": false,
-                "before_tool": companion.before_tool,
-                "invocation_condition": if is_report_run {
-                    Value::String("only_when_no_existing_operation_name".to_string())
+                "before_tool": if intent == ReportDiscoveryIntent::ExistingOperationContinuation {
+                    None
                 } else {
-                    Value::Null
+                    companion_before_tool
                 },
-                "effect": if is_report_run {
-                    Value::String("starts_upstream_job".to_string())
+                "invocation_condition": "explicit_new_run_intent_and_read_only_false",
+                "effect": "starts_upstream_job",
+                "report_intent": intent.as_str(),
+                "reason": if intent == ReportDiscoveryIntent::ExistingOperationContinuation {
+                    "The bounded discovery query expresses continuation of an existing report operation. Starting a new report run would create duplicate upstream work, so use the GET-only poll alternative."
+                } else if read_only != Some(false) {
+                    "Starting a report creates an upstream job and requires an explicit read_only=false discovery filter plus explicit new-run intent."
                 } else {
-                    Value::Null
-                },
-                "reason": companion.reason,
-                "explicit_executable_recovery": if is_report_run {
-                    report_run_executable_recovery()
-                } else {
-                    Value::Null
+                    "Starting a report creates an upstream job. The bounded discovery query did not express explicit new-run intent, so this match is not callable."
                 },
             }));
         } else {
@@ -540,19 +628,35 @@ pub(crate) fn remove_contextual_condition_only_direct_matches(
         }
     }
     *results = retained;
-    condition_only
-}
-
-fn report_run_executable_recovery() -> Value {
-    json!({
-        "tool": "gam_report_run",
-        "condition": "only_when_no_existing_operation_name",
-        "requires_explicit_operator_intent": true,
-        "starts_upstream_job": true,
-        "automatic_replay_safe": false,
-        "required_arguments": ["network_code", "report_id"],
-        "schema_source": "tools/list",
-    })
+    let mut resolution = ReportDiscoveryResolution {
+        records: condition_only,
+        callable_alternatives: Vec::new(),
+    };
+    if demoted_report_run
+        && intent == ReportDiscoveryIntent::ExistingOperationContinuation
+        && read_only == Some(false)
+    {
+        resolution
+            .callable_alternatives
+            .push("gam_report_operation_poll");
+        resolution.records.push(json!({
+            "type": "intent_safe_alternative",
+            "name": "gam_report_operation_poll",
+            "relation": "safe_alternative",
+            "callable_as_tool": true,
+            "schema_exposed": true,
+            "selection_semantics": "callable_safe_alternative",
+            "registered_read_only": true,
+            "active_filter_read_only": false,
+            "active_filter_exception": "continuation_safety",
+            "report_intent": intent.as_str(),
+            "effect": "polls_existing_operation_with_get",
+            "starts_upstream_job": false,
+            "safe_method": "GET",
+            "reason": "The bounded discovery query asks to continue an existing report operation. The active read_only=false filter excludes the registered read-only poll tool, so discovery exposes that safe callable alternative without replaying gam_report_run.",
+        }));
+    }
+    resolution
 }
 
 pub(crate) fn recovery_result_record(
@@ -818,6 +922,7 @@ fn validated_recovery_example_queries(
 ) -> Vec<&'static str> {
     REPRESENTATIVE_DISCOVERY_CANDIDATES
         .iter()
+        .filter(|candidate| candidate.no_match_recovery)
         .filter(|candidate| {
             filter
                 .group
@@ -895,10 +1000,10 @@ pub(crate) fn recognized_group_filter(
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_RECOVERY_GROUPS, REPRESENTATIVE_DISCOVERY_CANDIDATES, WorkflowCompanion,
-        WorkflowDependency, available_groups, companion_result_records, companion_tool_names,
-        provider_guidance_allowed, recognized_group_filter, recovery_result_record,
-        remove_contextual_condition_only_direct_matches,
+        MAX_RECOVERY_GROUPS, REPRESENTATIVE_DISCOVERY_CANDIDATES, ReportDiscoveryIntent,
+        WorkflowCompanion, WorkflowDependency, available_groups, companion_result_records,
+        companion_tool_names, provider_guidance_allowed, recognized_group_filter,
+        recovery_result_record, report_discovery_intent, resolve_report_discovery,
         supplemental_local_state_alternative_records, topologically_sorted_dependencies,
         workflow_companions,
     };
@@ -935,6 +1040,21 @@ mod tests {
                 candidate.query
             );
         }
+    }
+
+    #[test]
+    fn no_match_recovery_catalog_never_contains_report_run() {
+        assert!(
+            REPRESENTATIVE_DISCOVERY_CANDIDATES
+                .iter()
+                .filter(|candidate| candidate.no_match_recovery)
+                .all(|candidate| candidate.expected_tool != "gam_report_run")
+        );
+        assert!(
+            REPRESENTATIVE_DISCOVERY_CANDIDATES
+                .iter()
+                .any(|candidate| candidate.expected_tool == "gam_report_run")
+        );
     }
 
     #[test]
@@ -1153,8 +1273,12 @@ mod tests {
     fn report_run_is_condition_only_when_a_continuation_is_selected() {
         let mut results = vec![result("gam_report_run"), result("gam_report_result_rows")];
         let companions = workflow_companions(&results, None);
-        let condition_only =
-            remove_contextual_condition_only_direct_matches(&mut results, &companions);
+        let resolution = resolve_report_discovery(
+            &mut results,
+            &companions,
+            Some("fetch rows from a completed report result"),
+            Some(false),
+        );
         assert_eq!(
             results
                 .iter()
@@ -1162,44 +1286,105 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["gam_report_result_rows"]
         );
-        assert_eq!(condition_only[0]["name"], "gam_report_run");
-        assert_eq!(condition_only[0]["callable_as_tool"], false);
-        assert_eq!(condition_only[0]["schema_exposed"], false);
-        assert_eq!(condition_only[0]["effect"], "starts_upstream_job");
+        assert_eq!(resolution.records[0]["name"], "gam_report_run");
+        assert_eq!(resolution.records[0]["callable_as_tool"], false);
+        assert_eq!(resolution.records[0]["schema_exposed"], false);
+        assert_eq!(resolution.records[0]["effect"], "starts_upstream_job");
         assert_eq!(
-            condition_only[0]["before_tool"],
+            resolution.records[0]["before_tool"],
             "gam_report_operation_poll"
         );
-        assert_eq!(
-            condition_only[0]["explicit_executable_recovery"]["tool"],
-            "gam_report_run"
+        assert!(
+            resolution.records[0]
+                .get("explicit_executable_recovery")
+                .is_none()
         );
     }
 
     #[test]
-    fn direct_report_run_remains_callable_without_a_selected_continuation() {
+    fn direct_report_run_requires_explicit_new_run_intent_and_write_like_filter() {
         let mut results = vec![result("gam_report_run")];
-        let companions = workflow_companions(&results, None);
-        let condition_only =
-            remove_contextual_condition_only_direct_matches(&mut results, &companions);
-        assert!(condition_only.is_empty());
+        let query = "start a campaign delivery audit with a saved report";
+        let companions = workflow_companions(&results, Some(query));
+        let resolution =
+            resolve_report_discovery(&mut results, &companions, Some(query), Some(false));
+        assert!(resolution.records.is_empty());
         assert_eq!(results[0].name, "gam_report_run");
+
+        let mut results = vec![result("gam_report_run")];
+        let companions = workflow_companions(&results, Some("saved report delivery audit"));
+        let resolution = resolve_report_discovery(
+            &mut results,
+            &companions,
+            Some("saved report delivery audit"),
+            Some(false),
+        );
+        assert!(results.is_empty());
+        assert_eq!(resolution.records[0]["report_intent"], "unspecified");
     }
 
     #[test]
-    fn existing_operation_intent_suppresses_a_write_filtered_report_run() {
+    fn existing_operation_intent_replaces_write_filtered_report_run_with_safe_poll() {
         let mut results = vec![result("gam_report_run")];
-        let companions = workflow_companions(
-            &results,
-            Some("continue waiting for an existing report operation"),
-        );
-        let condition_only =
-            remove_contextual_condition_only_direct_matches(&mut results, &companions);
+        let query = "continue waiting for an existing report operation";
+        let companions = workflow_companions(&results, Some(query));
+        let resolution =
+            resolve_report_discovery(&mut results, &companions, Some(query), Some(false));
         assert!(results.is_empty());
-        assert_eq!(condition_only[0]["name"], "gam_report_run");
+        assert_eq!(resolution.records[0]["name"], "gam_report_run");
+        assert!(resolution.records[0]["before_tool"].is_null());
+        assert_eq!(resolution.records[0]["relation"], "condition");
         assert_eq!(
-            condition_only[0]["before_tool"],
-            "gam_report_operation_poll"
+            resolution.callable_alternatives,
+            vec!["gam_report_operation_poll"]
+        );
+        assert_eq!(resolution.records[1]["relation"], "safe_alternative");
+        assert_eq!(resolution.records[1]["safe_method"], "GET");
+        assert!(
+            !resolution.records[1]
+                .to_string()
+                .contains("automatic_replay")
+        );
+    }
+
+    #[test]
+    fn report_safe_alternative_requires_a_demoted_report_start() {
+        let mut results = vec![result("gam_soap_trafficking_apply")];
+        let query = "check the status of an existing report operation";
+        let companions = workflow_companions(&results, Some(query));
+        let resolution =
+            resolve_report_discovery(&mut results, &companions, Some(query), Some(false));
+        assert!(resolution.callable_alternatives.is_empty());
+        assert!(resolution.records.is_empty());
+        assert_eq!(results[0].name, "gam_soap_trafficking_apply");
+    }
+
+    #[test]
+    fn broad_report_continuation_language_never_classifies_as_a_new_run() {
+        for query in [
+            "continue the saved report operation",
+            "show report run status",
+            "resume a report operation",
+            "check the campaign delivery report",
+            "poll the operation handle",
+            "inspect the operation handle",
+            "monitor operation_name for the report",
+            "wait for the existing operation",
+            "networks/123/operations/reports/runs/789",
+        ] {
+            assert_eq!(
+                report_discovery_intent(Some(query)),
+                ReportDiscoveryIntent::ExistingOperationContinuation,
+                "query classified unsafely: {query}"
+            );
+        }
+        assert_eq!(
+            report_discovery_intent(Some("start a campaign delivery audit with a saved report")),
+            ReportDiscoveryIntent::ExplicitNewRun
+        );
+        assert_eq!(
+            report_discovery_intent(Some("run a saved report and wait for completion")),
+            ReportDiscoveryIntent::ExplicitNewRun
         );
     }
 
@@ -1645,7 +1830,7 @@ mod tests {
     }
 
     #[test]
-    fn stateful_recovery_lists_cold_start_before_continuation() {
+    fn stateful_recovery_excludes_report_starts_and_keeps_safe_continuations() {
         let inventory = build_tool_inventory().expect("inventory");
 
         let reports = recovery_for_filter(
@@ -1674,9 +1859,12 @@ mod tests {
                 limit: Some(10),
             },
         );
-        assert_eq!(
-            recovery_queries(&report_starts),
-            vec!["start a campaign delivery audit with a saved report"]
+        assert_eq!(recovery_queries(&report_starts), Vec::<&str>::new());
+        assert!(!report_starts.to_string().contains("gam_report_run"));
+        assert!(
+            !report_starts
+                .to_string()
+                .contains("start a campaign delivery audit")
         );
 
         let scratchpad = recovery_for_filter(

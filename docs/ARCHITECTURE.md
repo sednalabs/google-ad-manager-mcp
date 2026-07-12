@@ -181,17 +181,21 @@ extra results so guidance does not inflate search counts. Full schemas and
 hosted-client metadata are emitted only when `include_schema=true`, and only
 when the complete direct-plus-companion selection contains at most five tools.
 Report-run starts use a non-read-only toolkit risk posture because they create
-an upstream job. Explicit `read_only=false` discovery exposes a direct start,
-while existing-operation continuation context replaces any ranked start with a
-non-callable condition record to prevent replay. Content-only clients receive a
+an upstream job. Discovery exposes a direct start only when `read_only=false`
+and the bounded toolkit query expresses explicit new-run intent.
+Existing-operation continuation context replaces any ranked start with a non-callable
+condition record and, when the active filter would exclude it, exposes the
+GET-only poll tool as a callable safe alternative to prevent replay.
+Content-only clients receive a
 bounded actionable JSON projection with
 ordered ranked direct matches, descriptions and risk posture, allowed tools,
 callable/condition workflow edges and reasons, modern workflow fields, recovery,
 and schema names; complete ranked records and schemas remain in structured
 content.
 
-Recovery candidates are a typed static catalog covering every current tool
-group and both mutation classes where a group exposes both. Candidate examples
+Recovery candidates are a typed static catalog separate from representative
+ranking probes. They cover every current tool group but deliberately omit the
+upstream-job-creating report-start class. Candidate examples
 are evaluated through the same strict list inventory and toolkit-normalized
 active exact `group`/`read_only` filters as the failed search, always at
 `limit=1`; only an expected rank-one match is serialized. The response keeps

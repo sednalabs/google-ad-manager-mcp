@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 use tokio::sync::OnceCell;
 use tokio::time::{Instant as TokioInstant, sleep_until, timeout_at};
 
-use crate::config::Settings;
+use crate::config::{MAX_REPORT_POLL_TIMEOUT_MS, Settings};
 use crate::error::AdManagerError;
 
 pub const DEFAULT_SOAP_API_VERSION: &str = "v202605";
@@ -25,7 +25,6 @@ const MAX_SOAP_RESPONSE_XML_BYTES: usize = 200 * 1024;
 pub(crate) const MAX_REPORT_OPERATION_RESPONSE_BYTES: usize = 64 * 1024;
 pub(crate) const MAX_REPORT_RESULT_RESPONSE_BYTES: usize = 512 * 1024;
 pub(crate) const MAX_REPORT_RESULT_PAGE_SIZE: u32 = 1_000;
-pub(crate) const MAX_REPORT_POLL_TIMEOUT_MS: u64 = 24 * 60 * 60 * 1_000;
 pub(crate) const MAX_REPORT_INITIAL_POLL_INTERVAL_MS: u64 = 30 * 1_000;
 const MAX_REPORT_RESOURCE_NAME_BYTES: usize = 256;
 const MAX_REPORT_NUMERIC_ID_BYTES: usize = 32;
@@ -2529,16 +2528,7 @@ fn validate_report_operation_binding(
 }
 
 pub(crate) fn project_report_operation(operation: &Value) -> Value {
-    let error = operation.get("error").map(|error| {
-        json!({
-            "code": error.get("code").and_then(Value::as_i64),
-            "message": error
-                .get("message")
-                .and_then(Value::as_str)
-                .map(|message| clip_message(message.to_string())),
-        })
-    });
-    json!({
+    let mut projected = json!({
         "name": projected_report_string(operation.get("name")),
         "metadata": {
             "@type": projected_report_string(operation
@@ -2553,16 +2543,25 @@ pub(crate) fn project_report_operation(operation: &Value) -> Value {
                 .and_then(|metadata| metadata.get("report"))),
         },
         "done": operation.get("done").and_then(Value::as_bool),
-        "error": error,
-        "response": {
+    });
+    if let Some(error) = operation.get("error") {
+        projected["error"] = json!({
+            "code": error.get("code").and_then(Value::as_i64),
+            "message": error
+                .get("message")
+                .and_then(Value::as_str)
+                .map(|message| clip_message(message.to_string())),
+        });
+    }
+    if let Some(response) = operation.get("response") {
+        projected["response"] = json!({
             "@type": projected_report_string(operation
                 .get("response")
                 .and_then(|response| response.get("@type"))),
-            "reportResult": projected_report_string(operation
-                .get("response")
-                .and_then(|response| response.get("reportResult"))),
-        },
-    })
+            "reportResult": projected_report_string(response.get("reportResult")),
+        });
+    }
+    projected
 }
 
 fn projected_report_string(value: Option<&Value>) -> Option<String> {
@@ -2938,6 +2937,38 @@ mod tests {
                 })
             ));
         }
+    }
+
+    #[test]
+    fn report_operation_projection_preserves_long_running_operation_union_presence() {
+        let pending = project_report_operation(&json!({
+            "name": "networks/123/operations/reports/runs/789",
+            "metadata": {"report": "networks/123/reports/456"},
+            "done": false,
+        }));
+        assert!(pending.get("error").is_none());
+        assert!(pending.get("response").is_none());
+
+        let succeeded = project_report_operation(&json!({
+            "name": "networks/123/operations/reports/runs/789",
+            "metadata": {"report": "networks/123/reports/456"},
+            "done": true,
+            "response": {"reportResult": "networks/123/reports/456/results/987"},
+        }));
+        assert!(succeeded.get("error").is_none());
+        assert_eq!(
+            succeeded["response"]["reportResult"],
+            "networks/123/reports/456/results/987"
+        );
+
+        let failed = project_report_operation(&json!({
+            "name": "networks/123/operations/reports/runs/789",
+            "metadata": {"report": "networks/123/reports/456"},
+            "done": true,
+            "error": {"code": 13, "message": "report failed"},
+        }));
+        assert!(failed.get("response").is_none());
+        assert_eq!(failed["error"]["code"], 13);
     }
 
     #[test]
