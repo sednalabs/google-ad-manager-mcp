@@ -102,6 +102,9 @@ one pull request.
   - remove `FindToolsArgs`, the `find_tools` handler, its result guards, and its
     discovery-only imports and helpers from `src/tools.rs`, while retaining the
     `gam_report_operation_poll` arguments and handler;
+  - remove `success_with_text_summary`, its `ContentBlock` import, and its unit
+    test from `src/contract.rs`, because that production helper is owned solely
+    by the removed discovery response path;
   - reconstruct `src/tool_surface.rs` from the pull-request base, then reapply
     the `gam_report_operation_poll` capability so `find_tools` and the
     provider discovery metadata/action lexemes are absent but report polling
