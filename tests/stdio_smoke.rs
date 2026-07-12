@@ -17,6 +17,7 @@ fn stdio_initializes_and_lists_tools() {
         "gam_ad_unit_dependency_probe",
         "gam_ad_unit_retirement_assessment",
         "gam_report_run",
+        "gam_report_operation_poll",
         "gam_report_result_rows",
         "gam_trafficking_tool_matrix",
         "gam_rest_write_plan",
@@ -72,30 +73,36 @@ fn find_tools_is_semantic_compact_and_recoverable() {
         ),
         (
             4,
+            "continue waiting for an existing report operation",
+            "gam_report_operation_poll",
+            true,
+        ),
+        (
+            5,
             "fetch rows from a completed report result",
             "gam_report_result_rows",
             true,
         ),
         (
-            5,
+            6,
             "check exchange and yield protection",
             "gam_exchange_protection_probe",
             true,
         ),
         (
-            6,
+            7,
             "assess ad units for retirement",
             "gam_ad_unit_retirement_assessment",
             true,
         ),
         (
-            7,
+            8,
             "open a scratchpad session for delivery analysis",
             "gam_scratchpad_open_session",
             false,
         ),
         (
-            8,
+            9,
             "ingest line item delivery into an existing scratchpad session",
             "gam_scratchpad_ingest_soap_line_items",
             false,
@@ -188,6 +195,86 @@ fn find_tools_is_semantic_compact_and_recoverable() {
             .is_some_and(|schemas| !schemas.is_empty())
     );
     assert!(full_data.get("openai_deferred_loading").is_some());
+}
+
+#[test]
+fn find_tools_models_complete_report_cold_start_and_async_continuation() {
+    let mut process = StdioMcpProcess::start(env!("CARGO_BIN_EXE_google-ad-manager-mcp"));
+    let poll_response = process.call_tool(
+        339,
+        "find_tools",
+        json!({
+            "query":"continue waiting for an existing report operation",
+            "group":"reports",
+            "limit":1,
+            "include_schema":true
+        }),
+    );
+    let poll_data = &poll_response["result"]["structuredContent"]["data"];
+    assert_eq!(
+        sorted_direct_names(poll_data),
+        vec!["gam_report_operation_poll"]
+    );
+    let expected_poll_tools = vec![
+        "gam_network_catalog_list",
+        "gam_networks_list",
+        "gam_report_operation_poll",
+        "gam_report_run",
+    ];
+    assert_eq!(
+        sorted_string_values(&poll_data["openai_allowed_tools"]),
+        expected_poll_tools
+    );
+    assert_eq!(sorted_schema_names(poll_data), expected_poll_tools);
+    assert_eq!(workflow_edges(poll_data).len(), 3);
+    let catalog_companion = poll_data["results"]
+        .as_array()
+        .expect("poll discovery results")
+        .iter()
+        .find(|result| result["name"] == "gam_network_catalog_list")
+        .expect("report catalog companion");
+    assert!(
+        catalog_companion["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("collection=reports"))
+    );
+    let run_companion = poll_data["results"]
+        .as_array()
+        .expect("poll discovery results")
+        .iter()
+        .find(|result| result["name"] == "gam_report_run")
+        .expect("report run companion");
+    assert!(
+        run_companion["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("never starts another report run"))
+    );
+
+    let rows_response = process.call_tool(
+        340,
+        "find_tools",
+        json!({
+            "query":"fetch rows from a completed report result",
+            "group":"reports",
+            "limit":1
+        }),
+    );
+    let rows_data = &rows_response["result"]["structuredContent"]["data"];
+    assert_eq!(
+        sorted_direct_names(rows_data),
+        vec!["gam_report_result_rows"]
+    );
+    assert_eq!(
+        sorted_string_values(&rows_data["openai_allowed_tools"]),
+        vec![
+            "gam_network_catalog_list",
+            "gam_networks_list",
+            "gam_report_operation_poll",
+            "gam_report_result_rows",
+            "gam_report_run",
+        ]
+    );
+    assert_eq!(workflow_edges(rows_data).len(), 4);
 }
 
 #[test]

@@ -115,20 +115,24 @@ After auth is proven:
    bounded, numeric-id-ordered hierarchy/descendant scan, grade exact-target
    evidence receipts, and return a conservative recommendation that still
    requires explicit operator review and never authorizes a mutation
-6. `gam_report_run`
-7. `gam_report_result_rows` when a report result has more pages
-8. `gam_trafficking_tool_matrix` before planning writes
-9. `gam_rest_write_plan` for dry-run write previews
-10. `gam_rest_write_apply` only in explicit operator mode
-11. `gam_soap_payload_build` to generate common SOAP payload fragments
-12. `gam_soap_trafficking_plan` for order, line-item, creative, LICA, preview,
+6. `gam_network_catalog_list` with `collection="reports"` to obtain the saved
+   report id
+7. `gam_report_run`
+8. `gam_report_operation_poll` only when the run returned an asynchronous
+   operation
+9. `gam_report_result_rows` when a completed report result has more pages
+10. `gam_trafficking_tool_matrix` before planning writes
+11. `gam_rest_write_plan` for dry-run write previews
+12. `gam_rest_write_apply` only in explicit operator mode
+13. `gam_soap_payload_build` to generate common SOAP payload fragments
+14. `gam_soap_trafficking_plan` for order, line-item, creative, LICA, preview,
    and forecast SOAP plans
-13. `gam_soap_trafficking_apply` only after reviewing the matching SOAP plan
-14. `gam_yield_group_exclusions_preview` when descendant-safe ad-unit exclusions should
+15. `gam_soap_trafficking_apply` only after reviewing the matching SOAP plan
+16. `gam_yield_group_exclusions_preview` when descendant-safe ad-unit exclusions should
    be added to an existing yield group without changing line-item targeting
-15. `gam_yield_group_exclusions_apply` only with write mode enabled, the
+17. `gam_yield_group_exclusions_apply` only with write mode enabled, the
    manage scope, the exact confirmation token, and post-apply readback proof
-16. `gam_scratchpad_open_session` and the `gam_scratchpad_ingest_*` tools when
+18. `gam_scratchpad_open_session` and the `gam_scratchpad_ingest_*` tools when
    you want local SQL analysis or a markdown evidence bundle
 
 ## Authentication
@@ -239,6 +243,7 @@ whole credential files in tool responses.
 - `gam_ad_unit_dependency_probe`
 - `gam_ad_unit_retirement_assessment`
 - `gam_report_run`
+- `gam_report_operation_poll`
 - `gam_report_result_rows`
 - `gam_trafficking_tool_matrix`
 - `gam_rest_write_plan`

@@ -21,9 +21,10 @@ use crate::ad_unit_retirement::{
 };
 use crate::auth_ux::{gcloud_adc_login_command, shell_join_with_cloudsdk_config};
 use crate::client::{
-    CatalogCollection, DEFAULT_SOAP_API_VERSION, RestWriteOperation, RestWritePlan,
-    RestWriteResource, SoapTraffickingApplyResult, SoapTraffickingOperation, SoapTraffickingPlan,
-    YieldGroupUpdateSoapRequest, soap_error_message_with_truncation, validate_soap_api_version,
+    AdManagerClient, CatalogCollection, DEFAULT_SOAP_API_VERSION, RestWriteOperation,
+    RestWritePlan, RestWriteResource, SoapTraffickingApplyResult, SoapTraffickingOperation,
+    SoapTraffickingPlan, YieldGroupUpdateSoapRequest, soap_error_message_with_truncation,
+    validate_soap_api_version,
 };
 use crate::config::{
     GCLOUD_ADC_REQUIRED_SCOPE, server_adc_credentials_path, server_cloudsdk_config_dir,
@@ -172,8 +173,25 @@ pub struct ReportRunArgs {
     /// Numeric report identifier from the Ad Manager UI or reports.list.
     pub report_id: String,
     /// Wait for the report operation to complete. Defaults to true.
+    #[serde(default = "default_report_true")]
     pub wait_for_completion: Option<bool>,
     /// If waiting, also fetch the first page of result rows. Defaults to true.
+    #[serde(default = "default_report_true")]
+    pub fetch_first_page: Option<bool>,
+    /// Optional first-page result row cap.
+    pub result_page_size: Option<u32>,
+    /// Optional polling timeout override.
+    pub poll_timeout_ms: Option<u64>,
+    /// Optional initial poll interval override.
+    pub initial_poll_interval_ms: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ReportOperationPollArgs {
+    /// Existing report-run operation name returned by gam_report_run.
+    pub operation_name: String,
+    /// Also fetch the first page of result rows after completion. Defaults to true.
+    #[serde(default = "default_report_true")]
     pub fetch_first_page: Option<bool>,
     /// Optional first-page result row cap.
     pub result_page_size: Option<u32>,
@@ -605,7 +623,7 @@ impl AdManagerServer {
                     "Call gam_exchange_protection_probe when you need explicit partial-proof states for Exchange, private auction, private deal, or yield-group exposure.",
                     "Call gam_ad_unit_dependency_probe before ad-unit cleanup, archive, or retargeting work so placement and line-item dependencies are explicit.",
                     "Call gam_ad_unit_retirement_assessment to bind one to ten exact canonical ad-unit ids to current REST identity and a bounded ordered hierarchy/descendant scan, then grade freshness-bound evidence receipts and return a conservative operator-review recommendation that never authorizes a mutation.",
-                    "Call gam_report_run for saved reports and gam_report_result_rows for large paginated results.",
+                    "Call gam_report_run for saved reports, gam_report_operation_poll to continue an asynchronous run without starting another one, and gam_report_result_rows for large paginated results.",
                     "Call gam_trafficking_tool_matrix before planning writes so the REST and SOAP trafficking surfaces are explicit.",
                     "Use gam_rest_write_plan for dry-run write plans; gam_rest_write_apply only works when the server is explicitly started with GOOGLE_AD_MANAGER_MCP_WRITE_MODE=enabled and the manage scope.",
                     "Use gam_soap_trafficking_plan and gam_soap_trafficking_apply for order, line-item, creative, LICA, and forecast SOAP workflows.",
@@ -647,6 +665,9 @@ impl AdManagerServer {
                     "gam_exchange_protection_probe",
                     "gam_ad_unit_dependency_probe",
                     "gam_ad_unit_retirement_assessment",
+                    "gam_report_run",
+                    "gam_report_operation_poll",
+                    "gam_report_result_rows",
                     "gam_trafficking_tool_matrix",
                     "gam_rest_write_plan",
                     "gam_soap_trafficking_plan",
@@ -658,7 +679,7 @@ impl AdManagerServer {
                     "The official Google Ad Manager Beta REST API is the primary upstream surface.",
                     "The guarded SOAP layer covers production trafficking operations that are not yet available through the REST beta surface.",
                     "SOAP live calls require the full Ad Manager manage scope, including non-mutating forecast/read calls, because the legacy SOAP API does not accept the newer read-only scope.",
-                    "Saved report execution remains asynchronous; gam_report_run can wait for completion and optionally fetch the first page.",
+                    "Saved report execution remains asynchronous; gam_report_run can wait for completion, while gam_report_operation_poll resumes an existing operation without starting a new run.",
                     "Scratchpad data stays local to the MCP server process and is bounded by session, table, row, memory, SQL-size, and query-time limits."
                 ]
             }),
@@ -1352,20 +1373,6 @@ impl AdManagerServer {
             .and_then(Value::as_str)
             .map(str::to_string);
 
-        if !wait_for_completion {
-            return Ok(contract::success(
-                json!({
-                    "operation": operation,
-                    "waited": false,
-                    "next_steps": [
-                        "Poll the operation name again through gam_report_run with wait_for_completion=true if you want a completed report result name.",
-                        "Once the operation is complete, fetch rows with gam_report_result_rows."
-                    ]
-                }),
-                started,
-            ));
-        }
-
         let Some(operation_name) = operation_name else {
             return Ok(contract::error(
                 AdManagerError::invalid(
@@ -1376,6 +1383,22 @@ impl AdManagerServer {
             ));
         };
 
+        if !wait_for_completion {
+            return Ok(contract::success(
+                json!({
+                    "operation": operation,
+                    "operation_name": operation_name,
+                    "waited": false,
+                    "started_new_run": true,
+                    "next_steps": [
+                        "Call gam_report_operation_poll with the returned operation_name; it waits on this existing operation and does not start another report run.",
+                        "Once the operation is complete, fetch rows with gam_report_result_rows."
+                    ]
+                }),
+                started,
+            ));
+        }
+
         let timeout = args
             .poll_timeout_ms
             .map(std::time::Duration::from_millis)
@@ -1385,41 +1408,48 @@ impl AdManagerServer {
             .map(std::time::Duration::from_millis)
             .unwrap_or(self.settings().report_poll_initial_interval);
 
-        let completed = match self
-            .client()
-            .wait_for_report_result(&operation_name, timeout, initial_interval)
-            .await
-        {
-            Ok(value) => value,
-            Err(err) => return Ok(contract::error(err, started)),
-        };
-
-        let first_page = if fetch_first_page {
-            match self
-                .client()
-                .get_report_result_rows(&completed.report_result, args.result_page_size, None)
-                .await
-            {
-                Ok(value) => Some(value),
-                Err(err) => return Ok(contract::error(err, started)),
-            }
-        } else {
-            None
-        };
-
-        Ok(contract::success(
-            json!({
-                "waited": true,
-                "operation": completed.operation,
-                "report_result": completed.report_result,
-                "first_page": first_page,
-                "next_steps": [
-                    "Use gam_report_result_rows with the returned result_name and nextPageToken when the first page was truncated.",
-                    "If the report returns no rows, inspect the saved report filters, date range, and sharing in the Ad Manager UI."
-                ]
-            }),
+        Ok(poll_report_operation_tool_result(
+            self.client(),
+            &operation_name,
+            fetch_first_page,
+            args.result_page_size,
+            timeout,
+            initial_interval,
+            true,
             started,
-        ))
+        )
+        .await)
+    }
+
+    #[tool(
+        name = "gam_report_operation_poll",
+        description = "Wait on an existing Google Ad Manager report operation without starting another report run, then optionally fetch the first result page."
+    )]
+    async fn gam_report_operation_poll(
+        &self,
+        Parameters(args): Parameters<ReportOperationPollArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let started = Instant::now();
+        let timeout = args
+            .poll_timeout_ms
+            .map(std::time::Duration::from_millis)
+            .unwrap_or(self.settings().report_poll_timeout);
+        let initial_interval = args
+            .initial_poll_interval_ms
+            .map(std::time::Duration::from_millis)
+            .unwrap_or(self.settings().report_poll_initial_interval);
+
+        Ok(poll_report_operation_tool_result(
+            self.client(),
+            &args.operation_name,
+            args.fetch_first_page.unwrap_or(true),
+            args.result_page_size,
+            timeout,
+            initial_interval,
+            false,
+            started,
+        )
+        .await)
     }
 
     #[tool(
@@ -2517,6 +2547,57 @@ fn default_true() -> bool {
 
 fn default_find_tools_read_only() -> Option<bool> {
     Some(true)
+}
+
+fn default_report_true() -> Option<bool> {
+    Some(true)
+}
+
+async fn poll_report_operation_tool_result(
+    client: &AdManagerClient,
+    operation_name: &str,
+    fetch_first_page: bool,
+    result_page_size: Option<u32>,
+    timeout: std::time::Duration,
+    initial_interval: std::time::Duration,
+    started_new_run: bool,
+    started: Instant,
+) -> CallToolResult {
+    let completed = match client
+        .wait_for_report_result(operation_name, timeout, initial_interval)
+        .await
+    {
+        Ok(value) => value,
+        Err(err) => return contract::error(err, started),
+    };
+
+    let first_page = if fetch_first_page {
+        match client
+            .get_report_result_rows(&completed.report_result, result_page_size, None)
+            .await
+        {
+            Ok(value) => Some(value),
+            Err(err) => return contract::error(err, started),
+        }
+    } else {
+        None
+    };
+
+    contract::success(
+        json!({
+            "waited": true,
+            "started_new_run": started_new_run,
+            "operation_name": operation_name,
+            "operation": completed.operation,
+            "report_result": completed.report_result,
+            "first_page": first_page,
+            "next_steps": [
+                "Use gam_report_result_rows with the returned report_result and nextPageToken when the first page was truncated.",
+                "If the report returns no rows, inspect the saved report filters, date range, and sharing in the Ad Manager UI."
+            ]
+        }),
+        started,
+    )
 }
 
 async fn ad_unit_retirement_tool_result<NF, NFut, IF, IFut, LF, LFut>(

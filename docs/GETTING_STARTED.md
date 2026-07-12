@@ -124,9 +124,12 @@ google-ad-manager-mcp --print-tool-schema > spec/tool_schema_snapshot.v1.json
 
 For reports:
 
-1. `gam_network_catalog_list` with `collection="reports"`
-2. `gam_report_run`
-3. `gam_report_result_rows` when pagination is needed
+1. `gam_networks_list` to obtain the exact network code
+2. `gam_network_catalog_list` with `collection="reports"` to obtain the saved
+   report id
+3. `gam_report_run`
+4. `gam_report_operation_poll` when the run used `wait_for_completion=false`
+5. `gam_report_result_rows` when pagination is needed
 
 For REST write planning:
 

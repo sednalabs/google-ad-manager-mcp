@@ -569,6 +569,58 @@
       "name": "gam_networks_list"
     },
     {
+      "description": "Wait on an existing Google Ad Manager report operation without starting another report run, then optionally fetch the first result page.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "fetch_first_page": {
+            "default": true,
+            "description": "Also fetch the first page of result rows after completion. Defaults to true.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "initial_poll_interval_ms": {
+            "description": "Optional initial poll interval override.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "operation_name": {
+            "description": "Existing report-run operation name returned by gam_report_run.",
+            "type": "string"
+          },
+          "poll_timeout_ms": {
+            "description": "Optional polling timeout override.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "result_page_size": {
+            "description": "Optional first-page result row cap.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "operation_name"
+        ],
+        "type": "object"
+      },
+      "name": "gam_report_operation_poll"
+    },
+    {
       "description": "Fetch rows from a completed Google Ad Manager report result resource.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -605,6 +657,7 @@
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "fetch_first_page": {
+            "default": true,
             "description": "If waiting, also fetch the first page of result rows. Defaults to true.",
             "type": [
               "boolean",
@@ -647,6 +700,7 @@
             ]
           },
           "wait_for_completion": {
+            "default": true,
             "description": "Wait for the report operation to complete. Defaults to true.",
             "type": [
               "boolean",
