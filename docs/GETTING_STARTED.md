@@ -119,8 +119,8 @@ google-ad-manager-mcp --print-tool-schema > spec/tool_schema_snapshot.v1.json
    dependency proof before cleanup or retargeting work
 6. `gam_ad_unit_retirement_assessment` when you need current exact identity,
    bounded hierarchy/descendant reconciliation, and optional freshness-bound
-   evidence grading for one to ten canonical ad-unit ids. The current stage
-   does not make the final retirement recommendation or mutate GAM.
+   evidence grading for one to ten canonical ad-unit ids. Its strongest result
+   still requires explicit operator review; it never authorizes or mutates GAM.
 
 For reports:
 

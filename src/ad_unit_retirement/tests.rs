@@ -2,7 +2,10 @@ use std::collections::BTreeMap;
 
 use serde_json::{Value, json};
 
-use crate::evidence::{EVIDENCE_PRODUCER_CONTRACT_VERSION, EvidenceSource, EvidenceState};
+use crate::evidence::{
+    EVIDENCE_PRODUCER_CONTRACT_VERSION, EvidenceSource, EvidenceState, MAX_CONTRACT_ENVELOPE_BYTES,
+    MAX_RMCP_TRANSPORT_BYTES,
+};
 
 use super::descendants::*;
 use super::inventory::*;
@@ -450,6 +453,85 @@ fn evidence_bundle_rejects_duplicate_sources_and_reports_missing_surfaces() {
 }
 
 #[test]
+fn complete_evidence_bundle_keeps_proof_fields_without_repeated_explanation() {
+    let mut protection = receipt(
+        EvidenceSource::ExchangeProtectionReview,
+        EvidenceState::ManualUiProofRequired,
+        3_999_900,
+    );
+    protection.manual_ui_proof_included = true;
+    let bundle = grade_evidence_bundle(
+        &[
+            receipt(
+                EvidenceSource::DependencyProbe,
+                EvidenceState::CompleteClear,
+                3_999_900,
+            ),
+            receipt(
+                EvidenceSource::DeliveryReport,
+                EvidenceState::CompleteClear,
+                3_999_900,
+            ),
+            protection,
+            receipt(
+                EvidenceSource::SiteContract,
+                EvidenceState::CompleteClear,
+                3_999_900,
+            ),
+            receipt(
+                EvidenceSource::Telemetry,
+                EvidenceState::CompleteClear,
+                3_999_900,
+            ),
+        ],
+        "1234567",
+        &["200".to_string()],
+        4_000_000,
+    )
+    .expect("complete evidence bundle");
+
+    for surface in [
+        "dependency",
+        "delivery",
+        "exchange_protection",
+        "site_contract",
+        "telemetry",
+    ] {
+        assert_eq!(bundle[surface]["state"], "complete_clear");
+        assert!(bundle[surface]["input_state"].is_string());
+        assert_eq!(bundle[surface]["provenance"], "caller_supplied_unverified");
+        assert_eq!(bundle[surface]["binding_valid"], true);
+        assert_eq!(bundle[surface]["complete_for_summary"], true);
+        assert!(bundle[surface]["receipt_binding_fingerprint"].is_string());
+        assert!(bundle[surface].get("reason").is_none());
+        assert!(bundle[surface].get("binding_errors").is_none());
+    }
+    assert_eq!(
+        bundle["exchange_protection"]["manual_ui_proof_included"],
+        true
+    );
+
+    let blocked = grade_evidence_bundle(
+        &[receipt(
+            EvidenceSource::DeliveryReport,
+            EvidenceState::CompleteBlocked,
+            3_999_900,
+        )],
+        "1234567",
+        &["200".to_string()],
+        4_000_000,
+    )
+    .expect("blocked evidence bundle");
+    assert_eq!(blocked["delivery"]["state"], "complete_blocked");
+    assert_eq!(
+        blocked["delivery"]["provenance"],
+        "caller_supplied_unverified"
+    );
+    assert!(blocked["delivery"]["reason"].is_string());
+    assert!(blocked["delivery"]["binding_errors"].is_array());
+}
+
+#[test]
 fn evidence_note_limit_counts_characters_not_utf8_bytes() {
     let five_hundred_multibyte_characters = "é".repeat(500);
     assert!(validate_note(Some(&five_hundred_multibyte_characters)).is_ok());
@@ -539,7 +621,7 @@ fn assessment_fingerprint_is_network_and_target_bound() {
     let descendants =
         json!({"proof_state":"complete_clear","descendant_result_fingerprint":"descendants"});
     let evidence = json!({"dependency":{"state":"not_run"}});
-    let build = |network_code: &str, target_id: &str| {
+    let build = |network_code: &str, target_id: &str, max_ad_units: u32| {
         build_preflight_response(
             network_code.to_string(),
             vec![target_id.to_string()],
@@ -554,18 +636,367 @@ fn assessment_fingerprint_is_network_and_target_bound() {
             },
             HierarchyScanConfig {
                 page_size: 100,
-                max_ad_units: 100,
+                max_ad_units,
             },
         )
         .expect("bounded assessment")
     };
     assert_ne!(
-        build("1234567", "200")["assessment_fingerprint"],
-        build("7654321", "200")["assessment_fingerprint"]
+        build("1234567", "200", 100)["assessment_fingerprint"],
+        build("7654321", "200", 100)["assessment_fingerprint"]
     );
     assert_ne!(
-        build("1234567", "200")["assessment_fingerprint"],
-        build("1234567", "201")["assessment_fingerprint"]
+        build("1234567", "200", 100)["assessment_fingerprint"],
+        build("1234567", "201", 100)["assessment_fingerprint"]
+    );
+    assert_ne!(
+        build("1234567", "200", 100)["assessment_fingerprint"],
+        build("1234567", "200", 10_000)["assessment_fingerprint"]
+    );
+    let current = build("1234567", "200", 100);
+    let legacy_stage_four_fingerprint = crate::fingerprint::stable_fingerprint(
+        &json!({
+            "network_code":"1234567",
+            "target_ad_unit_ids":["200"],
+            "identity":identity,
+            "descendants":descendants,
+            "evidence":evidence,
+        })
+        .to_string(),
+    );
+    assert_eq!(
+        current["recommendation"]["contract_version"],
+        RECOMMENDATION_CONTRACT_VERSION
+    );
+    assert_eq!(
+        current["response_contract"]["recommendation_contract_version"],
+        RECOMMENDATION_CONTRACT_VERSION
+    );
+    assert_ne!(
+        current["assessment_fingerprint"],
+        legacy_stage_four_fingerprint
+    );
+}
+
+fn complete_evidence_summary() -> Value {
+    json!({
+        "dependency":{"state":"complete_clear"},
+        "delivery":{"state":"complete_clear"},
+        "exchange_protection":{"state":"complete_clear"},
+        "site_contract":{"state":"complete_clear"},
+        "telemetry":{"state":"complete_clear"}
+    })
+}
+
+#[test]
+fn recommendation_prioritizes_confirmed_blockers_over_incomplete_surfaces() {
+    let mut evidence = complete_evidence_summary();
+    evidence["dependency"]["state"] = Value::String("partial_blocked".to_string());
+    evidence["telemetry"]["state"] = Value::String("not_run".to_string());
+    let recommendation = recommendation(
+        &json!({"proof_state":"complete_clear"}),
+        &json!({
+            "proof_state":"partial_capped",
+            "blocking_external_descendant_count":1,
+            "requires_child_first_sequence":true,
+            "required_child_first_target_order":["201","200"]
+        }),
+        &evidence,
+        "0123456789abcdef",
+        100,
+    );
+
+    assert_eq!(
+        recommendation["decision"],
+        "blocked_by_current_state_or_evidence"
+    );
+    assert_eq!(recommendation["all_required_surfaces_complete"], false);
+    assert_eq!(recommendation["automated_retirement_eligible"], false);
+    assert_eq!(recommendation["safe_to_archive_or_retire"], false);
+    assert_eq!(recommendation["operator_review_required"], true);
+    assert_eq!(
+        recommendation["blocking_surfaces"],
+        json!(["descendants", "dependency"])
+    );
+    assert_eq!(
+        recommendation["required_child_first_target_order"],
+        json!(["201", "200"])
+    );
+    assert!(
+        recommendation["incomplete_surfaces"]
+            .as_array()
+            .is_some_and(|surfaces| surfaces.iter().any(|surface| {
+                surface["surface"] == "telemetry" && surface["state"] == "not_run"
+            }))
+    );
+}
+
+#[test]
+fn every_incomplete_state_prevents_operator_review_recommendation() {
+    for state in [
+        "partial_capped",
+        "blocked_auth",
+        "blocked_permission",
+        "blocked_read",
+        "unsupported_surface",
+        "invalid_binding",
+        "stale",
+        "not_run",
+        "manual_ui_proof_required",
+    ] {
+        let mut evidence = complete_evidence_summary();
+        evidence["delivery"]["state"] = Value::String(state.to_string());
+        let recommendation = recommendation(
+            &json!({"proof_state":"complete_clear"}),
+            &json!({"proof_state":"complete_clear"}),
+            &evidence,
+            "0123456789abcdef",
+            100,
+        );
+        assert_eq!(
+            recommendation["decision"], "not_eligible_incomplete_evidence",
+            "{state}"
+        );
+        assert_eq!(
+            recommendation["all_required_surfaces_complete"], false,
+            "{state}"
+        );
+    }
+}
+
+#[test]
+fn next_actions_distinguish_live_identity_hierarchy_and_cap_failures() {
+    let evidence = complete_evidence_summary();
+    let identity = recommendation(
+        &json!({
+            "proof_state":"not_run",
+            "targets":[{"shape_issues":["status_missing_or_invalid"]}]
+        }),
+        &json!({"proof_state":"complete_clear"}),
+        &evidence,
+        "0123456789abcdef",
+        100,
+    );
+    assert_eq!(
+        identity["next_actions"][0]["action"],
+        "fix the reported live identity shape issues and rerun the exact reads"
+    );
+
+    let structural = recommendation(
+        &json!({"proof_state":"complete_clear"}),
+        &json!({
+            "proof_state":"partial_capped",
+            "issues":["parent_path_incomplete"]
+        }),
+        &evidence,
+        "0123456789abcdef",
+        100,
+    );
+    assert_eq!(
+        structural["next_actions"][0]["action"],
+        "resolve the reported hierarchy, ordering, or row-shape issues and rerun the proof"
+    );
+
+    let capped = recommendation(
+        &json!({"proof_state":"complete_clear"}),
+        &json!({
+            "proof_state":"partial_capped",
+            "issues":["row_cap_reached"]
+        }),
+        &evidence,
+        "0123456789abcdef",
+        100,
+    );
+    assert_eq!(
+        capped["next_actions"][0]["action"],
+        "increase max_ad_units within its supported limit and rerun the complete catalog proof"
+    );
+
+    let hard_cap = recommendation(
+        &json!({"proof_state":"complete_clear"}),
+        &json!({
+            "proof_state":"partial_capped",
+            "issues":["page_cap_reached"]
+        }),
+        &evidence,
+        "0123456789abcdef",
+        100,
+    );
+    assert_eq!(
+        hard_cap["next_actions"][0]["action"],
+        "use an authoritative alternate hierarchy proof because this assessor reached a hard catalog limit"
+    );
+
+    let mixed_identity = recommendation(
+        &json!({
+            "proof_state":"partial_blocked",
+            "targets":[
+                {"proof_state":"complete_blocked"},
+                {"proof_state":"not_run","shape_issues":["status_missing_or_invalid"]}
+            ]
+        }),
+        &json!({"proof_state":"complete_clear"}),
+        &evidence,
+        "0123456789abcdef",
+        100,
+    );
+    assert_eq!(
+        mixed_identity["next_actions"][0]["action"],
+        "resolve the confirmed identity blocker and complete the remaining exact identity reads"
+    );
+
+    let capped_at_maximum = recommendation(
+        &json!({"proof_state":"complete_clear"}),
+        &json!({
+            "proof_state":"partial_capped",
+            "issues":["row_cap_reached"]
+        }),
+        &evidence,
+        "0123456789abcdef",
+        10_000,
+    );
+    assert_eq!(
+        capped_at_maximum["next_actions"][0]["action"],
+        "use an authoritative alternate hierarchy proof because the maximum catalog row budget was exhausted"
+    );
+
+    let upstream_read = recommendation(
+        &json!({"proof_state":"complete_clear"}),
+        &json!({
+            "proof_state":"partial_capped",
+            "issues":["upstream_read_incomplete"]
+        }),
+        &evidence,
+        "0123456789abcdef",
+        100,
+    );
+    assert_eq!(
+        upstream_read["next_actions"][0]["action"],
+        "resolve the upstream catalog read failure and rerun the hierarchy proof"
+    );
+
+    let mixed_hard_and_row_cap = recommendation(
+        &json!({"proof_state":"complete_clear"}),
+        &json!({
+            "proof_state":"partial_capped",
+            "issues":["row_cap_reached","page_cap_reached"]
+        }),
+        &evidence,
+        "0123456789abcdef",
+        100,
+    );
+    assert_eq!(
+        mixed_hard_and_row_cap["next_actions"][0]["action"],
+        "use an authoritative alternate hierarchy proof because this assessor reached a hard catalog limit"
+    );
+}
+
+#[test]
+fn representative_all_clear_recommendation_fits_model_and_wire_limits() {
+    let mut protection = receipt(
+        EvidenceSource::ExchangeProtectionReview,
+        EvidenceState::ManualUiProofRequired,
+        3_999_900,
+    );
+    protection.manual_ui_proof_included = true;
+    let evidence = grade_evidence_bundle(
+        &[
+            receipt(
+                EvidenceSource::DependencyProbe,
+                EvidenceState::CompleteClear,
+                3_999_900,
+            ),
+            receipt(
+                EvidenceSource::DeliveryReport,
+                EvidenceState::CompleteClear,
+                3_999_900,
+            ),
+            protection,
+            receipt(
+                EvidenceSource::SiteContract,
+                EvidenceState::CompleteClear,
+                3_999_900,
+            ),
+            receipt(
+                EvidenceSource::Telemetry,
+                EvidenceState::CompleteClear,
+                3_999_900,
+            ),
+        ],
+        "1234567",
+        &["200".to_string()],
+        4_000_000,
+    )
+    .expect("complete evidence bundle");
+    let response = build_preflight_response(
+        "1234567".to_string(),
+        vec!["200".to_string()],
+        json!({"proof_state":"complete_clear"}),
+        json!({
+            "proof_state":"complete_clear",
+            "blocking_external_descendant_count":0,
+            "requires_child_first_sequence":false,
+            "required_child_first_target_order":["200"]
+        }),
+        evidence,
+        ProviderRequestSummary {
+            network_attempted_count: 1,
+            effective_root_attempted_count: 1,
+            identity_attempted_count: 1,
+            descendant_page_attempted_count: 1,
+        },
+        HierarchyScanConfig {
+            page_size: 100,
+            max_ad_units: 100,
+        },
+    )
+    .expect("representative all-clear response");
+
+    assert_eq!(
+        response["recommendation"]["decision"],
+        "evidence_complete_operator_review_required"
+    );
+    assert_eq!(
+        response["recommendation"]["all_required_surfaces_complete"],
+        true
+    );
+    assert_eq!(response["recommendation"]["operator_review_required"], true);
+    assert_eq!(
+        response["recommendation"]["not_an_archive_authorization"],
+        true
+    );
+    assert_eq!(response["mutation_performed"], false);
+    assert_eq!(
+        response["authorization"]["archive_or_deactivate_authorized"],
+        false
+    );
+    assert!(response_bytes(&response) <= MAX_INNER_DATA_BYTES);
+
+    let result = crate::contract::success_with_meta(
+        response,
+        json!({
+            "mutation_performed":false,
+            "upstream_called":true,
+            "policy":{"read_only":true}
+        }),
+        std::time::Instant::now(),
+    );
+    assert!(
+        serde_json::to_vec(
+            result
+                .structured_content
+                .as_ref()
+                .expect("structured content")
+        )
+        .expect("serialize model-visible result")
+        .len()
+            <= MAX_CONTRACT_ENVELOPE_BYTES
+    );
+    assert!(
+        serde_json::to_vec(&result)
+            .expect("serialize RMCP result")
+            .len()
+            <= MAX_RMCP_TRANSPORT_BYTES
     );
 }
 
@@ -888,6 +1319,65 @@ fn confirmed_blocker_plus_incomplete_target_is_partial_blocked() {
         json!({"proof_state":"complete_clear"}),
     ]);
     assert_eq!(complete["proof_state"], "complete_blocked");
+
+    let compact = summarize_identities(&[
+        json!({
+            "ad_unit_id":"200",
+            "proof_state":"complete_clear",
+            "identity_matches_request":true,
+            "shape_complete":true,
+            "shape_issues":[],
+            "provider_request_state":"completed",
+            "identity_fingerprint":"0123456789abcdef",
+            "current":{
+                "ad_unit_code":"fixture_unit",
+                "ad_unit_code_source_fingerprint":"1111111111111111",
+                "status":"ACTIVE",
+                "sizes":{
+                    "source_count":1,
+                    "retained_count":1,
+                    "truncated":false,
+                    "source_fingerprint":"2222222222222222",
+                    "values":[{"width":300,"height":250}]
+                }
+            }
+        }),
+        json!({
+            "ad_unit_id":"201",
+            "proof_state":"blocked_permission",
+            "identity_matches_request":false,
+            "shape_complete":false,
+            "shape_issues":[],
+            "provider_request_state":"attempted_no_complete_response",
+            "reason":"permission"
+        }),
+    ]);
+    assert!(
+        compact["targets"][0]
+            .get("identity_matches_request")
+            .is_none()
+    );
+    assert!(compact["targets"][0].get("shape_complete").is_none());
+    assert!(
+        compact["targets"][0]
+            .get("provider_request_state")
+            .is_none()
+    );
+    assert!(
+        compact["targets"][0]["current"]
+            .get("ad_unit_code_source_fingerprint")
+            .is_none()
+    );
+    assert!(
+        compact["targets"][0]["current"]["sizes"]
+            .get("source_fingerprint")
+            .is_none()
+    );
+    assert_eq!(
+        compact["targets"][1]["provider_request_state"],
+        "attempted_no_complete_response"
+    );
+    assert_eq!(compact["targets"][1]["reason"], "permission");
 }
 
 #[test]
@@ -1478,7 +1968,10 @@ async fn successful_preflight_reconciles_hierarchy_and_keeps_later_surfaces_not_
     assert_eq!(response["descendants"]["proof_state"], "complete_clear");
     assert_eq!(response["evidence"]["dependency"]["state"], "not_run");
     assert_eq!(response["evidence"]["telemetry"]["state"], "not_run");
-    assert_eq!(response["recommendation"]["decision"], "not_run");
+    assert_eq!(
+        response["recommendation"]["decision"],
+        "not_eligible_incomplete_evidence"
+    );
     assert_eq!(
         response["recommendation"]["safe_to_archive_or_retire"],
         false

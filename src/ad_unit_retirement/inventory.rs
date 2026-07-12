@@ -235,8 +235,32 @@ pub(super) fn summarize_identities(identities: &[Value]) -> Value {
         "proof_state": proof_state,
         "target_count": identities.len(),
         "result_fingerprint": stable_fingerprint(&Value::Array(identities.to_vec()).to_string()),
-        "targets": identities,
+        "targets": identities.iter().map(compact_identity_for_list).collect::<Vec<_>>(),
     })
+}
+
+fn compact_identity_for_list(identity: &Value) -> Value {
+    if identity.get("proof_state").and_then(Value::as_str) != Some("complete_clear") {
+        return identity.clone();
+    }
+    let mut compact = identity.clone();
+    if let Some(object) = compact.as_object_mut() {
+        object.remove("identity_matches_request");
+        object.remove("shape_complete");
+        object.remove("shape_issues");
+        object.remove("provider_request_state");
+        if let Some(current) = object.get_mut("current").and_then(Value::as_object_mut) {
+            current.remove("ad_unit_code_source_fingerprint");
+            if let Some(sizes) = current
+                .get_mut("sizes")
+                .and_then(Value::as_object_mut)
+                .filter(|sizes| sizes.get("truncated").and_then(Value::as_bool) == Some(false))
+            {
+                sizes.remove("source_fingerprint");
+            }
+        }
+    }
+    compact
 }
 
 fn state(value: &Value) -> &str {

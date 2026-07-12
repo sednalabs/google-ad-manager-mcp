@@ -1,3 +1,4 @@
+mod decision;
 mod descendants;
 mod inventory;
 mod receipt;
@@ -13,6 +14,7 @@ use serde_json::{Value, json};
 
 use crate::{AdManagerError, fingerprint::stable_fingerprint};
 
+use decision::{RECOMMENDATION_CONTRACT_VERSION, recommendation};
 use descendants::{DescendantScanInput, scan_descendants_with_reader, scoped_numeric_id};
 use inventory::{blocked_identity, summarize_identities, summarize_identity, validate_targets};
 use receipt::{
@@ -203,13 +205,25 @@ fn build_preflight_response(
     let target_count = target_ids.len();
     let assessment_fingerprint = stable_fingerprint(
         &json!({
-            "network_code":&network_code,
-            "target_ad_unit_ids":&target_ids,
-            "identity":&identity,
-            "descendants":&descendants,
-            "evidence":&evidence
+            "recommendation_contract_version": RECOMMENDATION_CONTRACT_VERSION,
+            "scan_config": {
+                "ad_unit_page_size": scan_config.page_size,
+                "max_ad_units": scan_config.max_ad_units,
+            },
+            "network_code": &network_code,
+            "target_ad_unit_ids": &target_ids,
+            "identity": &identity,
+            "descendants": &descendants,
+            "evidence": &evidence,
         })
         .to_string(),
+    );
+    let recommendation = recommendation(
+        &identity,
+        &descendants,
+        &evidence,
+        &assessment_fingerprint,
+        scan_config.max_ad_units,
     );
     let total_request_attempted_count = provider_requests.identity_attempted_count
         + provider_requests.network_attempted_count
@@ -221,12 +235,7 @@ fn build_preflight_response(
         "identity": identity,
         "descendants": descendants,
         "evidence": evidence,
-        "recommendation": {
-            "decision": "not_run",
-            "automated_retirement_eligible": false,
-            "safe_to_archive_or_retire": false,
-            "reason": "Evidence is graded but the final operator-review recommendation is a later assessment stage."
-        },
+        "recommendation": recommendation,
         "assessment_fingerprint": assessment_fingerprint,
         "provider_requests": {
             "target_count": target_count,
@@ -243,7 +252,8 @@ fn build_preflight_response(
             "reason": "This read-only assessment grades supplied evidence but does not verify operator identity, authorize, or apply an archive, deactivate, rename, or retarget operation."
         },
         "response_contract": {
-            "stage": "evidence_grading",
+            "stage": "operator_review_recommendation",
+            "recommendation_contract_version": RECOMMENDATION_CONTRACT_VERSION,
             "compact": true,
             "max_targets": MAX_RETIREMENT_TARGETS,
             "max_inner_data_bytes": MAX_INNER_DATA_BYTES,

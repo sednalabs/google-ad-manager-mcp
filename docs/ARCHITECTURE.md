@@ -174,8 +174,11 @@ exact network and target set, a supported source contract, an opaque result
 hash, observation time, TTL, and, for delivery or telemetry, a recent window of
 at least 30 days. Exchange/protection clear proof additionally requires a
 recorded manual GAM UI review. Receipt provenance remains
-`caller_supplied_unverified`; the final recommendation remains explicitly
-`not_run`. The tool never authorizes or applies a GAM mutation.
+`caller_supplied_unverified`. Confirmed blockers outrank incomplete evidence;
+otherwise the decision is either incomplete or
+`evidence_complete_operator_review_required`. Even that strongest result is a
+read-only recommendation: it never verifies operator identity, authorizes, or
+applies a GAM mutation.
 
 `gam_yield_group_exclusions_preview` and
 `gam_yield_group_exclusions_apply` are the typed mutation path for descendant-safe
