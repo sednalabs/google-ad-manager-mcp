@@ -8,7 +8,7 @@ pub(crate) fn build_tool_inventory() -> Result<ToolInventory, ToolInventoryError
         cap(
             "find_tools",
             "discovery",
-            "Semantically search Google Ad Manager MCP tools with ranked matches, guided dependency edges, and empty-result recovery.",
+            "Semantically search Google Ad Manager MCP tools with ranked matches, guided dependency edges, and filter-validated empty-result recovery.",
             [
                 "tool_search",
                 "deferred",

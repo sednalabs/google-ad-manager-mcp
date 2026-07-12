@@ -132,7 +132,8 @@ The initial first-class tool set is:
 uses the toolkit's additive ranked search path and compact serializer by
 default. The provider layer adds only domain workflow relationships: REST plan
 before apply, optional SOAP payload builder before SOAP plan, SOAP plan before
-SOAP apply, yield-group preview before apply, and bounded empty-result recovery.
+SOAP apply, yield-group preview before apply, and filter-validated bounded
+empty-result recovery.
 The provider computes transitive prerequisites in deterministic topological
 order, so direct SOAP plan discovery adds the builder and direct SOAP apply
 discovery adds builder then plan. Every reachable edge is emitted even when its
@@ -143,6 +144,21 @@ edge emission. Match counts remain about semantic inventory results; companion
 and recovery records are separate OpenAI extra results so guidance does not
 inflate search counts. Full schemas and hosted-client metadata are emitted only
 when `include_schema=true`.
+
+Recovery candidates are a typed static catalog covering every current tool
+group and both mutation classes where a group exposes both. Candidate examples
+are evaluated through the same strict list inventory and toolkit-normalized
+active exact `group`/`read_only` filters as the failed search, always at
+`limit=1`; only an expected rank-one match is serialized. The response keeps
+`retry.example_queries` as a string array, adds `active_filter`, and marks the
+examples as validated under it. Invalid groups can have no examples while
+`available_groups` still offers filter-valid alternatives. Recovery guidance
+never recommends relaxing the safety filter.
+
+The provider rejects `limit=0` before inventory search. The public default is
+20; larger values flow into the toolkit unchanged so its hard maximum of 100,
+`match_summary.result_limit`, and `result_limit_clamped` diagnostics remain
+authoritative.
 
 Companion edges describe a guided sequence, not server-side invocation proof.
 Each record exposes `required_for_guided_sequence` and

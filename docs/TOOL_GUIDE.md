@@ -41,7 +41,9 @@ All tools return Contract V1 envelopes: `ok/data/meta` on success and
 `find_tools` accepts a natural-language `query` plus optional exact `group`,
 `read_only`, and `limit` filters. Deterministic ranked matching ignores common
 conversational words, reports normalized and ignored terms, and returns total,
-returned, limit, and truncation state.
+returned, limit, and truncation state. `limit` defaults to 20 and must be at
+least 1. Values above 100 are passed through so the toolkit reports a
+`match_summary.result_limit` of 100 and the `result_limit_clamped` reason.
 
 The default `include_schema=false` response omits schemas and hosted-client
 metadata and stays within the toolkit's 32 KiB compact-selection budget. Set
@@ -88,9 +90,15 @@ available but is not a universal success gate. Generic SOAP apply retains those
 request, token, runtime, scope, and confirmation checks and requires follow-up
 verification. Typed yield apply also requires descendant-safe post-apply
 readback. A search that returns no tools adds a bounded `search_recovery` record
-with available groups, fail-closed reason codes when relevant, and
-representative retry queries. Recovery never recommends turning off
-`read_only` merely to produce a match.
+with available groups and fail-closed reason codes when relevant. Each recovery
+candidate is rerun against the same strict list inventory, toolkit-normalized
+exact active `group`/`read_only` filters, and `limit=1`; its query is emitted
+only when the expected tool ranks first. `retry.example_queries` remains a
+string array, `active_filter` records the applied filters, and
+`retry.example_queries_validated_under_active_filter=true` states how the list
+was produced. Invalid groups can return no examples while listing valid group
+alternatives. Recovery never recommends turning off `read_only` merely to
+produce a match.
 
 ## `gam_network_catalog_list`
 
