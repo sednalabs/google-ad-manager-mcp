@@ -342,13 +342,17 @@ pub(crate) fn recovery_result_record(
             "For a deliberate scratchpad workflow, review local_state_alternatives before explicitly opting into bounded MCP-local state changes.",
         );
     }
+    let recognized_group = recognized_group_filter(inventory, filter.group.as_deref());
+    let group_recognized = filter.group.is_none() || recognized_group.is_some();
     let mut recovery = json!({
         "type": "search_recovery",
         "status": "no_matches",
         "fail_closed": !fail_closed_reasons.is_empty(),
         "reason_codes": fail_closed_reasons,
         "active_filter": {
-            "group": filter.group.clone(),
+            "group": recognized_group,
+            "group_supplied": filter.group.is_some(),
+            "group_recognized": group_recognized,
             "read_only": filter.read_only,
         },
         "available_groups": available_groups(inventory, filter.read_only),
@@ -515,12 +519,34 @@ fn available_groups(inventory: &ToolInventory, read_only: Option<bool>) -> Vec<S
     groups
 }
 
+pub(crate) fn recognized_group_filter(
+    inventory: &ToolInventory,
+    group: Option<&str>,
+) -> Option<String> {
+    let group = group?.trim();
+    if group.is_empty() {
+        return None;
+    }
+    inventory
+        .capabilities()
+        .into_iter()
+        .filter(|capability| {
+            inventory.is_allowed(
+                capability.name(),
+                ToolOperation::List,
+                &ToolInventoryPolicy::strict(),
+            )
+        })
+        .any(|capability| capability.group() == Some(group))
+        .then(|| group.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         REPRESENTATIVE_DISCOVERY_CANDIDATES, WorkflowCompanion, available_groups,
-        companion_result_records, companion_tool_names, recovery_result_record,
-        workflow_companions,
+        companion_result_records, companion_tool_names, recognized_group_filter,
+        recovery_result_record, workflow_companions,
     };
     use crate::tool_surface::build_tool_inventory;
     use mcp_toolkit_core::tool_inventory::{
@@ -1073,7 +1099,9 @@ mod tests {
             limit: Some(10),
         };
         let recovery = recovery_for_filter(&inventory, &filter);
-        assert_eq!(recovery["active_filter"]["group"], "missing-group");
+        assert_eq!(recovery["active_filter"]["group"], serde_json::Value::Null);
+        assert_eq!(recovery["active_filter"]["group_supplied"], true);
+        assert_eq!(recovery["active_filter"]["group_recognized"], false);
         assert_eq!(recovery["active_filter"]["read_only"], true);
         assert!(recovery_queries(&recovery).is_empty());
         assert_eq!(
@@ -1134,6 +1162,20 @@ mod tests {
             available_groups(&inventory, None),
             vec!["catalog", "late-group", "write-group"]
         );
+    }
+
+    #[test]
+    fn recognized_group_filter_returns_only_strict_list_visible_group_literals() {
+        let inventory = build_tool_inventory().expect("inventory");
+        assert_eq!(
+            recognized_group_filter(&inventory, Some(" trafficking ")),
+            Some("trafficking".to_string())
+        );
+        assert_eq!(
+            recognized_group_filter(&inventory, Some("leading-secret-marker")),
+            None
+        );
+        assert_eq!(recognized_group_filter(&inventory, None), None);
     }
 
     #[test]

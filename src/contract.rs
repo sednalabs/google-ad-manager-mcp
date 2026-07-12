@@ -2,7 +2,7 @@
 
 use std::time::Instant;
 
-use mcp_toolkit::rmcp::model::CallToolResult;
+use mcp_toolkit::rmcp::model::{CallToolResult, ContentBlock};
 use mcp_toolkit_scratchpad::ScratchpadError;
 use serde_json::{Map, Value, json};
 
@@ -20,6 +20,19 @@ pub fn success(data: Value, started: Instant) -> CallToolResult {
 
 pub fn success_with_meta(data: Value, meta: Value, started: Instant) -> CallToolResult {
     CallToolResult::structured(success_envelope_with_meta(data, meta, started))
+}
+
+pub(crate) fn success_with_text_summary(
+    data: Value,
+    text_summary: impl Into<String>,
+    started: Instant,
+) -> CallToolResult {
+    CallToolResult {
+        content: vec![ContentBlock::text(text_summary)],
+        structured_content: Some(success_envelope_with_meta(data, json!({}), started)),
+        is_error: Some(false),
+        meta: None,
+    }
 }
 
 pub(crate) fn success_envelope_with_meta(data: Value, meta: Value, started: Instant) -> Value {
@@ -440,7 +453,26 @@ fn looks_secret_bearing(token: &str, following: &[&str]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::redact_secret_text;
+    use super::{redact_secret_text, success_with_text_summary};
+    use serde_json::json;
+    use std::time::Instant;
+
+    #[test]
+    fn text_summary_result_does_not_duplicate_structured_payload() {
+        let result = success_with_text_summary(
+            json!({"large":"value"}),
+            "Short machine-safe summary.",
+            Instant::now(),
+        );
+        let encoded = serde_json::to_value(&result).expect("result serializes");
+        assert_eq!(encoded["content"][0]["text"], "Short machine-safe summary.");
+        assert_eq!(encoded["structuredContent"]["ok"], true);
+        assert_eq!(encoded["structuredContent"]["data"]["large"], "value");
+        assert_ne!(
+            encoded["content"][0]["text"],
+            encoded["structuredContent"].to_string()
+        );
+    }
 
     #[test]
     fn redacts_secret_bearing_tokens() {

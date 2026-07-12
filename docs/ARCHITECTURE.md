@@ -148,7 +148,8 @@ Only missing predecessor names are injected into allowed tools and schemas,
 with name deduplication separate from edge emission. Match counts remain about
 semantic inventory results; companion and recovery records are separate OpenAI
 extra results so guidance does not inflate search counts. Full schemas and
-hosted-client metadata are emitted only when `include_schema=true`.
+hosted-client metadata are emitted only when `include_schema=true`, and only
+when the complete direct-plus-companion selection contains at most five tools.
 
 Recovery candidates are a typed static catalog covering every current tool
 group and both mutation classes where a group exposes both. Candidate examples
@@ -181,10 +182,15 @@ The provider rejects `limit=0` before inventory search. The public default is
 20; larger values flow into the toolkit unchanged so its hard maximum of 100,
 `match_summary.result_limit`, and `result_limit_clamped` diagnostics remain
 authoritative.
-Oversized query or group inputs retain bounded compact responses, report their
-input truncation reason, mark recovery fail-closed, and do not echo the full
-input. Current full-group contracts also require guided dependency edges and
-allowed-tool names to remain intact within the compact budget.
+The public projection removes free-form query text and query-derived terms and
+returns only presence, recognition, and term counts. Unrecognized group text is
+also omitted. Oversized inputs retain bounded compact responses, report their
+input truncation reason, and mark recovery fail-closed. Current full-group
+contracts require guided dependency edges and allowed-tool names to remain
+intact within the toolkit's 32 KiB compact data budget. The provider emits a
+short RMCP text summary instead of duplicating structured discovery data, then
+guards the complete result at 64 KiB and its structured Contract V1 envelope at
+48 KiB.
 
 Companion edges describe a guided sequence, not server-side invocation proof.
 Each record exposes `required_for_guided_sequence` and
