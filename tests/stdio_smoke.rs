@@ -210,7 +210,9 @@ fn find_tools_pairs_apply_results_with_plan_or_preview() {
             result["type"] == "workflow_companion"
                 && result["name"] == companion_tool
                 && result["before_tool"] == apply_tool
-                && result["required"] == true
+                && result["required_for_guided_sequence"] == true
+                && result["server_call_enforced"] == false
+                && result.get("required").is_none()
         }));
         for non_mutating_name in allowed.iter().filter_map(|name| {
             name.as_str()
@@ -247,6 +249,109 @@ fn find_tools_pairs_apply_results_with_plan_or_preview() {
         .expect("full schema map");
     assert!(schemas.contains_key("gam_rest_write_apply"));
     assert!(schemas.contains_key("gam_rest_write_plan"));
+}
+
+#[test]
+fn find_tools_models_soap_builder_plan_apply_dependencies() {
+    let mut process = StdioMcpProcess::start(env!("CARGO_BIN_EXE_google-ad-manager-mcp"));
+    let plan_response = process.call_tool(
+        130,
+        "find_tools",
+        json!({
+            "query":"gam soap trafficking plan forecast line item",
+            "group":"trafficking",
+            "read_only":true,
+            "limit":1,
+            "include_schema":true
+        }),
+    );
+    let plan_data = &plan_response["result"]["structuredContent"]["data"];
+    let plan_results = plan_data["results"].as_array().expect("plan results");
+    assert!(plan_results.iter().any(|result| {
+        result["type"] == "tool" && result["name"] == "gam_soap_trafficking_plan"
+    }));
+    let plan_edges = plan_results
+        .iter()
+        .filter(|result| result["type"] == "workflow_companion")
+        .map(|result| {
+            (
+                result["name"].as_str().expect("companion name"),
+                result["before_tool"].as_str().expect("edge target"),
+                result["required_for_guided_sequence"]
+                    .as_bool()
+                    .expect("guided requirement"),
+                result["server_call_enforced"]
+                    .as_bool()
+                    .expect("server enforcement"),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        plan_edges,
+        vec![(
+            "gam_soap_payload_build",
+            "gam_soap_trafficking_plan",
+            false,
+            false,
+        )]
+    );
+    let plan_schemas = plan_data["schemas"].as_object().expect("plan schemas");
+    assert!(plan_schemas.contains_key("gam_soap_trafficking_plan"));
+    assert!(plan_schemas.contains_key("gam_soap_payload_build"));
+
+    let apply_response = process.call_tool(
+        131,
+        "find_tools",
+        json!({
+            "query":"gam soap trafficking apply creative",
+            "group":"trafficking",
+            "read_only":false,
+            "limit":1,
+            "include_schema":true
+        }),
+    );
+    let apply_data = &apply_response["result"]["structuredContent"]["data"];
+    let apply_results = apply_data["results"].as_array().expect("apply results");
+    assert!(apply_results.iter().any(|result| {
+        result["type"] == "tool" && result["name"] == "gam_soap_trafficking_apply"
+    }));
+    let apply_edges = apply_results
+        .iter()
+        .filter(|result| result["type"] == "workflow_companion")
+        .map(|result| {
+            (
+                result["name"].as_str().expect("companion name"),
+                result["before_tool"].as_str().expect("edge target"),
+                result["required_for_guided_sequence"]
+                    .as_bool()
+                    .expect("guided requirement"),
+                result["server_call_enforced"]
+                    .as_bool()
+                    .expect("server enforcement"),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        apply_edges,
+        vec![
+            (
+                "gam_soap_payload_build",
+                "gam_soap_trafficking_plan",
+                false,
+                false,
+            ),
+            (
+                "gam_soap_trafficking_plan",
+                "gam_soap_trafficking_apply",
+                true,
+                false,
+            ),
+        ]
+    );
+    let apply_schemas = apply_data["schemas"].as_object().expect("apply schemas");
+    assert!(apply_schemas.contains_key("gam_soap_trafficking_apply"));
+    assert!(apply_schemas.contains_key("gam_soap_trafficking_plan"));
+    assert!(apply_schemas.contains_key("gam_soap_payload_build"));
 }
 
 #[test]

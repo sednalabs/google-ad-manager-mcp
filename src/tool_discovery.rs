@@ -2,7 +2,7 @@
 //!
 //! This module keeps semantic ranking in `mcp-toolkit-rs` and owns only the
 //! Google Ad Manager workflow relationships that the generic toolkit cannot
-//! infer, such as preview-before-apply companions and empty-result recovery.
+//! infer, such as guided builder/plan/apply dependencies and empty-result recovery.
 
 use std::collections::BTreeSet;
 
@@ -47,34 +47,35 @@ pub(crate) const REPRESENTATIVE_DISCOVERY_QUERIES: [(&str, &str); 7] = [
 pub(crate) struct WorkflowCompanion {
     pub tool_name: &'static str,
     pub before_tool: &'static str,
-    pub required: bool,
+    pub required_for_guided_sequence: bool,
     pub reason: &'static str,
 }
 
-const WORKFLOW_COMPANIONS: [WorkflowCompanion; 4] = [
+// Dependency order is topological; keep the SOAP builder before the SOAP plan.
+const WORKFLOW_DEPENDENCIES: [WorkflowCompanion; 4] = [
     WorkflowCompanion {
         tool_name: "gam_rest_write_plan",
         before_tool: "gam_rest_write_apply",
-        required: true,
-        reason: "Create and review the bound REST write plan before any apply call.",
+        required_for_guided_sequence: true,
+        reason: "Guided sequence: review the REST plan before apply. Discovery does not prove that plan ran; apply independently revalidates its exact request and token and retains runtime, scope, confirmation, and readback gates.",
+    },
+    WorkflowCompanion {
+        tool_name: "gam_soap_payload_build",
+        before_tool: "gam_soap_trafficking_plan",
+        required_for_guided_sequence: false,
+        reason: "Guided sequence: optionally build a typed SOAP payload before planning. Discovery does not prove the builder ran; independently authored payload_xml remains valid input, and the plan validates and builds its exact no-upstream-call request.",
     },
     WorkflowCompanion {
         tool_name: "gam_soap_trafficking_plan",
         before_tool: "gam_soap_trafficking_apply",
-        required: true,
-        reason: "Create and review the bound SOAP trafficking plan before any apply call.",
-    },
-    WorkflowCompanion {
-        tool_name: "gam_soap_payload_build",
-        before_tool: "gam_soap_trafficking_apply",
-        required: false,
-        reason: "Use the payload builder when a typed SOAP operation needs a payload_xml fragment.",
+        required_for_guided_sequence: true,
+        reason: "Guided sequence: review the SOAP trafficking plan before apply. Discovery does not prove that plan ran; apply independently revalidates its exact request and token and retains runtime, scope, confirmation, and readback gates.",
     },
     WorkflowCompanion {
         tool_name: "gam_yield_group_exclusions_preview",
         before_tool: "gam_yield_group_exclusions_apply",
-        required: true,
-        reason: "Preview descendant-safe yield-group exclusions before applying them.",
+        required_for_guided_sequence: true,
+        reason: "Guided sequence: review descendant-safe yield-group exclusions before apply. Discovery does not prove that preview ran; apply independently revalidates its exact request and token and retains runtime, scope, confirmation, and readback gates.",
     },
 ];
 
@@ -83,9 +84,25 @@ pub(crate) fn workflow_companions(results: &[ToolSearchResult]) -> Vec<WorkflowC
         .iter()
         .map(|result| result.name.as_str())
         .collect::<BTreeSet<_>>();
-    WORKFLOW_COMPANIONS
+    let mut prerequisites = selected.clone();
+    loop {
+        let mut changed = false;
+        for dependency in WORKFLOW_DEPENDENCIES {
+            if prerequisites.contains(dependency.before_tool) {
+                changed |= prerequisites.insert(dependency.tool_name);
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    let mut emitted_names = BTreeSet::new();
+    WORKFLOW_DEPENDENCIES
         .into_iter()
-        .filter(|companion| selected.contains(companion.before_tool))
+        .filter(|dependency| prerequisites.contains(dependency.before_tool))
+        .filter(|dependency| !selected.contains(dependency.tool_name))
+        .filter(|dependency| emitted_names.insert(dependency.tool_name))
         .collect()
 }
 
@@ -105,7 +122,8 @@ pub(crate) fn companion_result_records(companions: &[WorkflowCompanion]) -> Vec<
                 "name": companion.tool_name,
                 "relation": "before",
                 "before_tool": companion.before_tool,
-                "required": companion.required,
+                "required_for_guided_sequence": companion.required_for_guided_sequence,
+                "server_call_enforced": false,
                 "reason": companion.reason,
                 "mutation_performed": false,
                 "safety": "non_mutating_guidance",
@@ -181,8 +199,8 @@ fn available_groups(inventory: &ToolInventory, read_only: Option<bool>) -> Vec<S
 #[cfg(test)]
 mod tests {
     use super::{
-        REPRESENTATIVE_DISCOVERY_QUERIES, companion_result_records, companion_tool_names,
-        recovery_result_record, workflow_companions,
+        REPRESENTATIVE_DISCOVERY_QUERIES, WorkflowCompanion, companion_result_records,
+        companion_tool_names, recovery_result_record, workflow_companions,
     };
     use crate::tool_surface::build_tool_inventory;
     use mcp_toolkit_core::tool_inventory::{
@@ -247,32 +265,94 @@ mod tests {
     }
 
     #[test]
-    fn apply_results_add_only_non_mutating_plan_first_companions() {
+    fn soap_plan_adds_optional_builder_dependency() {
+        let results = [result("gam_soap_trafficking_plan")];
+        let companions = workflow_companions(&results);
+        assert_eq!(
+            companion_edges(&companions),
+            vec![("gam_soap_payload_build", "gam_soap_trafficking_plan", false,),]
+        );
+        let records = companion_result_records(&companions);
+        assert_eq!(records[0]["required_for_guided_sequence"], false);
+        assert_eq!(records[0]["server_call_enforced"], false);
+        assert!(records[0].get("required").is_none());
+    }
+
+    #[test]
+    fn soap_apply_adds_builder_then_plan_dependencies() {
+        let results = [result("gam_soap_trafficking_apply")];
+        let companions = workflow_companions(&results);
+        assert_eq!(
+            companion_tool_names(&companions),
+            vec!["gam_soap_payload_build", "gam_soap_trafficking_plan"]
+        );
+        assert_eq!(
+            companion_edges(&companions),
+            vec![
+                ("gam_soap_payload_build", "gam_soap_trafficking_plan", false,),
+                (
+                    "gam_soap_trafficking_plan",
+                    "gam_soap_trafficking_apply",
+                    true,
+                ),
+            ]
+        );
+        let records = companion_result_records(&companions);
+        assert_eq!(records[0]["before_tool"], "gam_soap_trafficking_plan");
+        assert_eq!(records[1]["before_tool"], "gam_soap_trafficking_apply");
+        assert!(records.iter().all(|record| {
+            record["relation"] == "before"
+                && record["server_call_enforced"] == false
+                && record["mutation_performed"] == false
+                && record.get("required").is_none()
+                && record["reason"]
+                    .as_str()
+                    .is_some_and(|reason| reason.contains("independently revalidates"))
+        }));
+    }
+
+    #[test]
+    fn rest_and_yield_apply_add_required_guided_predecessors() {
         let results = [
             result("gam_rest_write_apply"),
-            result("gam_soap_trafficking_apply"),
             result("gam_yield_group_exclusions_apply"),
         ];
         let companions = workflow_companions(&results);
         assert_eq!(
-            companion_tool_names(&companions),
+            companion_edges(&companions),
             vec![
-                "gam_rest_write_plan",
-                "gam_soap_trafficking_plan",
-                "gam_soap_payload_build",
-                "gam_yield_group_exclusions_preview",
+                ("gam_rest_write_plan", "gam_rest_write_apply", true),
+                (
+                    "gam_yield_group_exclusions_preview",
+                    "gam_yield_group_exclusions_apply",
+                    true,
+                ),
             ]
         );
-        assert!(
-            companions
-                .iter()
-                .all(|companion| !companion.tool_name.ends_with("_apply"))
-        );
         assert!(companion_result_records(&companions).iter().all(|record| {
-            record["relation"] == "before"
-                && record["before_tool"].as_str().is_some()
-                && record["mutation_performed"] == false
+            record["required_for_guided_sequence"] == true
+                && record["server_call_enforced"] == false
+                && record.get("required").is_none()
         }));
+    }
+
+    #[test]
+    fn semantic_prerequisites_are_not_duplicated_as_companions() {
+        let plan_and_apply = [
+            result("gam_soap_trafficking_plan"),
+            result("gam_soap_trafficking_apply"),
+        ];
+        assert_eq!(
+            companion_edges(&workflow_companions(&plan_and_apply)),
+            vec![("gam_soap_payload_build", "gam_soap_trafficking_plan", false,)]
+        );
+
+        let complete_sequence = [
+            result("gam_soap_payload_build"),
+            result("gam_soap_trafficking_plan"),
+            result("gam_soap_trafficking_apply"),
+        ];
+        assert!(workflow_companions(&complete_sequence).is_empty());
     }
 
     #[test]
@@ -344,5 +424,20 @@ mod tests {
             keywords: Vec::new(),
             risk_posture: None,
         }
+    }
+
+    fn companion_edges(
+        companions: &[WorkflowCompanion],
+    ) -> Vec<(&'static str, &'static str, bool)> {
+        companions
+            .iter()
+            .map(|companion| {
+                (
+                    companion.tool_name,
+                    companion.before_tool,
+                    companion.required_for_guided_sequence,
+                )
+            })
+            .collect()
     }
 }
