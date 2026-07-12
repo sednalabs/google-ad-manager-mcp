@@ -335,7 +335,7 @@ pub(crate) fn recovery_result_record(
         "Retry with one outcome phrase and one or two Google Ad Manager nouns.",
         "Remove an incorrect group filter or choose one of the available groups.",
         "Keep read_only=true when you want non-mutating tools; do not relax it merely to force a match.",
-        "Request include_schema=true only after discovery has narrowed the tool set.",
+        "Request include_schema=true only after discovery has narrowed the complete direct-plus-companion selection to no more than five tools.",
     ];
     if !local_state_alternatives.is_empty() {
         guidance.push(
@@ -1104,6 +1104,14 @@ mod tests {
         assert_eq!(recovery["active_filter"]["group_recognized"], false);
         assert_eq!(recovery["active_filter"]["read_only"], true);
         assert!(recovery_queries(&recovery).is_empty());
+        assert!(
+            recovery["retry"]["guidance"]
+                .as_array()
+                .is_some_and(|guidance| guidance.iter().any(|line| {
+                    line.as_str()
+                        .is_some_and(|line| line.contains("no more than five tools"))
+                }))
+        );
         assert_eq!(
             recovery["available_groups"],
             serde_json::json!([
