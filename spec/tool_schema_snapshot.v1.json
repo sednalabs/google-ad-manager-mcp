@@ -573,6 +573,13 @@
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
+          "expected_report_name": {
+            "description": "Optional exact report resource name returned by gam_report_run. Supplying it keeps every poll bound to the original network and report.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "fetch_first_page": {
             "default": true,
             "description": "Also fetch the first page of result rows after completion. Defaults to true.",
@@ -582,9 +589,10 @@
             ]
           },
           "initial_poll_interval_ms": {
-            "description": "Optional initial poll interval override in milliseconds. Values below 250 normalize to 250; maximum 30000.",
+            "description": "Optional initial poll interval override in milliseconds. Must be between 5000 and 30000.",
             "format": "uint64",
-            "minimum": 0,
+            "maximum": 30000,
+            "minimum": 5000,
             "type": [
               "integer",
               "null"
@@ -595,9 +603,10 @@
             "type": "string"
           },
           "poll_timeout_ms": {
-            "description": "Optional polling timeout override in milliseconds. Maximum 86400000.",
+            "description": "Optional polling timeout override in milliseconds. Must be between 1 and 86400000.",
             "format": "uint64",
-            "minimum": 0,
+            "maximum": 86400000,
+            "minimum": 1,
             "type": [
               "integer",
               "null"
@@ -606,7 +615,8 @@
           "result_page_size": {
             "description": "Optional first-page result row cap. Must be between 1 and 1000.",
             "format": "uint32",
-            "minimum": 0,
+            "maximum": 1000,
+            "minimum": 1,
             "type": [
               "integer",
               "null"
@@ -628,7 +638,8 @@
           "page_size": {
             "description": "Optional result row cap. Must be between 1 and 1000.",
             "format": "uint32",
-            "minimum": 0,
+            "maximum": 1000,
+            "minimum": 1,
             "type": [
               "integer",
               "null"
@@ -636,6 +647,7 @@
           },
           "page_token": {
             "description": "Optional next-page token. Must be no more than 4096 bytes.",
+            "maxLength": 4096,
             "type": [
               "string",
               "null"
@@ -667,9 +679,10 @@
             ]
           },
           "initial_poll_interval_ms": {
-            "description": "Optional initial poll interval override in milliseconds. Values below 250 normalize to 250; maximum 30000.",
+            "description": "Optional initial poll interval override in milliseconds. Must be between 5000 and 30000.",
             "format": "uint64",
-            "minimum": 0,
+            "maximum": 30000,
+            "minimum": 5000,
             "type": [
               "integer",
               "null"
@@ -680,9 +693,10 @@
             "type": "string"
           },
           "poll_timeout_ms": {
-            "description": "Optional polling timeout override in milliseconds. Maximum 86400000.",
+            "description": "Optional polling timeout override in milliseconds. Must be between 1 and 86400000.",
             "format": "uint64",
-            "minimum": 0,
+            "maximum": 86400000,
+            "minimum": 1,
             "type": [
               "integer",
               "null"
@@ -695,7 +709,8 @@
           "result_page_size": {
             "description": "Optional first-page result row cap. Must be between 1 and 1000.",
             "format": "uint32",
-            "minimum": 0,
+            "maximum": 1000,
+            "minimum": 1,
             "type": [
               "integer",
               "null"
