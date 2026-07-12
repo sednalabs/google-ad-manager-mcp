@@ -35,7 +35,7 @@ jobs:
           set -euo pipefail
           actual="$(git status --short | awk '{print $2}' | sort)"
           expected="spec/tool_schema_snapshot.v1.json"
-          if [[ "${actual}" != "${expected}" ]]; then
+          if [[ -n "${actual}" && "${actual}" != "${expected}" ]]; then
             echo "Generated files escaped the expected contract scope:" >&2
             git status --short >&2
             exit 1
