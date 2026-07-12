@@ -125,6 +125,12 @@ impl AdManagerServer {
         &self.client
     }
 
+    #[cfg(test)]
+    pub(crate) fn with_test_client(mut self, client: AdManagerClient) -> Self {
+        self.client = client;
+        self
+    }
+
     pub fn scratchpad_sessions(&self) -> &SharedScratchpadSessionManager {
         &self.scratchpad_sessions
     }

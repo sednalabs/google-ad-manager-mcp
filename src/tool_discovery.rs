@@ -178,9 +178,9 @@ pub(crate) struct WorkflowCompanion {
 const WORKFLOW_DEPENDENCIES: [WorkflowDependency; 8] = [
     WorkflowDependency {
         tool_name: "gam_networks_list",
-        before_tool: "gam_report_run",
+        before_tool: "gam_network_catalog_list",
         required_for_guided_sequence: true,
-        reason: "Cold-start report sequence: discover the exact network code before running a saved report. Discovery does not prove that network discovery ran.",
+        reason: "Cold-start catalog sequence: discover the exact network code before listing a network collection. Discovery does not prove that network discovery ran.",
     },
     WorkflowDependency {
         tool_name: "gam_network_catalog_list",
@@ -191,8 +191,8 @@ const WORKFLOW_DEPENDENCIES: [WorkflowDependency; 8] = [
     WorkflowDependency {
         tool_name: "gam_report_run",
         before_tool: "gam_report_operation_poll",
-        required_for_guided_sequence: true,
-        reason: "Asynchronous report sequence: start one report run with wait_for_completion=false, then pass its returned operation_name to gam_report_operation_poll. The poll tool never starts another report run.",
+        required_for_guided_sequence: false,
+        reason: "Asynchronous report sequence: when no operation_name exists yet, start one report run with wait_for_completion=false, then pass its returned operation_name to gam_report_operation_poll. Do not call gam_report_run when an existing operation_name is already available; the poll tool never starts another report run.",
     },
     WorkflowDependency {
         tool_name: "gam_report_operation_poll",
@@ -535,9 +535,9 @@ mod tests {
         assert_eq!(
             companion_edges(&companions),
             vec![
-                ("gam_networks_list", "gam_report_run", true, false),
+                ("gam_networks_list", "gam_network_catalog_list", true, false,),
                 ("gam_network_catalog_list", "gam_report_run", true, false,),
-                ("gam_report_run", "gam_report_operation_poll", true, false,),
+                ("gam_report_run", "gam_report_operation_poll", false, false,),
                 (
                     "gam_report_operation_poll",
                     "gam_report_result_rows",
@@ -797,6 +797,7 @@ mod tests {
             recovery_queries(&reports),
             vec![
                 "start a campaign delivery audit with a saved report",
+                "continue waiting for an existing report operation",
                 "fetch rows from a completed report result",
             ]
         );

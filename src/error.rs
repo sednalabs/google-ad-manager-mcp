@@ -114,7 +114,7 @@ impl AdManagerError {
                 "Rerun the matching plan tool and copy the returned confirmation_token into the matching apply tool."
             }
             Self::ReportRunTimeout { .. } => {
-                "Retry with a longer timeout or poll later with gam_report_result_rows once the run completes."
+                "Retry the existing operation with gam_report_operation_poll and a longer timeout; do not start another report run."
             }
             Self::ReportRunMissingResult { .. } => {
                 "Inspect the completed operation payload and confirm the report was shared with the authenticated principal."

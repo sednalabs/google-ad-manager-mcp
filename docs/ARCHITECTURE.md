@@ -139,8 +139,9 @@ yield-group preview before apply; and filter-validated bounded empty-result
 recovery.
 The provider computes transitive prerequisites in deterministic topological
 order. Direct report-operation discovery adds network lookup, report catalog,
-and the original run; direct SOAP plan discovery adds the builder; and direct
-SOAP apply discovery adds builder then plan. Every reachable edge is emitted
+and the original run as an optional cold-start branch when no operation name is
+available; direct SOAP plan discovery adds the builder; and direct SOAP apply
+discovery adds builder then plan. Every reachable edge is emitted
 even when its predecessor is already a semantic result;
 `tool_already_selected` distinguishes that case from a missing predecessor.
 Only missing predecessor names are injected into allowed tools and schemas,
