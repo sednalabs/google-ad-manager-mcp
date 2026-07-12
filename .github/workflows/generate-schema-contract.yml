@@ -1,0 +1,56 @@
+name: Generate schema contract
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  generate:
+    name: Generate public tool schema snapshot
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        # actions/checkout v6
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        # dtolnay/rust-toolchain stable
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
+
+      - name: Rebaseline tool schema contract
+        run: ./scripts/rebaseline_tool_schema_snapshot.sh
+
+      - name: Verify generated contract scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual="$(git status --short | awk '{print $2}' | sort)"
+          expected="spec/tool_schema_snapshot.v1.json"
+          if [[ "${actual}" != "${expected}" ]]; then
+            echo "Generated files escaped the expected contract scope:" >&2
+            git status --short >&2
+            exit 1
+          fi
+          git diff --check
+          git diff --stat
+
+      - name: Verify regenerated schema contract
+        run: cargo test --locked --test tool_schema_snapshot --all-features
+
+      - name: Upload generated contract
+        # actions/upload-artifact v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: generated-schema-contract
+          path: spec/tool_schema_snapshot.v1.json
+          if-no-files-found: error
+          retention-days: 1
