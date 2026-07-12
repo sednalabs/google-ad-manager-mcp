@@ -57,9 +57,19 @@ reads. Every current scratchpad tool is excluded because the pinned scratchpad
 runtime may create, refresh, or prune local session state even during queries,
 listings, and evidence export. Set `read_only=false` to search only write-like
 or local-state-mutating tools. Use two explicit searches when both mutation
-classes are needed. Scratchpad close and drop
-operations are labelled destructive, while every other scratchpad tool is
-labelled mutating, without implying an upstream GAM write.
+classes are needed. Scratchpad close and drop operations are labelled
+destructive, while every other scratchpad tool is labelled mutating, without
+implying an upstream GAM write.
+
+For an explicit `group="scratchpad", read_only=true` no-match, recovery adds a
+machine-readable `local_state_alternatives` record. It does not change the
+active filter or add scratchpad tools to `openai_allowed_tools`; it explains the
+explicit `group="scratchpad", read_only=false` retry, sets
+`mutation_scope="local_mcp_scratchpad_state"`, states
+`upstream_gam_mutation=false`, and notes that local-state writes need no separate
+runtime write-mode switch once the caller explicitly selects this filter. It
+enumerates every eligible local-state tool and lists close-session/drop-table
+separately as destructive.
 
 Discovery adds guided dependency edges:
 
