@@ -8030,7 +8030,7 @@ mod tests {
             .structured_content
             .as_ref()
             .expect("maximal successful result must include structured content");
-        assert_eq!(response["ok"], true);
+        assert_eq!(response["ok"], true, "{response:#}");
         assert_eq!(response["data"]["identity"]["target_count"], 10);
         assert_eq!(
             response["data"]["recommendation"]["decision"],

@@ -1329,7 +1329,18 @@ fn confirmed_blocker_plus_incomplete_target_is_partial_blocked() {
             "shape_issues":[],
             "provider_request_state":"completed",
             "identity_fingerprint":"0123456789abcdef",
-            "current":{"status":"ACTIVE"}
+            "current":{
+                "ad_unit_code":"fixture_unit",
+                "ad_unit_code_source_fingerprint":"1111111111111111",
+                "status":"ACTIVE",
+                "sizes":{
+                    "source_count":1,
+                    "retained_count":1,
+                    "truncated":false,
+                    "source_fingerprint":"2222222222222222",
+                    "values":[{"width":300,"height":250}]
+                }
+            }
         }),
         json!({
             "ad_unit_id":"201",
@@ -1350,6 +1361,16 @@ fn confirmed_blocker_plus_incomplete_target_is_partial_blocked() {
     assert!(
         compact["targets"][0]
             .get("provider_request_state")
+            .is_none()
+    );
+    assert!(
+        compact["targets"][0]["current"]
+            .get("ad_unit_code_source_fingerprint")
+            .is_none()
+    );
+    assert!(
+        compact["targets"][0]["current"]["sizes"]
+            .get("source_fingerprint")
             .is_none()
     );
     assert_eq!(
