@@ -3132,6 +3132,7 @@ mod tests {
         clip_xml_response, extract_xml_tag, soap_apply_failed, soap_mutation_apply_failed,
         validate_operation_name, validate_report_result_name, validate_rest_write_body,
         validate_report_run_handoff,
+        project_report_operation, validate_report_operation_binding,
         validate_soap_payload_xml,
         validate_report_result_rows_payload,
         validate_report_operation_binding,
