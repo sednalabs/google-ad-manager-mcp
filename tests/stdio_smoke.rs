@@ -305,22 +305,39 @@ fn find_tools_rejects_zero_and_preserves_toolkit_limit_diagnostics() {
             .is_some_and(|reasons| reasons.contains(&json!("result_limit_clamped")))
     );
 
-    let oversized_group = format!("trafficking{}", "x".repeat(1024));
+    let group_terminal_marker = "oversized-group-terminal-marker";
+    let oversized_group = format!("trafficking{}{}", "x".repeat(1024), group_terminal_marker);
     let truncated_group = process.call_tool(
         232,
         "find_tools",
         json!({"query":"quasar zeppelin","group":oversized_group,"read_only":false}),
     );
     let truncated_group_data = &truncated_group["result"]["structuredContent"]["data"];
-    assert!(
-        truncated_group_data["match_summary"]["truncation_reasons"]
-            .as_array()
-            .is_some_and(|reasons| reasons.contains(&json!("group_input")))
-    );
     let truncated_group_recovery = search_recovery(truncated_group_data);
     assert_eq!(
         truncated_group_recovery["active_filter"]["read_only"],
         false
+    );
+    assert_discovery_input_fails_closed(
+        truncated_group_data,
+        "group_input",
+        group_terminal_marker,
+        true,
+    );
+
+    let query_terminal_marker = "oversized-query-terminal-marker";
+    let oversized_query = format!("quasar {}{}", "z".repeat(64 * 1024), query_terminal_marker);
+    let truncated_query = process.call_tool(
+        233,
+        "find_tools",
+        json!({"query":oversized_query,"read_only":true}),
+    );
+    let truncated_query_data = &truncated_query["result"]["structuredContent"]["data"];
+    assert_discovery_input_fails_closed(
+        truncated_query_data,
+        "query_input",
+        query_terminal_marker,
+        false,
     );
 }
 
@@ -512,6 +529,54 @@ fn find_tools_compact_models_exact_soap_dependencies() {
                 "server_call_enforced": false,
             }),
         ]
+    );
+
+    let group_response = process.call_tool(
+        132,
+        "find_tools",
+        json!({"group":"trafficking","limit":100}),
+    );
+    let group_data = &group_response["result"]["structuredContent"]["data"];
+    let group_allowed = group_data["openai_allowed_tools"]
+        .as_array()
+        .expect("trafficking allowed tools");
+    for tool in [
+        "gam_soap_payload_build",
+        "gam_soap_trafficking_plan",
+        "gam_soap_trafficking_apply",
+    ] {
+        assert!(
+            group_allowed.contains(&json!(tool)),
+            "full trafficking discovery omitted {tool}: {group_data}"
+        );
+    }
+    let group_edges = workflow_edges(group_data);
+    assert!(group_edges.contains(&json!({
+        "relation": "before",
+        "name": "gam_soap_payload_build",
+        "before_tool": "gam_soap_trafficking_plan",
+        "tool_already_selected": true,
+        "required": false,
+        "required_for_guided_sequence": false,
+        "required_semantics": "guided_sequence_compatibility_alias",
+        "server_call_enforced": false,
+    })));
+    assert!(group_edges.contains(&json!({
+        "relation": "before",
+        "name": "gam_soap_trafficking_plan",
+        "before_tool": "gam_soap_trafficking_apply",
+        "tool_already_selected": true,
+        "required": true,
+        "required_for_guided_sequence": true,
+        "required_semantics": "guided_sequence_compatibility_alias",
+        "server_call_enforced": false,
+    })));
+    assert_eq!(group_data["compact_summary"]["truncated"], false);
+    assert!(
+        serde_json::to_vec(group_data)
+            .expect("full trafficking discovery serializes")
+            .len()
+            <= 32 * 1024
     );
 }
 
@@ -826,6 +891,40 @@ fn search_recovery(data: &Value) -> &Value {
         .iter()
         .find(|result| result["type"] == "search_recovery")
         .expect("search recovery")
+}
+
+fn assert_discovery_input_fails_closed(
+    data: &Value,
+    reason_code: &str,
+    terminal_marker: &str,
+    expect_empty_examples: bool,
+) {
+    assert_eq!(data["match_summary"]["total_matches"], 0);
+    assert!(
+        data["match_summary"]["truncation_reasons"]
+            .as_array()
+            .is_some_and(|reasons| reasons.contains(&json!(reason_code)))
+    );
+    assert_eq!(data["openai_allowed_tools"], json!([]));
+
+    let recovery = search_recovery(data);
+    assert_eq!(recovery["fail_closed"], true);
+    assert!(
+        recovery["reason_codes"]
+            .as_array()
+            .is_some_and(|reasons| reasons.contains(&json!(reason_code)))
+    );
+    assert_eq!(
+        recovery["retry"]["example_queries_validated_under_active_filter"],
+        true
+    );
+    if expect_empty_examples {
+        assert!(recovery_example_queries(recovery).is_empty());
+    }
+
+    let serialized = serde_json::to_string(data).expect("discovery response serializes");
+    assert!(serialized.len() <= 32 * 1024);
+    assert!(!serialized.contains(terminal_marker));
 }
 
 fn recovery_example_queries(recovery: &Value) -> Vec<&str> {

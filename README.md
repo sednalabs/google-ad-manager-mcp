@@ -294,6 +294,8 @@ ingestion into that session.
 the toolkit, which clamps `match_summary.result_limit` to 100 and reports
 `result_limit_clamped`. Set `include_schema=true` only after narrowing the result
 set when full tool schemas are required.
+Oversized query or group inputs retain bounded fail-closed recovery and do not
+echo the full input.
 Omit `read_only` to search all tools. Set `read_only=true` to search only
 non-mutating execution paths, including plans, previews, and no-mutation proof
 reads. Every current scratchpad tool is excluded because the pinned scratchpad

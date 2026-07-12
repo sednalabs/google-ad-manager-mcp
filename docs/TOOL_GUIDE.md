@@ -48,6 +48,8 @@ least 1. Values above 100 are passed through so the toolkit reports a
 The default `include_schema=false` response omits schemas and hosted-client
 metadata and stays within the toolkit's 32 KiB compact-selection budget. Set
 `include_schema=true` only after discovery has narrowed the candidates.
+Oversized query or group inputs remain bounded, report their input truncation
+reason, mark recovery fail-closed, and do not echo the full input.
 Omit `read_only` to search all tools. Set `read_only=true` to search only
 non-mutating execution paths, including plans, previews, and no-mutation proof
 reads. Every current scratchpad tool is excluded because the pinned scratchpad
