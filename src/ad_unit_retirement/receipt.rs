@@ -117,10 +117,7 @@ pub(super) fn grade_evidence_bundle(
 }
 
 fn compact_complete_evidence(evidence: Value) -> Value {
-    if !matches!(
-        evidence.get("state").and_then(Value::as_str),
-        Some("complete_clear" | "complete_blocked")
-    ) {
+    if evidence.get("state").and_then(Value::as_str) != Some("complete_clear") {
         return evidence;
     }
     let manual_ui_proof_included = evidence
@@ -129,6 +126,8 @@ fn compact_complete_evidence(evidence: Value) -> Value {
         .is_some_and(|included| included);
     let mut compact = json!({
         "state": evidence.get("state").cloned().unwrap_or(Value::Null),
+        "input_state": evidence.get("input_state").cloned().unwrap_or(Value::Null),
+        "provenance": evidence.get("provenance").cloned().unwrap_or(Value::Null),
         "binding_valid": evidence.get("binding_valid").cloned().unwrap_or(Value::Null),
         "complete_for_summary": evidence.get("complete_for_summary").cloned().unwrap_or(Value::Null),
         "freshness_age_seconds": evidence.get("freshness_age_seconds").cloned().unwrap_or(Value::Null),

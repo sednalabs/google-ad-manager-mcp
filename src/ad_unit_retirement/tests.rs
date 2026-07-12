@@ -498,6 +498,8 @@ fn complete_evidence_bundle_keeps_proof_fields_without_repeated_explanation() {
         "telemetry",
     ] {
         assert_eq!(bundle[surface]["state"], "complete_clear");
+        assert!(bundle[surface]["input_state"].is_string());
+        assert_eq!(bundle[surface]["provenance"], "caller_supplied_unverified");
         assert_eq!(bundle[surface]["binding_valid"], true);
         assert_eq!(bundle[surface]["complete_for_summary"], true);
         assert!(bundle[surface]["receipt_binding_fingerprint"].is_string());
@@ -508,6 +510,25 @@ fn complete_evidence_bundle_keeps_proof_fields_without_repeated_explanation() {
         bundle["exchange_protection"]["manual_ui_proof_included"],
         true
     );
+
+    let blocked = grade_evidence_bundle(
+        &[receipt(
+            EvidenceSource::DeliveryReport,
+            EvidenceState::CompleteBlocked,
+            3_999_900,
+        )],
+        "1234567",
+        &["200".to_string()],
+        4_000_000,
+    )
+    .expect("blocked evidence bundle");
+    assert_eq!(blocked["delivery"]["state"], "complete_blocked");
+    assert_eq!(
+        blocked["delivery"]["provenance"],
+        "caller_supplied_unverified"
+    );
+    assert!(blocked["delivery"]["reason"].is_string());
+    assert!(blocked["delivery"]["binding_errors"].is_array());
 }
 
 #[test]
