@@ -16,6 +16,7 @@ All tools return Contract V1 envelopes: `ok/data/meta` on success and
 | `gam_exchange_protection_probe` | Read-only proof for exact ad-unit exchange/yield/protection exposure, with explicit partial-proof states. |
 | `gam_ad_unit_dependency_probe` | Read-only proof for exact ad-unit dependencies across placements and SOAP line-item inventory targeting. |
 | `gam_report_run` | Run a saved Ad Manager report, optionally wait, and optionally fetch the first result page. |
+| `gam_report_operation_poll` | Wait on an existing asynchronous report operation without starting another report run, then optionally fetch the first result page. |
 | `gam_report_result_rows` | Fetch rows from a completed report result resource. |
 | `gam_trafficking_tool_matrix` | Describe REST-supported writes, SOAP trafficking operations, and remaining ergonomics gaps. |
 | `gam_rest_write_plan` | Create a dry-run plan and confirmation token for an allowlisted REST write. |
@@ -106,8 +107,11 @@ Ambiguous or truncated input marks recovery fail-closed and returns no canned
 example queries. Mutating examples require an explicit `read_only=false` search.
 
 Recovery examples are entry-point aware. A broad reports recovery starts with
-`gam_report_run`, then offers `gam_report_result_rows` only as an explicit
-completed-result continuation. A broad scratchpad recovery starts with
+`gam_report_run`, then offers `gam_report_operation_poll` and
+`gam_report_result_rows` only as explicit continuations. Guided report
+dependencies supply `gam_networks_list`, `gam_network_catalog_list` with
+`collection="reports"`, and the run/poll/result sequence without claiming that
+any tool has already executed. A broad scratchpad recovery starts with
 `gam_scratchpad_open_session`, then offers ingestion as an existing-session
 continuation.
 
@@ -410,7 +414,13 @@ operation and returns the `report_result` resource name once complete. If
 `fetch_first_page=true`, it also returns the first page of rows so the first
 successful report run is immediately useful.
 
-Use `gam_report_result_rows` with the returned `result_name` when:
+When `wait_for_completion=false`, the tool starts exactly one report run and
+returns its `operation_name`. Continue that same run with
+`gam_report_operation_poll`; do not call `gam_report_run` again merely to poll.
+The poll tool validates the existing operation name, waits for completion, and
+can fetch the first result page without creating another run.
+
+Use `gam_report_result_rows` with the returned `report_result` when:
 
 - the first page was truncated;
 - you intentionally skipped fetching the first page during `gam_report_run`;

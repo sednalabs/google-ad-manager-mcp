@@ -108,42 +108,46 @@ The initial first-class tool set is:
 4. `gam_networks_list`
 5. `gam_network_catalog_list`
 6. `gam_report_run`
-7. `gam_report_result_rows`
-8. `gam_trafficking_tool_matrix`
-9. `gam_rest_write_plan`
-10. `gam_rest_write_apply`
-11. `gam_soap_payload_build`
-12. `gam_soap_trafficking_plan`
-13. `gam_soap_trafficking_apply`
-14. `gam_yield_group_exclusions_preview`
-15. `gam_yield_group_exclusions_apply`
-16. `gam_scratchpad_open_session`
-17. `gam_scratchpad_close_session`
-18. `gam_scratchpad_list_sessions`
-19. `gam_scratchpad_list_tables`
-20. `gam_scratchpad_drop_table`
-21. `gam_scratchpad_query`
-22. `gam_scratchpad_ingest_network_catalog`
-23. `gam_scratchpad_ingest_report_result_rows`
-24. `gam_scratchpad_ingest_soap_line_items`
-25. `gam_scratchpad_export_evidence_bundle`
+7. `gam_report_operation_poll`
+8. `gam_report_result_rows`
+9. `gam_trafficking_tool_matrix`
+10. `gam_rest_write_plan`
+11. `gam_rest_write_apply`
+12. `gam_soap_payload_build`
+13. `gam_soap_trafficking_plan`
+14. `gam_soap_trafficking_apply`
+15. `gam_yield_group_exclusions_preview`
+16. `gam_yield_group_exclusions_apply`
+17. `gam_scratchpad_open_session`
+18. `gam_scratchpad_close_session`
+19. `gam_scratchpad_list_sessions`
+20. `gam_scratchpad_list_tables`
+21. `gam_scratchpad_drop_table`
+22. `gam_scratchpad_query`
+23. `gam_scratchpad_ingest_network_catalog`
+24. `gam_scratchpad_ingest_report_result_rows`
+25. `gam_scratchpad_ingest_soap_line_items`
+26. `gam_scratchpad_export_evidence_bundle`
 
 `find_tools` is also exposed for deferred-loading and `tool_search` clients. It
 uses the toolkit's additive ranked search path and compact serializer by
 default. The provider layer adds only domain workflow relationships: REST plan
-before apply, optional SOAP payload builder before SOAP plan, SOAP plan before
-SOAP apply, yield-group preview before apply, and filter-validated bounded
-empty-result recovery.
+before apply; a report cold-start and asynchronous continuation chain from
+network discovery through report catalog, run, operation poll, and rows;
+optional SOAP payload builder before SOAP plan; SOAP plan before SOAP apply;
+yield-group preview before apply; and filter-validated bounded empty-result
+recovery.
 The provider computes transitive prerequisites in deterministic topological
-order, so direct SOAP plan discovery adds the builder and direct SOAP apply
-discovery adds builder then plan. Every reachable edge is emitted even when its
-predecessor is already a semantic result; `tool_already_selected` distinguishes
-that case from a missing predecessor. Only missing predecessor names are
-injected into allowed tools and schemas, with name deduplication separate from
-edge emission. Match counts remain about semantic inventory results; companion
-and recovery records are separate OpenAI extra results so guidance does not
-inflate search counts. Full schemas and hosted-client metadata are emitted only
-when `include_schema=true`.
+order. Direct report-operation discovery adds network lookup, report catalog,
+and the original run; direct SOAP plan discovery adds the builder; and direct
+SOAP apply discovery adds builder then plan. Every reachable edge is emitted
+even when its predecessor is already a semantic result;
+`tool_already_selected` distinguishes that case from a missing predecessor.
+Only missing predecessor names are injected into allowed tools and schemas,
+with name deduplication separate from edge emission. Match counts remain about
+semantic inventory results; companion and recovery records are separate OpenAI
+extra results so guidance does not inflate search counts. Full schemas and
+hosted-client metadata are emitted only when `include_schema=true`.
 
 Recovery candidates are a typed static catalog covering every current tool
 group and both mutation classes where a group exposes both. Candidate examples
@@ -155,11 +159,12 @@ examples as validated under it. Invalid groups can have no examples while
 `available_groups` still offers alternatives from the complete strict
 list-visible inventory under the active `read_only` filter. Recovery guidance
 never recommends relaxing the safety filter.
-Omitted or explicitly null `read_only` is normalized to `true` at the provider boundary. Ambiguous
-or truncated input emits no retry examples, and mutating candidates are eligible
-only under an explicit `read_only=false` filter.
+Omitted or explicitly null `read_only` is normalized to `true` at the provider
+boundary. Ambiguous or truncated input emits no retry examples, and mutating
+candidates are eligible only under an explicit `read_only=false` filter.
 For stateful workflows, recovery orders an executable cold-start entry before
-continuations: `gam_report_run` precedes completed-result row retrieval, and
+continuations. Report discovery supplies network lookup, report catalog lookup,
+one report run, existing-operation polling, and completed-result row retrieval;
 `gam_scratchpad_open_session` precedes scratchpad ingestion.
 
 The provider rejects `limit=0` before inventory search. The public default is

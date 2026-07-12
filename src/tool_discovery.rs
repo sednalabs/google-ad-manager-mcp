@@ -20,7 +20,7 @@ pub(crate) struct RepresentativeDiscoveryCandidate {
     pub read_only: bool,
 }
 
-pub(crate) const REPRESENTATIVE_DISCOVERY_CANDIDATES: [RepresentativeDiscoveryCandidate; 19] = [
+pub(crate) const REPRESENTATIVE_DISCOVERY_CANDIDATES: [RepresentativeDiscoveryCandidate; 20] = [
     candidate(
         "set up and authenticate Google Ad Manager",
         "gam_auth_status",
@@ -72,6 +72,12 @@ pub(crate) const REPRESENTATIVE_DISCOVERY_CANDIDATES: [RepresentativeDiscoveryCa
     candidate(
         "start a campaign delivery audit with a saved report",
         "gam_report_run",
+        "reports",
+        true,
+    ),
+    candidate(
+        "continue waiting for an existing report operation",
+        "gam_report_operation_poll",
         "reports",
         true,
     ),
@@ -169,7 +175,31 @@ pub(crate) struct WorkflowCompanion {
 }
 
 // Dependency order is topological; keep the SOAP builder before the SOAP plan.
-const WORKFLOW_DEPENDENCIES: [WorkflowDependency; 4] = [
+const WORKFLOW_DEPENDENCIES: [WorkflowDependency; 8] = [
+    WorkflowDependency {
+        tool_name: "gam_networks_list",
+        before_tool: "gam_report_run",
+        required_for_guided_sequence: true,
+        reason: "Cold-start report sequence: discover the exact network code before running a saved report. Discovery does not prove that network discovery ran.",
+    },
+    WorkflowDependency {
+        tool_name: "gam_network_catalog_list",
+        before_tool: "gam_report_run",
+        required_for_guided_sequence: true,
+        reason: "Cold-start report sequence: list collection=reports with the exact network code to obtain a saved report id before starting a run. Discovery does not prove that report catalog lookup ran.",
+    },
+    WorkflowDependency {
+        tool_name: "gam_report_run",
+        before_tool: "gam_report_operation_poll",
+        required_for_guided_sequence: true,
+        reason: "Asynchronous report sequence: start one report run with wait_for_completion=false, then pass its returned operation_name to gam_report_operation_poll. The poll tool never starts another report run.",
+    },
+    WorkflowDependency {
+        tool_name: "gam_report_operation_poll",
+        before_tool: "gam_report_result_rows",
+        required_for_guided_sequence: false,
+        reason: "Asynchronous report sequence: poll the existing operation until it returns report_result before fetching rows. This step is optional when gam_report_run already waited for completion and returned report_result.",
+    },
     WorkflowDependency {
         tool_name: "gam_rest_write_plan",
         before_tool: "gam_rest_write_apply",
@@ -451,6 +481,29 @@ mod tests {
                     prerequisites,
                     vec!["gam_soap_payload_build", "gam_soap_trafficking_plan"]
                 ),
+                "gam_report_run" => {
+                    assert_eq!(
+                        prerequisites,
+                        vec!["gam_networks_list", "gam_network_catalog_list"]
+                    )
+                }
+                "gam_report_operation_poll" => assert_eq!(
+                    prerequisites,
+                    vec![
+                        "gam_networks_list",
+                        "gam_network_catalog_list",
+                        "gam_report_run",
+                    ]
+                ),
+                "gam_report_result_rows" => assert_eq!(
+                    prerequisites,
+                    vec![
+                        "gam_networks_list",
+                        "gam_network_catalog_list",
+                        "gam_report_run",
+                        "gam_report_operation_poll",
+                    ]
+                ),
                 _ => {}
             }
         }
@@ -464,6 +517,35 @@ mod tests {
             })
             .collect::<BTreeSet<_>>();
         assert_eq!(covered_filter_classes, current_filter_classes);
+    }
+
+    #[test]
+    fn report_rows_add_complete_cold_start_and_async_chain() {
+        let results = [result("gam_report_result_rows")];
+        let companions = workflow_companions(&results);
+        assert_eq!(
+            companion_tool_names(&companions),
+            vec![
+                "gam_networks_list",
+                "gam_network_catalog_list",
+                "gam_report_run",
+                "gam_report_operation_poll",
+            ]
+        );
+        assert_eq!(
+            companion_edges(&companions),
+            vec![
+                ("gam_networks_list", "gam_report_run", true, false),
+                ("gam_network_catalog_list", "gam_report_run", true, false,),
+                ("gam_report_run", "gam_report_operation_poll", true, false,),
+                (
+                    "gam_report_operation_poll",
+                    "gam_report_result_rows",
+                    false,
+                    false,
+                ),
+            ]
+        );
     }
 
     #[test]

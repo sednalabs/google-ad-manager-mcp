@@ -135,6 +135,23 @@ pub(crate) fn build_tool_inventory() -> Result<ToolInventory, ToolInventoryError
             ],
         ),
         cap(
+            "gam_report_operation_poll",
+            "reports",
+            "Wait on an existing Google Ad Manager report operation without starting another run, then optionally fetch the first result page.",
+            [
+                "google",
+                "ad-manager",
+                "reports",
+                "operation",
+                "poll",
+                "wait",
+                "existing",
+                "continue",
+                "resume",
+                "completion",
+            ],
+        ),
+        cap(
             "gam_report_result_rows",
             "reports",
             "Fetch rows from a completed Google Ad Manager report result.",
