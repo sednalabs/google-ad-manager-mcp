@@ -587,7 +587,7 @@
             ]
           },
           "initial_poll_interval_ms": {
-            "description": "Optional initial poll interval override.",
+            "description": "Optional initial poll interval override in milliseconds. Values below 250 normalize to 250; maximum 30000.",
             "format": "uint64",
             "minimum": 0,
             "type": [
@@ -600,7 +600,7 @@
             "type": "string"
           },
           "poll_timeout_ms": {
-            "description": "Optional polling timeout override.",
+            "description": "Optional polling timeout override in milliseconds. Maximum 86400000.",
             "format": "uint64",
             "minimum": 0,
             "type": [
@@ -609,7 +609,7 @@
             ]
           },
           "result_page_size": {
-            "description": "Optional first-page result row cap.",
+            "description": "Optional first-page result row cap. Must be between 1 and 1000.",
             "format": "uint32",
             "minimum": 0,
             "type": [
@@ -631,6 +631,7 @@
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "page_size": {
+            "description": "Optional result row cap. Must be between 1 and 1000.",
             "format": "uint32",
             "minimum": 0,
             "type": [
@@ -639,6 +640,7 @@
             ]
           },
           "page_token": {
+            "description": "Optional next-page token. Must be no more than 4096 bytes.",
             "type": [
               "string",
               "null"
@@ -670,7 +672,7 @@
             ]
           },
           "initial_poll_interval_ms": {
-            "description": "Optional initial poll interval override.",
+            "description": "Optional initial poll interval override in milliseconds. Values below 250 normalize to 250; maximum 30000.",
             "format": "uint64",
             "minimum": 0,
             "type": [
@@ -683,7 +685,7 @@
             "type": "string"
           },
           "poll_timeout_ms": {
-            "description": "Optional polling timeout override.",
+            "description": "Optional polling timeout override in milliseconds. Maximum 86400000.",
             "format": "uint64",
             "minimum": 0,
             "type": [
@@ -696,7 +698,7 @@
             "type": "string"
           },
           "result_page_size": {
-            "description": "Optional first-page result row cap.",
+            "description": "Optional first-page result row cap. Must be between 1 and 1000.",
             "format": "uint32",
             "minimum": 0,
             "type": [
