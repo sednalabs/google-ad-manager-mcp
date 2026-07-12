@@ -358,13 +358,13 @@ pub(crate) fn recovery_result_record(
             "example_queries": example_queries,
         },
     });
-    if !local_state_alternatives.is_empty() {
-        if let Value::Object(recovery) = &mut recovery {
-            recovery.insert(
-                "local_state_alternatives".to_string(),
-                Value::Array(local_state_alternatives),
-            );
-        }
+    if !local_state_alternatives.is_empty()
+        && let Value::Object(recovery) = &mut recovery
+    {
+        recovery.insert(
+            "local_state_alternatives".to_string(),
+            Value::Array(local_state_alternatives),
+        );
     }
     Some(recovery)
 }
