@@ -39,7 +39,7 @@
           },
           "read_only": {
             "default": null,
-            "description": "Restrict discovery to non-mutating tools when true.",
+            "description": "Filter by mutation behavior: omit for all tools; true for only non-mutating\nexecution paths, including previews but excluding all current scratchpad tools;\nfalse for only write-like or local-state-mutating tools.",
             "type": [
               "boolean",
               "null"
