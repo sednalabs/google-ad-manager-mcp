@@ -319,7 +319,7 @@ fn find_tools_rejects_zero_and_preserves_toolkit_limit_diagnostics() {
         false
     );
     assert_discovery_input_fails_closed(
-        truncated_group_data,
+        &truncated_group,
         "group_input",
         group_terminal_marker,
         true,
@@ -332,9 +332,8 @@ fn find_tools_rejects_zero_and_preserves_toolkit_limit_diagnostics() {
         "find_tools",
         json!({"query":oversized_query,"read_only":true}),
     );
-    let truncated_query_data = &truncated_query["result"]["structuredContent"]["data"];
     assert_discovery_input_fails_closed(
-        truncated_query_data,
+        &truncated_query,
         "query_input",
         query_terminal_marker,
         false,
@@ -894,11 +893,12 @@ fn search_recovery(data: &Value) -> &Value {
 }
 
 fn assert_discovery_input_fails_closed(
-    data: &Value,
+    response: &Value,
     reason_code: &str,
     terminal_marker: &str,
     expect_empty_examples: bool,
 ) {
+    let data = &response["result"]["structuredContent"]["data"];
     assert_eq!(data["match_summary"]["total_matches"], 0);
     assert!(
         data["match_summary"]["truncation_reasons"]
@@ -922,9 +922,11 @@ fn assert_discovery_input_fails_closed(
         assert!(recovery_example_queries(recovery).is_empty());
     }
 
-    let serialized = serde_json::to_string(data).expect("discovery response serializes");
-    assert!(serialized.len() <= 32 * 1024);
-    assert!(!serialized.contains(terminal_marker));
+    let compact_data = serde_json::to_string(data).expect("compact discovery data serializes");
+    assert!(compact_data.len() <= 32 * 1024);
+    let full_result = serde_json::to_string(&response["result"])
+        .expect("complete MCP discovery result serializes");
+    assert!(!full_result.contains(terminal_marker));
 }
 
 fn recovery_example_queries(recovery: &Value) -> Vec<&str> {
