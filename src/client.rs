@@ -2603,8 +2603,8 @@ mod tests {
         AD_UNIT_HIERARCHY_FIELDS, AdManagerClient, CatalogCollection, MAX_SOAP_RESPONSE_XML_BYTES,
         NETWORK_HIERARCHY_FIELDS, RestWriteOperation, RestWriteResource, SOAP_ENVELOPE_NAMESPACE,
         SoapTraffickingOperation, ad_unit_hierarchy_list_query, classify_soap_impact, clip_message,
-        clip_message_with_truncation, clip_xml_response, extract_xml_tag, validate_operation_name,
-        validate_report_operation_binding, validate_report_result_name,
+        clip_message_with_truncation, clip_xml_response, extract_xml_tag, project_report_operation,
+        validate_operation_name, validate_report_operation_binding, validate_report_result_name,
         validate_report_result_rows_payload, validate_report_run_handoff, validate_rest_write_body,
         validate_soap_payload_xml,
     };
