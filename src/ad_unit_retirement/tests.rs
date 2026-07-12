@@ -542,7 +542,7 @@ fn assessment_fingerprint_is_network_and_target_bound() {
     let descendants =
         json!({"proof_state":"complete_clear","descendant_result_fingerprint":"descendants"});
     let evidence = json!({"dependency":{"state":"not_run"}});
-    let build = |network_code: &str, target_id: &str| {
+    let build = |network_code: &str, target_id: &str, max_ad_units: u32| {
         build_preflight_response(
             network_code.to_string(),
             vec![target_id.to_string()],
@@ -557,20 +557,24 @@ fn assessment_fingerprint_is_network_and_target_bound() {
             },
             HierarchyScanConfig {
                 page_size: 100,
-                max_ad_units: 100,
+                max_ad_units,
             },
         )
         .expect("bounded assessment")
     };
     assert_ne!(
-        build("1234567", "200")["assessment_fingerprint"],
-        build("7654321", "200")["assessment_fingerprint"]
+        build("1234567", "200", 100)["assessment_fingerprint"],
+        build("7654321", "200", 100)["assessment_fingerprint"]
     );
     assert_ne!(
-        build("1234567", "200")["assessment_fingerprint"],
-        build("1234567", "201")["assessment_fingerprint"]
+        build("1234567", "200", 100)["assessment_fingerprint"],
+        build("1234567", "201", 100)["assessment_fingerprint"]
     );
-    let current = build("1234567", "200");
+    assert_ne!(
+        build("1234567", "200", 100)["assessment_fingerprint"],
+        build("1234567", "200", 10_000)["assessment_fingerprint"]
+    );
+    let current = build("1234567", "200", 100);
     let legacy_stage_four_fingerprint = crate::fingerprint::stable_fingerprint(
         &json!({
             "network_code":"1234567",
@@ -620,6 +624,7 @@ fn recommendation_prioritizes_confirmed_blockers_over_incomplete_surfaces() {
         }),
         &evidence,
         "0123456789abcdef",
+        100,
     );
 
     assert_eq!(
@@ -667,6 +672,7 @@ fn every_incomplete_state_prevents_operator_review_recommendation() {
             &json!({"proof_state":"complete_clear"}),
             &evidence,
             "0123456789abcdef",
+            100,
         );
         assert_eq!(
             recommendation["decision"], "not_eligible_incomplete_evidence",
@@ -690,6 +696,7 @@ fn next_actions_distinguish_live_identity_hierarchy_and_cap_failures() {
         &json!({"proof_state":"complete_clear"}),
         &evidence,
         "0123456789abcdef",
+        100,
     );
     assert_eq!(
         identity["next_actions"][0]["action"],
@@ -704,6 +711,7 @@ fn next_actions_distinguish_live_identity_hierarchy_and_cap_failures() {
         }),
         &evidence,
         "0123456789abcdef",
+        100,
     );
     assert_eq!(
         structural["next_actions"][0]["action"],
@@ -718,6 +726,7 @@ fn next_actions_distinguish_live_identity_hierarchy_and_cap_failures() {
         }),
         &evidence,
         "0123456789abcdef",
+        100,
     );
     assert_eq!(
         capped["next_actions"][0]["action"],
@@ -732,6 +741,7 @@ fn next_actions_distinguish_live_identity_hierarchy_and_cap_failures() {
         }),
         &evidence,
         "0123456789abcdef",
+        100,
     );
     assert_eq!(
         hard_cap["next_actions"][0]["action"],
@@ -749,10 +759,56 @@ fn next_actions_distinguish_live_identity_hierarchy_and_cap_failures() {
         &json!({"proof_state":"complete_clear"}),
         &evidence,
         "0123456789abcdef",
+        100,
     );
     assert_eq!(
         mixed_identity["next_actions"][0]["action"],
         "resolve the confirmed identity blocker and complete the remaining exact identity reads"
+    );
+
+    let capped_at_maximum = recommendation(
+        &json!({"proof_state":"complete_clear"}),
+        &json!({
+            "proof_state":"partial_capped",
+            "issues":["row_cap_reached"]
+        }),
+        &evidence,
+        "0123456789abcdef",
+        10_000,
+    );
+    assert_eq!(
+        capped_at_maximum["next_actions"][0]["action"],
+        "use an authoritative alternate hierarchy proof because the maximum catalog row budget was exhausted"
+    );
+
+    let upstream_read = recommendation(
+        &json!({"proof_state":"complete_clear"}),
+        &json!({
+            "proof_state":"partial_capped",
+            "issues":["upstream_read_incomplete"]
+        }),
+        &evidence,
+        "0123456789abcdef",
+        100,
+    );
+    assert_eq!(
+        upstream_read["next_actions"][0]["action"],
+        "resolve the upstream catalog read failure and rerun the hierarchy proof"
+    );
+
+    let mixed_hard_and_row_cap = recommendation(
+        &json!({"proof_state":"complete_clear"}),
+        &json!({
+            "proof_state":"partial_capped",
+            "issues":["row_cap_reached","page_cap_reached"]
+        }),
+        &evidence,
+        "0123456789abcdef",
+        100,
+    );
+    assert_eq!(
+        mixed_hard_and_row_cap["next_actions"][0]["action"],
+        "use an authoritative alternate hierarchy proof because this assessor reached a hard catalog limit"
     );
 }
 

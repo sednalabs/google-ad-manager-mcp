@@ -206,6 +206,10 @@ fn build_preflight_response(
     let assessment_fingerprint = stable_fingerprint(
         &json!({
             "recommendation_contract_version": RECOMMENDATION_CONTRACT_VERSION,
+            "scan_config": {
+                "ad_unit_page_size": scan_config.page_size,
+                "max_ad_units": scan_config.max_ad_units,
+            },
             "network_code": &network_code,
             "target_ad_unit_ids": &target_ids,
             "identity": &identity,
@@ -214,8 +218,13 @@ fn build_preflight_response(
         })
         .to_string(),
     );
-    let recommendation =
-        recommendation(&identity, &descendants, &evidence, &assessment_fingerprint);
+    let recommendation = recommendation(
+        &identity,
+        &descendants,
+        &evidence,
+        &assessment_fingerprint,
+        scan_config.max_ad_units,
+    );
     let total_request_attempted_count = provider_requests.identity_attempted_count
         + provider_requests.network_attempted_count
         + provider_requests.effective_root_attempted_count

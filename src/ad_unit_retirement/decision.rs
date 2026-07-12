@@ -17,6 +17,7 @@ pub(super) fn recommendation(
     descendants: &Value,
     evidence: &Value,
     assessment_fingerprint: &str,
+    max_ad_units: u32,
 ) -> Value {
     let states = SURFACES
         .iter()
@@ -75,7 +76,9 @@ pub(super) fn recommendation(
 
     let mut next_actions = states
         .iter()
-        .filter_map(|(surface, state)| next_action(surface, state, identity, descendants))
+        .filter_map(|(surface, state)| {
+            next_action(surface, state, identity, descendants, max_ad_units)
+        })
         .collect::<Vec<_>>();
     if observed_non_archived_descendants
         && !states.iter().any(|(surface, state)| {
@@ -118,7 +121,13 @@ pub(super) fn recommendation(
     })
 }
 
-fn next_action(surface: &str, state: &str, identity: &Value, descendants: &Value) -> Option<Value> {
+fn next_action(
+    surface: &str,
+    state: &str,
+    identity: &Value,
+    descendants: &Value,
+    max_ad_units: u32,
+) -> Option<Value> {
     if state == "complete_clear" {
         return None;
     }
@@ -150,13 +159,13 @@ fn next_action(surface: &str, state: &str, identity: &Value, descendants: &Value
             }
             _ => "rerun the exact live identity proof",
         },
-        "descendants" => descendant_next_action(state, descendants),
+        "descendants" => descendant_next_action(state, descendants, max_ad_units),
         _ => evidence_next_action(state),
     };
     Some(json!({"surface": surface, "action": action}))
 }
 
-fn descendant_next_action(state: &str, descendants: &Value) -> &'static str {
+fn descendant_next_action(state: &str, descendants: &Value, max_ad_units: u32) -> &'static str {
     match state {
         "complete_blocked" => {
             "assess each observed non-archived descendant as an exact target before any separate disposition"
@@ -167,11 +176,17 @@ fn descendant_next_action(state: &str, descendants: &Value) -> &'static str {
         "blocked_auth" => "restore authentication and rerun the hierarchy proof",
         "blocked_permission" => "restore catalog read permission and rerun the hierarchy proof",
         "blocked_read" => "resolve the catalog read failure and rerun the hierarchy proof",
-        "partial_capped" if descendant_row_limit_issue(descendants) => {
-            "increase max_ad_units within its supported limit and rerun the complete catalog proof"
-        }
         "partial_capped" if descendant_hard_limit_issue(descendants) => {
             "use an authoritative alternate hierarchy proof because this assessor reached a hard catalog limit"
+        }
+        "partial_capped" if descendant_upstream_read_issue(descendants) => {
+            "resolve the upstream catalog read failure and rerun the hierarchy proof"
+        }
+        "partial_capped" if descendant_row_limit_issue(descendants) && max_ad_units < 10_000 => {
+            "increase max_ad_units within its supported limit and rerun the complete catalog proof"
+        }
+        "partial_capped" if descendant_row_limit_issue(descendants) => {
+            "use an authoritative alternate hierarchy proof because the maximum catalog row budget was exhausted"
         }
         "partial_capped" => {
             "resolve the reported hierarchy, ordering, or row-shape issues and rerun the proof"
@@ -182,6 +197,10 @@ fn descendant_next_action(state: &str, descendants: &Value) -> &'static str {
 
 fn descendant_row_limit_issue(descendants: &Value) -> bool {
     descendant_has_issue(descendants, &["row_cap_reached"])
+}
+
+fn descendant_upstream_read_issue(descendants: &Value) -> bool {
+    descendant_has_issue(descendants, &["upstream_read_incomplete"])
 }
 
 fn descendant_hard_limit_issue(descendants: &Value) -> bool {

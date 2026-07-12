@@ -127,14 +127,16 @@ descendants, dependency, delivery, exchange/protection, site contract, and
 telemetry.
 
 The recommendation repeats the assessment fingerprint, whose preimage includes
-the versioned recommendation contract as well as the network, targets, current
-identity, hierarchy, and evidence. This prevents a later decision-contract
+the versioned recommendation contract and scan configuration as well as the
+network, targets, current identity, hierarchy, and evidence. This prevents a
+later decision-contract
 revision from reusing an earlier-stage fingerprint. It preserves the
 deterministic child-first target order and supplies bounded, surface-aware
 actions for every blocked or incomplete surface. Identity-shape and hierarchy
 reconciliation failures never tell an operator to attach an unrelated receipt.
-Adjustable row caps, hard catalog limits, and structural hierarchy failures have
-distinct guidance. External non-archived descendants remain blockers, but the
+Adjustable row caps, an exhausted maximum row budget, hard catalog limits,
+upstream read failures, and structural hierarchy failures have distinct
+guidance. External non-archived descendants remain blockers, but the
 tool requires each one to be separately assessed as an exact target before it
 suggests any disposition. `operator_review_required` remains true,
 `automated_retirement_eligible` and `safe_to_archive_or_retire` remain false,
