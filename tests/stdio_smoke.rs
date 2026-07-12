@@ -250,6 +250,8 @@ fn find_tools_read_only_filter_excludes_local_scratchpad_writes() {
             "read-only discovery allowed {mutating_name}: {data}"
         );
     }
+    assert!(allowed.contains(&json!("gam_scratchpad_list_sessions")));
+    assert!(allowed.contains(&json!("gam_scratchpad_list_tables")));
     assert!(allowed.contains(&json!("gam_scratchpad_query")));
     assert!(allowed.contains(&json!("gam_scratchpad_export_evidence_bundle")));
 }

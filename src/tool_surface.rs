@@ -382,6 +382,7 @@ fn local_state_write_cap<const N: usize>(
 #[cfg(test)]
 mod tests {
     use super::build_tool_inventory;
+    use mcp_toolkit_core::guarded_action::GuardedActionOperationClass;
     use mcp_toolkit_core::tool_inventory::{ToolInventoryPolicy, ToolOperation, ToolSearchFilter};
 
     #[test]
@@ -470,6 +471,8 @@ mod tests {
                 "read-only names: {names:?}"
             );
         }
+        assert!(names.contains(&"gam_scratchpad_list_sessions"));
+        assert!(names.contains(&"gam_scratchpad_list_tables"));
         assert!(names.contains(&"gam_scratchpad_query"));
         assert!(names.contains(&"gam_scratchpad_export_evidence_bundle"));
 
@@ -483,22 +486,41 @@ mod tests {
             ToolOperation::List,
             &ToolInventoryPolicy::strict(),
         );
-        for mutating_name in [
-            "gam_scratchpad_open_session",
-            "gam_scratchpad_close_session",
-            "gam_scratchpad_drop_table",
-            "gam_scratchpad_ingest_network_catalog",
-            "gam_scratchpad_ingest_report_result_rows",
-            "gam_scratchpad_ingest_soap_line_items",
+        for (mutating_name, expected_class) in [
+            (
+                "gam_scratchpad_open_session",
+                GuardedActionOperationClass::Mutating,
+            ),
+            (
+                "gam_scratchpad_close_session",
+                GuardedActionOperationClass::Destructive,
+            ),
+            (
+                "gam_scratchpad_drop_table",
+                GuardedActionOperationClass::Destructive,
+            ),
+            (
+                "gam_scratchpad_ingest_network_catalog",
+                GuardedActionOperationClass::Mutating,
+            ),
+            (
+                "gam_scratchpad_ingest_report_result_rows",
+                GuardedActionOperationClass::Mutating,
+            ),
+            (
+                "gam_scratchpad_ingest_soap_line_items",
+                GuardedActionOperationClass::Mutating,
+            ),
         ] {
             let result = local_writes
                 .iter()
                 .find(|result| result.name == mutating_name)
                 .unwrap_or_else(|| panic!("missing local-state write {mutating_name}"));
             let posture = result.risk_posture.expect("local-state write posture");
-            assert!(posture.operation_class.is_write_like());
+            assert_eq!(posture.operation_class, expected_class);
             assert!(!posture.requires_runtime_enablement);
             assert!(posture.writes_enabled_by_default);
+            assert!(!posture.post_apply_readback_required);
         }
     }
 
