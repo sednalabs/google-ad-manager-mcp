@@ -13,6 +13,12 @@ use mcp_toolkit_core::tool_inventory::{
 };
 use serde_json::{Value, json};
 
+const SCRATCHPAD_REST_READ_TOOLS: [&str; 2] = [
+    "gam_scratchpad_ingest_network_catalog",
+    "gam_scratchpad_ingest_report_result_rows",
+];
+const SCRATCHPAD_MANAGE_SCOPE_READ_TOOLS: [&str; 1] = ["gam_scratchpad_ingest_soap_line_items"];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct RepresentativeDiscoveryCandidate {
     pub query: &'static str,
@@ -320,7 +326,11 @@ pub(crate) fn recovery_result_record(
     } else {
         Vec::new()
     };
-    let local_state_alternatives = local_state_alternatives(inventory, filter);
+    let local_state_alternatives = if fail_closed_reasons.is_empty() {
+        local_state_alternatives(inventory, filter)
+    } else {
+        Vec::new()
+    };
     let mut guidance = vec![
         "Retry with one outcome phrase and one or two Google Ad Manager nouns.",
         "Remove an incorrect group filter or choose one of the available groups.",
@@ -366,6 +376,9 @@ fn local_state_alternatives(inventory: &ToolInventory, filter: &ToolSearchFilter
 
     let mut eligible_tools = Vec::new();
     let mut destructive_tools = Vec::new();
+    let mut local_only_tools = Vec::new();
+    let mut rest_read_tools = Vec::new();
+    let mut manage_scope_read_tools = Vec::new();
     for capability in inventory.capabilities().into_iter().filter(|capability| {
         capability.group() == Some("scratchpad")
             && !capability.read_only()
@@ -375,23 +388,35 @@ fn local_state_alternatives(inventory: &ToolInventory, filter: &ToolSearchFilter
                 &ToolInventoryPolicy::strict(),
             )
     }) {
-        eligible_tools.push(capability.name().to_string());
+        let name = capability.name().to_string();
+        eligible_tools.push(name.clone());
+        if SCRATCHPAD_MANAGE_SCOPE_READ_TOOLS.contains(&capability.name()) {
+            manage_scope_read_tools.push(name.clone());
+        } else if SCRATCHPAD_REST_READ_TOOLS.contains(&capability.name()) {
+            rest_read_tools.push(name.clone());
+        } else {
+            local_only_tools.push(name.clone());
+        }
         if capability.risk_posture().is_some_and(|posture| {
             posture.operation_class == GuardedActionOperationClass::Destructive
         }) {
-            destructive_tools.push(capability.name().to_string());
+            destructive_tools.push(name);
         }
     }
     eligible_tools.sort();
     destructive_tools.sort();
+    local_only_tools.sort();
+    rest_read_tools.sort();
+    manage_scope_read_tools.sort();
 
     vec![json!({
         "type": "filter_alternative",
         "status": "available_by_explicit_opt_in",
         "reason_code": "active_filter_excludes_local_state_tools",
         "mutation_scope": "local_mcp_scratchpad_state",
+        "discovery_retry_calls_upstream": false,
+        "upstream_gam_reads_possible": true,
         "upstream_gam_mutation": false,
-        "upstream_manage_scope_required": false,
         "runtime_write_enablement_required": false,
         "local_state_writes_enabled_by_default": true,
         "requires_explicit_operator_intent": true,
@@ -400,10 +425,33 @@ fn local_state_alternatives(inventory: &ToolInventory, filter: &ToolSearchFilter
             "read_only": false,
         },
         "eligible_tools": eligible_tools,
+        "tool_access_classes": [
+            {
+                "class": "local_only",
+                "tools": local_only_tools,
+                "upstream_call": false,
+                "scope_required": null,
+                "manage_scope_required": false
+            },
+            {
+                "class": "gam_rest_read",
+                "tools": rest_read_tools,
+                "upstream_call": true,
+                "scope_required": "https://www.googleapis.com/auth/admanager.readonly",
+                "manage_scope_required": false
+            },
+            {
+                "class": "gam_soap_read",
+                "tools": manage_scope_read_tools,
+                "upstream_call": true,
+                "scope_required": "https://www.googleapis.com/auth/admanager",
+                "manage_scope_required": true
+            }
+        ],
         "destructive_tools": destructive_tools,
         "guidance": [
             "This explicit filter enables bounded local scratchpad session state only; it does not authorize or perform a Google Ad Manager mutation.",
-            "Scratchpad open, query, list, ingest, and export calls may create, refresh, or prune local session state.",
+            "Scratchpad open, query, list, ingest, and export calls may create, refresh, or prune local session state; ingest tools can also perform upstream GAM reads under the scope shown in tool_access_classes.",
             "Close-session and drop-table tools remove local state and remain distinctly labelled destructive."
         ]
     })]
@@ -846,8 +894,11 @@ mod tests {
             "active_filter_excludes_local_state_tools"
         );
         assert_eq!(alternative["mutation_scope"], "local_mcp_scratchpad_state");
+        assert_eq!(alternative["discovery_retry_calls_upstream"], false);
+        assert_eq!(alternative["upstream_gam_reads_possible"], true);
         assert_eq!(alternative["upstream_gam_mutation"], false);
         assert_eq!(alternative["local_state_writes_enabled_by_default"], true);
+        assert!(alternative.get("upstream_manage_scope_required").is_none());
         assert_eq!(alternative["retry_filter"]["group"], "scratchpad");
         assert_eq!(alternative["retry_filter"]["read_only"], false);
         assert_eq!(
@@ -869,6 +920,43 @@ mod tests {
             alternative["destructive_tools"],
             serde_json::json!(["gam_scratchpad_close_session", "gam_scratchpad_drop_table"])
         );
+        assert_eq!(
+            alternative["tool_access_classes"],
+            serde_json::json!([
+                {
+                    "class":"local_only",
+                    "tools":[
+                        "gam_scratchpad_close_session",
+                        "gam_scratchpad_drop_table",
+                        "gam_scratchpad_export_evidence_bundle",
+                        "gam_scratchpad_list_sessions",
+                        "gam_scratchpad_list_tables",
+                        "gam_scratchpad_open_session",
+                        "gam_scratchpad_query"
+                    ],
+                    "upstream_call":false,
+                    "scope_required":null,
+                    "manage_scope_required":false
+                },
+                {
+                    "class":"gam_rest_read",
+                    "tools":[
+                        "gam_scratchpad_ingest_network_catalog",
+                        "gam_scratchpad_ingest_report_result_rows"
+                    ],
+                    "upstream_call":true,
+                    "scope_required":"https://www.googleapis.com/auth/admanager.readonly",
+                    "manage_scope_required":false
+                },
+                {
+                    "class":"gam_soap_read",
+                    "tools":["gam_scratchpad_ingest_soap_line_items"],
+                    "upstream_call":true,
+                    "scope_required":"https://www.googleapis.com/auth/admanager",
+                    "manage_scope_required":true
+                }
+            ])
+        );
         assert!(
             recovery
                 .to_string()
@@ -880,6 +968,25 @@ mod tests {
                 .len()
                 < 6 * 1024
         );
+    }
+
+    #[test]
+    fn fail_closed_scratchpad_recovery_does_not_offer_local_state_opt_in() {
+        let inventory = build_tool_inventory().expect("inventory");
+        let filter = ToolSearchFilter {
+            query: Some(format!("scratchpad {}", "z".repeat(64 * 1024))),
+            group: Some("scratchpad".to_string()),
+            read_only: Some(true),
+            limit: Some(100),
+        };
+        let ranked =
+            inventory.search_ranked(&filter, ToolOperation::List, &ToolInventoryPolicy::strict());
+        assert_eq!(ranked.match_summary.total_matches, 0);
+        let recovery = recovery_result_record(&inventory, &filter, &ranked.match_summary)
+            .expect("fail-closed scratchpad recovery");
+        assert_eq!(recovery["fail_closed"], true);
+        assert!(recovery_queries(&recovery).is_empty());
+        assert!(recovery.get("local_state_alternatives").is_none());
     }
 
     #[test]
