@@ -1150,14 +1150,18 @@
             "type": "boolean"
           },
           "page_size": {
+            "description": "Optional result row cap. Must be between 1 and 1000.",
             "format": "uint32",
-            "minimum": 0,
+            "maximum": 1000,
+            "minimum": 1,
             "type": [
               "integer",
               "null"
             ]
           },
           "page_token": {
+            "description": "Optional next-page token. Must be no more than 4096 bytes.",
+            "maxLength": 4096,
             "type": [
               "string",
               "null"

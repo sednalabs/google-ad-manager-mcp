@@ -297,20 +297,25 @@ reports `active_filter`, and marks
 `retry.example_queries_validated_under_active_filter=true`; an invalid group can
 therefore return no examples while still listing alternatives from the complete
 strict list-visible inventory under the active `read_only` filter.
-Ambiguous or truncated input marks recovery fail-closed and emits no canned
-example queries. Mutating examples are available only when the caller explicitly
-sets `read_only=false`.
-Stateful recovery examples begin with executable entry points: report runs
-before completed-result pagination, and scratchpad session opening before
-ingestion into that session.
+Ambiguous, truncated, negative, or exclusion-bearing intent marks provider
+recovery fail-closed and emits no canned positive workflow or local-state
+guidance. Mutating examples are available only when the caller explicitly sets
+`read_only=false`. Stateful scratchpad recovery begins with session opening
+before ingestion. Starting a report creates an upstream job, so
+`gam_report_run` is registered truthfully as non-read-only and requires an
+explicit `read_only=false` discovery filter. It is not a canned retry example.
 
-Report runs send the provider-required empty POST body. Once that POST may have
-been dispatched, transport, response-read, size-limit, status, JSON, and handoff
-failures are all reported as non-replay-safe uncertain handoffs; agents must not
-start a replacement run automatically. Successful runs and subsequent polls
-bind the requested report, returned operation name, `metadata.report`, and final
-`reportResult` to one network/report identity. Poll continuations preserve the
-optional expected report name and use GET only.
+Report runs send the provider-required empty POST body. Definitive 4xx run
+rejections are normal upstream API failures. Once the POST may otherwise have
+been dispatched, transport, response-read, size-limit, plausible server-status,
+JSON, and handoff failures are non-replay-safe uncertain handoffs; agents must
+not start a replacement run automatically. Successful runs and subsequent polls
+bind the requested report, returned operation name, optional `metadata.report`,
+and final `reportResult` to one network/report identity. A known expected report
+can supply omitted metadata, but inconsistent present metadata is rejected. The
+validated POST observation seeds polling, so an already-complete handoff needs no
+extra GET. Poll continuations preserve the optional expected report name and use
+GET only. Invalid long-running-operation result unions fail closed.
 Operation bodies are read through a 64 KiB cap and projected to documented
 fields; result pages are read through a 512 KiB cap, use a maximum page size of
 1,000, validate the documented object/row/page-token/count shapes, and pass
@@ -319,7 +324,9 @@ initial intervals are between 5 and 30 seconds with bounded exponential backoff.
 The absolute deadline covers in-flight GETs as well as sleeps. A timed-out
 continuation increases the bounded timeout instead of replaying the expired
 value. Contract-invalid poll observations preserve the last valid observation
-and a safely resumable GET continuation.
+and a safely resumable GET continuation. A deterministic result-size failure
+returns bounded operation, report, result, and page handles plus a non-executable
+smaller-page adjustment; it never repeats the same oversized page request.
 
 `limit` defaults to 20 and must be at least 1. Values above 100 are passed to
 the toolkit, which clamps `match_summary.result_limit` to 100 and reports
@@ -370,7 +377,9 @@ Each `workflow_companion` record reports `callable_as_tool`,
 `required_for_guided_sequence`, and `server_call_enforced:false`. An existing
 report operation keeps `gam_report_run` only as non-callable cold-start
 guidance, so it is never injected into `openai_allowed_tools` or schemas and
-cannot prompt a duplicate run. Optional SOAP builder guidance remains callable.
+cannot prompt a duplicate run. Outside that continuation context, an explicit
+`read_only=false` report-start search returns the tool and schema normally with
+its toolkit risk posture. Optional SOAP builder guidance remains callable.
 The legacy `required` field remains as an equal
 compatibility alias and is labelled by
 `required_semantics:"guided_sequence_compatibility_alias"`; clients should use
@@ -378,6 +387,13 @@ the new fields. Every reachable dependency edge is emitted even when its
 predecessor is already a semantic tool result. `tool_already_selected` makes
 that state explicit, while allowed-tool and schema injection add only missing
 predecessors and remain deduplicated.
+
+Provider dependencies are composed in full before a deterministic topological
+sort. A dependency cycle fails discovery closed. The content-only projection
+keeps bounded ranked direct matches in order with descriptions and risk posture,
+distinguishes them from companions, and includes the modern
+`required_for_guided_sequence`, `server_call_enforced`, and
+`tool_already_selected` workflow fields.
 
 Discovery ordering is guidance and does not prove that a builder, plan, or
 preview tool was invoked. REST apply revalidates its exact request and token and

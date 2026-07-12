@@ -133,7 +133,13 @@ pub(crate) fn build_tool_inventory() -> Result<ToolInventory, ToolInventoryError
                 "delivery",
                 "start",
             ],
-        ),
+        )
+        .with_risk_posture(GuardedActionPosture {
+            operation_class: GuardedActionOperationClass::Mutating,
+            requires_runtime_enablement: false,
+            writes_enabled_by_default: true,
+            post_apply_readback_required: false,
+        }),
         cap(
             "gam_report_operation_poll",
             "reports",
@@ -440,13 +446,41 @@ mod tests {
             &ToolSearchFilter {
                 query: Some("run report result".to_string()),
                 group: Some("reports".to_string()),
+                read_only: Some(false),
+                limit: Some(10),
+            },
+            ToolOperation::List,
+            &ToolInventoryPolicy::strict(),
+        );
+        let report_run = results
+            .iter()
+            .find(|result| result.name == "gam_report_run")
+            .expect("report run discovery result");
+        assert!(!report_run.read_only);
+        let posture = report_run.risk_posture.expect("report run risk posture");
+        assert_eq!(
+            posture.operation_class,
+            GuardedActionOperationClass::Mutating
+        );
+        assert!(!posture.requires_runtime_enablement);
+        assert!(posture.writes_enabled_by_default);
+        assert!(!posture.post_apply_readback_required);
+
+        let read_only_results = inventory.search(
+            &ToolSearchFilter {
+                query: Some("run report result".to_string()),
+                group: Some("reports".to_string()),
                 read_only: Some(true),
                 limit: Some(10),
             },
             ToolOperation::List,
             &ToolInventoryPolicy::strict(),
         );
-        assert!(results.iter().any(|result| result.name == "gam_report_run"));
+        assert!(
+            read_only_results
+                .iter()
+                .all(|result| result.name != "gam_report_run")
+        );
     }
 
     #[test]

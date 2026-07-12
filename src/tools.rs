@@ -26,7 +26,8 @@ use crate::client::{
     RestWriteOperation, RestWritePlan, RestWriteResource, SoapTraffickingApplyResult,
     SoapTraffickingOperation, SoapTraffickingPlan, YieldGroupUpdateSoapRequest,
     canonical_report_name, project_report_operation, soap_error_message_with_truncation,
-    validate_operation_name, validate_report_run_handoff, validate_soap_api_version,
+    validate_operation_name, validate_report_result_name, validate_report_run_handoff,
+    validate_soap_api_version,
 };
 use crate::config::{
     GCLOUD_ADC_REQUIRED_SCOPE, server_adc_credentials_path, server_cloudsdk_config_dir,
@@ -41,8 +42,9 @@ use crate::evidence::{
 use crate::fingerprint::stable_fingerprint;
 use crate::probe_projection::{ProbeKind, bounded_probe_error, bounded_probe_success};
 use crate::tool_discovery::{
-    companion_result_records, companion_tool_names, recognized_group_filter,
-    recovery_result_record, supplemental_local_state_alternative_records, workflow_companions,
+    companion_result_records, companion_tool_names, compose_workflow_companions,
+    provider_guidance_allowed, recognized_group_filter, recovery_result_record,
+    remove_contextual_condition_only_direct_matches, supplemental_local_state_alternative_records,
 };
 use crate::{AdManagerError, AdManagerServer, MANAGE_SCOPE, McpError};
 use mcp_toolkit_core::guarded_action::{
@@ -66,6 +68,7 @@ const FIND_TOOLS_MAX_MODEL_VISIBLE_BYTES: usize = 48 * 1024;
 const FIND_TOOLS_MAX_RMCP_RESULT_BYTES: usize = 64 * 1024;
 const FIND_TOOLS_MAX_TEXT_BYTES: usize = 12 * 1024;
 const FIND_TOOLS_TEXT_MAX_ALLOWED_TOOLS: usize = 32;
+const FIND_TOOLS_TEXT_MAX_DIRECT_MATCHES: usize = 8;
 const FIND_TOOLS_TEXT_MAX_WORKFLOW_EDGES: usize = 16;
 const MAX_REPORT_MODEL_VISIBLE_BYTES: usize = 768 * 1024;
 const MAX_REPORT_RMCP_RESULT_BYTES: usize = 1536 * 1024;
@@ -514,7 +517,11 @@ pub struct ScratchpadIngestReportRowsArgs {
     pub table_name: String,
     /// Result resource name, for example networks/123/reports/456/results/789.
     pub result_name: String,
+    /// Optional result row cap. Must be between 1 and 1000.
+    #[schemars(range(min = 1, max = 1000))]
     pub page_size: Option<u32>,
+    /// Optional next-page token. Must be no more than 4096 bytes.
+    #[schemars(length(max = 4096))]
     pub page_token: Option<String>,
     /// Append rows to an existing scratchpad table instead of replacing it.
     #[serde(default)]
@@ -575,6 +582,32 @@ fn bounded_find_tools_result(data: Value, started: Instant) -> CallToolResult {
 
 fn find_tools_text_projection(data: &Value) -> String {
     let result_values = data.get("results").and_then(Value::as_array);
+    let direct_values = result_values
+        .into_iter()
+        .flatten()
+        .filter(|result| result.get("type").and_then(Value::as_str) == Some("tool"))
+        .collect::<Vec<_>>();
+    let direct_total = direct_values.len();
+    let direct_matches = direct_values
+        .into_iter()
+        .take(FIND_TOOLS_TEXT_MAX_DIRECT_MATCHES)
+        .enumerate()
+        .map(|(index, result)| {
+            json!({
+                "rank": index + 1,
+                "selection_source": "ranked_direct_match",
+                "name": result.get("name").and_then(Value::as_str),
+                "group": result.get("group").and_then(Value::as_str),
+                "description": result.get("description").and_then(Value::as_str),
+                "read_only": result.get("read_only").and_then(Value::as_bool),
+                "risk_posture": result.get("risk_posture"),
+                "callable_as_tool": true,
+                "tool_already_selected": true,
+                "required_for_guided_sequence": false,
+                "server_call_enforced": false,
+            })
+        })
+        .collect::<Vec<_>>();
     let allowed_tool_values = data.get("openai_allowed_tools").and_then(Value::as_array);
     let allowed_tool_total = allowed_tool_values.map_or(0, Vec::len);
     let allowed_tools = allowed_tool_values
@@ -586,7 +619,12 @@ fn find_tools_text_projection(data: &Value) -> String {
     let workflow_values = result_values
         .into_iter()
         .flatten()
-        .filter(|result| result.get("type").and_then(Value::as_str) == Some("workflow_companion"))
+        .filter(|result| {
+            matches!(
+                result.get("type").and_then(Value::as_str),
+                Some("workflow_companion") | Some("condition_only_match")
+            )
+        })
         .collect::<Vec<_>>();
     let workflow_total = workflow_values.len();
     let workflow = workflow_values
@@ -594,12 +632,34 @@ fn find_tools_text_projection(data: &Value) -> String {
         .take(FIND_TOOLS_TEXT_MAX_WORKFLOW_EDGES)
         .map(|result| {
             json!({
+                "selection_source": if result.get("type").and_then(Value::as_str)
+                    == Some("condition_only_match")
+                {
+                    "ranked_condition_only_match"
+                } else {
+                    "workflow_companion"
+                },
                 "tool": result.get("name").and_then(Value::as_str),
                 "before_tool": result.get("before_tool").and_then(Value::as_str),
+                "description": result.get("description").and_then(Value::as_str),
+                "risk_posture": result
+                    .get("risk_posture")
+                    .or_else(|| result.get("registered_risk_posture")),
                 "callable_as_tool": result.get("callable_as_tool").and_then(Value::as_bool),
                 "selection_semantics": result.get("selection_semantics").and_then(Value::as_str),
                 "invocation_condition": result.get("invocation_condition").and_then(Value::as_str),
                 "required": result.get("required").and_then(Value::as_bool),
+                "required_for_guided_sequence": result
+                    .get("required_for_guided_sequence")
+                    .and_then(Value::as_bool),
+                "server_call_enforced": result
+                    .get("server_call_enforced")
+                    .and_then(Value::as_bool),
+                "tool_already_selected": result
+                    .get("tool_already_selected")
+                    .and_then(Value::as_bool),
+                "effect": result.get("effect").and_then(Value::as_str),
+                "explicit_executable_recovery": result.get("explicit_executable_recovery"),
                 "reason": result.get("reason").and_then(Value::as_str),
             })
         })
@@ -663,6 +723,12 @@ fn find_tools_text_projection(data: &Value) -> String {
             "returned": std::cmp::min(allowed_tool_total, FIND_TOOLS_TEXT_MAX_ALLOWED_TOOLS),
             "truncated": allowed_tool_total > FIND_TOOLS_TEXT_MAX_ALLOWED_TOOLS,
         },
+        "direct_matches": direct_matches,
+        "direct_match_counts": {
+            "total": direct_total,
+            "returned": std::cmp::min(direct_total, FIND_TOOLS_TEXT_MAX_DIRECT_MATCHES),
+            "truncated": direct_total > FIND_TOOLS_TEXT_MAX_DIRECT_MATCHES,
+        },
         "workflow": workflow,
         "workflow_counts": {
             "total": workflow_total,
@@ -690,7 +756,74 @@ fn find_tools_text_projection(data: &Value) -> String {
     }
 }
 
-fn bounded_report_result(data: Value, meta: Value, started: Instant) -> CallToolResult {
+#[derive(Debug, Default)]
+struct ReportSizeHandoff {
+    operation_name: Option<String>,
+    report_name: Option<String>,
+    result_name: Option<String>,
+    requested_page_size: Option<u32>,
+    requested_page_token: Option<String>,
+    next_page_token: Option<String>,
+}
+
+impl ReportSizeHandoff {
+    fn receipt(&self) -> Value {
+        let adjustment = self.result_name.as_ref().map(|result_name| {
+            let recommended_page_size = match self.requested_page_size {
+                Some(1) => None,
+                Some(page_size) => Some((page_size / 2).max(1)),
+                None => Some(1),
+            };
+            json!({
+                "state": "operator_adjustment_required",
+                "executable": false,
+                "tool": "gam_report_result_rows",
+                "result_name": result_name,
+                "requested_page_size": self.requested_page_size,
+                "recommended_page_size": recommended_page_size,
+                "minimum_page_size_reached": self.requested_page_size == Some(1),
+                "reuse_requested_page_token": self.requested_page_token,
+                "guidance": if recommended_page_size.is_some() {
+                    "Issue a new explicit rows request with the smaller recommended page size and the same requested page token."
+                } else {
+                    "The minimum page size was already used; preserve the result handle and use bounded scratchpad ingestion or report an adapter defect instead of repeating the same request."
+                },
+            })
+        });
+        json!({
+            "state": "report_result_too_large",
+            "safe_handles": {
+                "operation_name": self.operation_name,
+                "report_name": self.report_name,
+                "result_name": self.result_name,
+                "page": {
+                    "requested_page_token": self.requested_page_token,
+                    "next_page_token": self.next_page_token,
+                }
+            },
+            "adjustment": adjustment,
+            "automatic_replay_safe": self.result_name.is_some(),
+            "automatic_adjustment_allowed": false,
+        })
+    }
+}
+
+fn deterministic_report_result_size_failure(error: &AdManagerError) -> bool {
+    matches!(
+        error,
+        AdManagerError::UpstreamContract {
+            field: "upstream_response",
+            message,
+        } if message.contains("response exceeded")
+    )
+}
+
+fn bounded_report_result(
+    data: Value,
+    meta: Value,
+    handoff: ReportSizeHandoff,
+    started: Instant,
+) -> CallToolResult {
     let result = contract::success_with_meta(data, meta, started);
     let model_visible_bytes = result
         .structured_content
@@ -704,9 +837,10 @@ fn bounded_report_result(data: Value, meta: Value, started: Instant) -> CallTool
     if model_visible_bytes > MAX_REPORT_MODEL_VISIBLE_BYTES
         || wire_bytes > MAX_REPORT_RMCP_RESULT_BYTES
     {
-        return contract::result_contract_error(
+        return contract::result_contract_error_with_detail(
             "report_result",
-            "report output exceeded its model-visible or complete RMCP result limit; reduce page_size and continue with page_token",
+            "report output exceeded its model-visible or complete RMCP result limit; preserve the handoff receipt and follow its bounded page-adjustment guidance",
+            handoff.receipt(),
             started,
         );
     }
@@ -760,6 +894,19 @@ impl AdManagerServer {
             .truncation_reasons
             .iter()
             .any(|reason| reason == "query_input");
+        if !ranked.match_summary.excluded_query_terms.is_empty()
+            && !ranked
+                .match_summary
+                .truncation_reasons
+                .iter()
+                .any(|reason| reason == "excluded_query_terms")
+        {
+            ranked
+                .match_summary
+                .truncation_reasons
+                .push("excluded_query_terms".to_string());
+        }
+        let allow_provider_guidance = provider_guidance_allowed(&ranked.match_summary);
         let normalized_group = if group_input_invalid {
             None
         } else {
@@ -771,16 +918,59 @@ impl AdManagerServer {
             read_only: ranked.response.read_only,
             limit: Some(limit),
         };
-        let companions = workflow_companions(
-            &ranked.response.results,
-            if query_input_invalid {
-                None
-            } else {
-                recovery_filter.query.as_deref()
-            },
+        let guidance_query = if query_input_invalid {
+            None
+        } else {
+            recovery_filter.query.as_deref()
+        };
+        let preliminary_companions = if allow_provider_guidance {
+            match compose_workflow_companions(&ranked.response.results, guidance_query) {
+                Ok(value) => value,
+                Err(message) => {
+                    return Ok(contract::result_contract_error(
+                        "find_tools.workflow",
+                        message,
+                        started,
+                    ));
+                }
+            }
+        } else {
+            Vec::new()
+        };
+        let condition_only_matches = remove_contextual_condition_only_direct_matches(
+            &mut ranked.response.results,
+            &preliminary_companions,
         );
+        let condition_only_match_count = condition_only_matches.len();
+        let companions = if allow_provider_guidance {
+            match compose_workflow_companions(&ranked.response.results, guidance_query) {
+                Ok(value) => value,
+                Err(message) => {
+                    return Ok(contract::result_contract_error(
+                        "find_tools.workflow",
+                        message,
+                        started,
+                    ));
+                }
+            }
+        } else {
+            Vec::new()
+        };
         let companion_names = companion_tool_names(&companions);
-        let mut extra_results = companion_result_records(&companions);
+        let condition_only_names = condition_only_matches
+            .iter()
+            .filter_map(|result| result.get("name").and_then(Value::as_str))
+            .collect::<BTreeSet<_>>();
+        let mut extra_results = companion_result_records(&companions)
+            .into_iter()
+            .filter(|result| {
+                result
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .is_none_or(|name| !condition_only_names.contains(name))
+            })
+            .collect::<Vec<_>>();
+        extra_results.extend(condition_only_matches);
         if let Some(recovery) =
             recovery_result_record(self.inventory(), &recovery_filter, &ranked.match_summary)
         {
@@ -829,6 +1019,7 @@ impl AdManagerServer {
             "group_recognized": !group_input_invalid
                 && (ranked.response.group.is_none() || normalized_group.is_some()),
             "raw_query_returned": false,
+            "condition_only_direct_matches_filtered": condition_only_match_count,
             "query_term_counts": {
                 "normalized": ranked.match_summary.normalized_query_terms.len(),
                 "excluded": ranked.match_summary.excluded_query_terms.len(),
@@ -1656,7 +1847,7 @@ impl AdManagerServer {
             return Ok(contract::error(err, started));
         }
 
-        let operation = match self
+        let initial_operation = match self
             .client()
             .run_report(&args.network_code, &args.report_id)
             .await
@@ -1678,7 +1869,7 @@ impl AdManagerServer {
         };
 
         let (operation_name, operation) = match validate_report_run_handoff(
-            &operation,
+            &initial_operation,
             &report_name,
         ) {
             Ok(value) => value,
@@ -1689,7 +1880,7 @@ impl AdManagerServer {
                         "started_new_run": true,
                         "continuation_available": false,
                         "automatic_replay_safe": false,
-                        "operation": project_report_operation(&operation),
+                        "operation": project_report_operation(&initial_operation),
                         "operator_action": "Do not automatically call gam_report_run again. Inspect report activity in Ad Manager or retry only with explicit operator approval."
                     }),
                     started,
@@ -1697,7 +1888,58 @@ impl AdManagerServer {
             }
         };
 
+        if initial_operation.get("done").and_then(Value::as_bool) == Some(true)
+            && initial_operation.get("error").is_some()
+        {
+            let message = operation
+                .get("error")
+                .and_then(|error| error.get("message"))
+                .and_then(Value::as_str)
+                .unwrap_or("report execution failed")
+                .to_string();
+            return Ok(contract::error_with_detail(
+                AdManagerError::ReportRunFailed {
+                    operation_name: operation_name.clone(),
+                    message,
+                },
+                json!({
+                    "operation_name": operation_name,
+                    "report_name": report_name,
+                    "started_new_run": true,
+                    "terminal": true,
+                    "continuation_available": false,
+                    "operation": operation,
+                }),
+                started,
+            ));
+        }
+
+        if initial_operation.get("done").and_then(Value::as_bool) == Some(true) {
+            return Ok(poll_report_operation_tool_result(
+                self.client(),
+                ReportOperationPollOptions {
+                    operation_name: &operation_name,
+                    fetch_first_page: wait_for_completion && fetch_first_page,
+                    result_page_size: args.result_page_size,
+                    timeout,
+                    initial_interval,
+                    started_new_run: true,
+                    expected_report_name: Some(&report_name),
+                    initial_operation: Some(initial_operation),
+                    wait_requested: wait_for_completion,
+                },
+                started,
+            )
+            .await);
+        }
+
         if !wait_for_completion {
+            let handoff = ReportSizeHandoff {
+                operation_name: Some(operation_name.clone()),
+                report_name: Some(report_name.clone()),
+                requested_page_size: args.result_page_size,
+                ..ReportSizeHandoff::default()
+            };
             return Ok(bounded_report_result(
                 json!({
                     "operation": operation,
@@ -1727,6 +1969,7 @@ impl AdManagerServer {
                     "max_initial_poll_interval_ms": MAX_REPORT_INITIAL_POLL_INTERVAL_MS,
                     "max_result_page_size": MAX_REPORT_RESULT_PAGE_SIZE,
                 }),
+                handoff,
                 started,
             ));
         }
@@ -1741,6 +1984,8 @@ impl AdManagerServer {
                 initial_interval,
                 started_new_run: true,
                 expected_report_name: Some(&report_name),
+                initial_operation: Some(initial_operation),
+                wait_requested: true,
             },
             started,
         )
@@ -1794,6 +2039,8 @@ impl AdManagerServer {
                 initial_interval,
                 started_new_run: false,
                 expected_report_name: expected_report_name.as_deref(),
+                initial_operation: None,
+                wait_requested: true,
             },
             started,
         )
@@ -1812,19 +2059,48 @@ impl AdManagerServer {
         if let Err(err) = validate_report_result_page_size("page_size", args.page_size) {
             return Ok(contract::error(err, started));
         }
+        let result_name = match validate_report_result_name(&args.result_name) {
+            Ok(value) => value,
+            Err(err) => return Ok(contract::error(err, started)),
+        };
+        let requested_page_token = args
+            .page_token
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        let handoff = ReportSizeHandoff {
+            result_name: Some(result_name.clone()),
+            requested_page_size: args.page_size,
+            requested_page_token: requested_page_token.clone(),
+            ..ReportSizeHandoff::default()
+        };
         match self
             .client()
-            .get_report_result_rows(&args.result_name, args.page_size, args.page_token)
+            .get_report_result_rows(&result_name, args.page_size, requested_page_token)
             .await
         {
-            Ok(payload) => Ok(bounded_report_result(
-                payload,
-                json!({
-                    "result_name": args.result_name,
-                    "max_result_page_size": MAX_REPORT_RESULT_PAGE_SIZE,
-                }),
-                started,
-            )),
+            Ok(payload) => {
+                let handoff = ReportSizeHandoff {
+                    next_page_token: payload
+                        .get("nextPageToken")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                    ..handoff
+                };
+                Ok(bounded_report_result(
+                    payload,
+                    json!({
+                        "result_name": result_name,
+                        "max_result_page_size": MAX_REPORT_RESULT_PAGE_SIZE,
+                    }),
+                    handoff,
+                    started,
+                ))
+            }
+            Err(err) if deterministic_report_result_size_failure(&err) => {
+                Ok(contract::error_with_detail(err, handoff.receipt(), started))
+            }
             Err(err) => Ok(contract::error(err, started)),
         }
     }
@@ -2970,7 +3246,7 @@ fn yield_group_apply_rediscovery_continuation(
     continuation
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct ReportOperationPollOptions<'a> {
     operation_name: &'a str,
     expected_report_name: Option<&'a str>,
@@ -2979,6 +3255,8 @@ struct ReportOperationPollOptions<'a> {
     timeout: std::time::Duration,
     initial_interval: std::time::Duration,
     started_new_run: bool,
+    initial_operation: Option<Value>,
+    wait_requested: bool,
 }
 
 async fn poll_report_operation_tool_result(
@@ -2990,6 +3268,7 @@ async fn poll_report_operation_tool_result(
         .wait_for_report_result_with_state(
             options.operation_name,
             options.expected_report_name,
+            options.initial_operation,
             options.timeout,
             options.initial_interval,
         )
@@ -3049,12 +3328,22 @@ async fn poll_report_operation_tool_result(
         }
     };
 
+    let page_handoff = ReportSizeHandoff {
+        operation_name: Some(options.operation_name.to_string()),
+        report_name: Some(completed.report_name.clone()),
+        result_name: Some(completed.report_result.clone()),
+        requested_page_size: options.result_page_size,
+        ..ReportSizeHandoff::default()
+    };
     let first_page = if options.fetch_first_page {
         match client
             .get_report_result_rows(&completed.report_result, options.result_page_size, None)
             .await
         {
             Ok(value) => Some(value),
+            Err(err) if deterministic_report_result_size_failure(&err) => {
+                return contract::error_with_detail(err, page_handoff.receipt(), started);
+            }
             Err(err) => {
                 return contract::error_with_detail(
                     err,
@@ -3080,9 +3369,18 @@ async fn poll_report_operation_tool_result(
         None
     };
 
+    let handoff = ReportSizeHandoff {
+        next_page_token: first_page
+            .as_ref()
+            .and_then(|page| page.get("nextPageToken"))
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        ..page_handoff
+    };
+
     bounded_report_result(
         json!({
-            "waited": true,
+            "waited": options.wait_requested,
             "started_new_run": options.started_new_run,
             "operation_name": options.operation_name,
             "operation": completed.operation,
@@ -3100,6 +3398,7 @@ async fn poll_report_operation_tool_result(
             "max_initial_poll_interval_ms": MAX_REPORT_INITIAL_POLL_INTERVAL_MS,
             "max_result_page_size": MAX_REPORT_RESULT_PAGE_SIZE,
         }),
+        handoff,
         started,
     )
 }
@@ -7500,6 +7799,14 @@ mod tests {
         let result = bounded_report_result(
             json!({"oversized":"x".repeat(MAX_REPORT_RMCP_RESULT_BYTES)}),
             json!({}),
+            ReportSizeHandoff {
+                operation_name: Some("networks/123/operations/reports/runs/789".to_string()),
+                report_name: Some("networks/123/reports/456".to_string()),
+                result_name: Some("networks/123/reports/456/results/987".to_string()),
+                requested_page_size: Some(100),
+                requested_page_token: Some("page-a".to_string()),
+                next_page_token: Some("page-b".to_string()),
+            },
             Instant::now(),
         );
         assert_eq!(result.is_error, Some(true));
@@ -7509,12 +7816,48 @@ mod tests {
             .expect("structured report result-contract error");
         assert_eq!(structured["ok"], false);
         assert_eq!(structured["error"]["code"], "result_contract_error");
+        let receipt = &structured["error"]["detail"];
+        assert_eq!(
+            receipt["safe_handles"]["operation_name"],
+            "networks/123/operations/reports/runs/789"
+        );
+        assert_eq!(
+            receipt["safe_handles"]["result_name"],
+            "networks/123/reports/456/results/987"
+        );
+        assert_eq!(receipt["safe_handles"]["page"]["next_page_token"], "page-b");
+        assert_eq!(
+            receipt["adjustment"]["state"],
+            "operator_adjustment_required"
+        );
+        assert_eq!(receipt["adjustment"]["executable"], false);
+        assert_eq!(receipt["adjustment"]["requested_page_size"], 100);
+        assert_eq!(receipt["adjustment"]["recommended_page_size"], 50);
+        assert_eq!(receipt["automatic_replay_safe"], true);
+        assert_eq!(receipt["automatic_adjustment_allowed"], false);
+        assert_eq!(
+            receipt["adjustment"]["reuse_requested_page_token"],
+            "page-a"
+        );
         assert!(
             serde_json::to_vec(&result)
                 .expect("bounded report error serializes")
                 .len()
                 < MAX_REPORT_RMCP_RESULT_BYTES
         );
+    }
+
+    #[test]
+    fn report_size_adjustment_never_repeats_the_minimum_page_size() {
+        let receipt = ReportSizeHandoff {
+            result_name: Some("networks/123/reports/456/results/987".to_string()),
+            requested_page_size: Some(1),
+            ..ReportSizeHandoff::default()
+        }
+        .receipt();
+        assert_eq!(receipt["adjustment"]["executable"], false);
+        assert_eq!(receipt["adjustment"]["recommended_page_size"], Value::Null);
+        assert_eq!(receipt["adjustment"]["minimum_page_size_reached"], true);
     }
 
     fn serve_report_http_sequence(responses: Vec<(u16, Value)>) -> ReportTestServer {
@@ -7643,6 +7986,93 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn completed_initial_report_handoff_is_consumed_without_a_get() {
+        let operation_name = "networks/123/operations/reports/runs/789";
+        let report_result = "networks/123/reports/456/results/987";
+        for wait_for_completion in [true, false] {
+            let (base_url, requests, server) = serve_report_http_sequence(vec![(
+                200,
+                json!({
+                    "name": operation_name,
+                    "done": true,
+                    "response": {"reportResult": report_result}
+                }),
+            )]);
+            let client = AdManagerClient::for_test_api_base_url(base_url);
+            let server_under_test = AdManagerServer::new(crate::Settings::default())
+                .expect("build immediate report server")
+                .with_test_client(client);
+            let result = server_under_test
+                .gam_report_run(Parameters(ReportRunArgs {
+                    network_code: "123".to_string(),
+                    report_id: "456".to_string(),
+                    wait_for_completion: Some(wait_for_completion),
+                    fetch_first_page: Some(false),
+                    result_page_size: None,
+                    poll_timeout_ms: Some(1_000),
+                    initial_poll_interval_ms: Some(5_000),
+                }))
+                .await
+                .expect("consume completed report handoff");
+            let response = result
+                .structured_content
+                .expect("completed report response");
+            assert_eq!(response["ok"], true);
+            assert_eq!(response["data"]["report_result"], report_result);
+            assert_eq!(response["data"]["waited"], wait_for_completion);
+            assert!(response["data"].get("continuation").is_none());
+            assert_eq!(
+                response["data"]["operation"]["metadata"]["report"],
+                "networks/123/reports/456"
+            );
+
+            server.join().expect("join immediate report server");
+            let requests = requests.lock().expect("lock immediate report requests");
+            assert_eq!(requests.len(), 1);
+            assert!(requests[0].starts_with("POST "));
+        }
+    }
+
+    #[tokio::test]
+    async fn immediate_terminal_report_error_is_redacted_and_has_no_continuation() {
+        let operation_name = "networks/123/operations/reports/runs/789";
+        let (base_url, requests, server) = serve_report_http_sequence(vec![(
+            200,
+            json!({
+                "name": operation_name,
+                "done": true,
+                "error": {"code": 13, "message": "authorization=secret-value report failed"}
+            }),
+        )]);
+        let client = AdManagerClient::for_test_api_base_url(base_url);
+        let server_under_test = AdManagerServer::new(crate::Settings::default())
+            .expect("build terminal report server")
+            .with_test_client(client);
+        let result = server_under_test
+            .gam_report_run(Parameters(ReportRunArgs {
+                network_code: "123".to_string(),
+                report_id: "456".to_string(),
+                wait_for_completion: Some(false),
+                fetch_first_page: None,
+                result_page_size: None,
+                poll_timeout_ms: None,
+                initial_poll_interval_ms: None,
+            }))
+            .await
+            .expect("classify terminal report handoff");
+        assert_eq!(result.is_error, Some(true));
+        let response = result.structured_content.expect("terminal report response");
+        assert_eq!(response["error"]["code"], "report_run_failed");
+        assert_eq!(response["error"]["detail"]["terminal"], true);
+        assert_eq!(response["error"]["detail"]["continuation_available"], false);
+        assert!(response["error"]["detail"].get("continuation").is_none());
+        assert!(!response.to_string().contains("secret-value"));
+
+        server.join().expect("join terminal report server");
+        assert_eq!(requests.lock().expect("lock terminal requests").len(), 1);
+    }
+
+    #[tokio::test]
     async fn report_run_rejects_a_noncanonical_upstream_operation_handle() {
         let (base_url, requests, server) = serve_report_http_sequence(vec![(
             200,
@@ -7724,6 +8154,34 @@ mod tests {
 
         server.join().expect("join uncertain report-run server");
         assert_eq!(requests.lock().expect("lock uncertain requests").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn definitive_report_run_client_error_is_not_an_uncertain_handoff() {
+        let (base_url, requests, server) =
+            serve_report_http_sequence(vec![(400, json!({"error":"invalid saved report"}))]);
+        let client = AdManagerClient::for_test_api_base_url(base_url);
+        let server_under_test = AdManagerServer::new(crate::Settings::default())
+            .expect("build rejected report-run server")
+            .with_test_client(client);
+        let result = server_under_test
+            .gam_report_run(Parameters(ReportRunArgs {
+                network_code: "123".to_string(),
+                report_id: "456".to_string(),
+                wait_for_completion: Some(false),
+                fetch_first_page: None,
+                result_page_size: None,
+                poll_timeout_ms: None,
+                initial_poll_interval_ms: None,
+            }))
+            .await
+            .expect("classify definitive report rejection");
+        let response = result.structured_content.expect("rejected run response");
+        assert_eq!(response["error"]["code"], "upstream_api_error");
+        assert!(response["error"].get("detail").is_none());
+
+        server.join().expect("join rejected report-run server");
+        assert_eq!(requests.lock().expect("lock rejected requests").len(), 1);
     }
 
     #[tokio::test]
@@ -8306,6 +8764,19 @@ mod tests {
             .expect("structured oversized-result error");
         assert_eq!(response["ok"], false);
         assert_eq!(response["error"]["code"], "upstream_contract_error");
+        assert_eq!(
+            response["error"]["detail"]["safe_handles"]["result_name"],
+            report_result
+        );
+        assert_eq!(
+            response["error"]["detail"]["adjustment"]["executable"],
+            false
+        );
+        assert_eq!(
+            response["error"]["detail"]["adjustment"]["recommended_page_size"],
+            5
+        );
+        assert!(response["error"]["detail"].get("continuation").is_none());
 
         server.join().expect("join oversized report result server");
         let requests = requests.lock().expect("lock oversized result requests");
@@ -9000,7 +9471,7 @@ mod tests {
             reason: "keep special inventory out of broad yield".to_string(),
             expected_impact: Some("preserve sponsorship priority".to_string()),
             rollback_note: Some("remove the two exclusion entries".to_string()),
-            idempotency_key: Some("ops-w123".to_string()),
+            idempotency_key: Some("request-123".to_string()),
         };
         let request_receipt = yield_group_exclusion_apply_request(&request);
         let round_trip: YieldGroupExclusionRequestArgs =

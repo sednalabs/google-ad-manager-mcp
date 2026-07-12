@@ -60,11 +60,13 @@ one pull request.
   package revisions would be unsupported. The coherent toolkit lock
   intentionally resolves `rmcp` 2.1.0 with its compatible `rmcp-macros` 2.2.0;
   independently pinning or rolling back the macro crate is unsupported.
-- **Compatibility proof:** exact server head
-  `e52c68b2eac4ddc94402f504f5c6b4ea3e43940a` passed hosted
-  [Rust baseline](https://github.com/sednalabs/google-ad-manager-mcp/actions/runs/29198446153),
-  [Cargo package readiness](https://github.com/sednalabs/google-ad-manager-mcp/actions/runs/29198446138),
-  and [dependency governance](https://github.com/sednalabs/google-ad-manager-mcp/actions/runs/29198446127).
+- **Compatibility proof:** reviewed dependency-upgrade checkpoint
+  `b25b735932cfae4c342bfd929bd6d273a1ce8667` passed hosted
+  [Rust baseline](https://github.com/sednalabs/google-ad-manager-mcp/actions/runs/29206016805),
+  [Cargo package readiness](https://github.com/sednalabs/google-ad-manager-mcp/actions/runs/29206016824),
+  and [dependency governance](https://github.com/sednalabs/google-ad-manager-mcp/actions/runs/29206016814).
+  Subsequent feature refinements remain covered by the pull request's exact-head
+  checks rather than rewriting this immutable dependency-upgrade receipt.
   Those lanes cover compilation, Clippy, focused stdio/tool contracts, package
   installation, dependency policy, and the RMCP pin check.
 - **Rollback:** use the standard reviewed revert path for the complete pull

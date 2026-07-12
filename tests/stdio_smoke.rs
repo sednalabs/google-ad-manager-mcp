@@ -69,7 +69,7 @@ fn find_tools_is_semantic_compact_and_recoverable() {
             3,
             "start a campaign delivery audit with a saved report",
             "gam_report_run",
-            true,
+            false,
         ),
         (
             4,
@@ -226,11 +226,35 @@ fn find_tools_is_semantic_compact_and_recoverable() {
             .as_array()
             .is_some_and(|tools| tools.contains(&json!("gam_report_result_rows")))
     );
+    assert_eq!(
+        content_projection["direct_matches"][0]["selection_source"],
+        "ranked_direct_match"
+    );
+    assert!(content_projection["direct_matches"][0]["description"].is_string());
+    assert!(content_projection["direct_matches"][0]["risk_posture"].is_object());
+    assert_eq!(
+        content_projection["direct_matches"][0]["tool_already_selected"],
+        true
+    );
 }
 
 #[test]
 fn find_tools_models_complete_report_cold_start_and_async_continuation() {
     let mut process = StdioMcpProcess::start(env!("CARGO_BIN_EXE_google-ad-manager-mcp"));
+    let default_run_response = process.call_tool(
+        338,
+        "find_tools",
+        json!({
+            "query":"start a campaign delivery audit with a saved report",
+            "group":"reports"
+        }),
+    );
+    let default_run_data = &default_run_response["result"]["structuredContent"]["data"];
+    assert!(
+        !sorted_string_values(&default_run_data["openai_allowed_tools"])
+            .contains(&"gam_report_run")
+    );
+
     let poll_response = process.call_tool(
         339,
         "find_tools",
@@ -283,6 +307,12 @@ fn find_tools_models_complete_report_cold_start_and_async_continuation() {
     );
     assert_eq!(poll_content["workflow"][0]["tool"], "gam_report_run");
     assert_eq!(poll_content["workflow"][0]["callable_as_tool"], false);
+    assert_eq!(
+        poll_content["workflow"][0]["required_for_guided_sequence"],
+        false
+    );
+    assert_eq!(poll_content["workflow"][0]["server_call_enforced"], false);
+    assert_eq!(poll_content["workflow"][0]["tool_already_selected"], false);
     assert_eq!(
         poll_content["workflow"][0]["invocation_condition"],
         "only_when_no_existing_operation_name"
@@ -346,12 +376,29 @@ fn find_tools_models_complete_report_cold_start_and_async_continuation() {
         json!({
             "query":"start a campaign delivery audit with a saved report",
             "group":"reports",
+            "read_only":false,
             "limit":1,
             "include_schema":true
         }),
     );
-    let run_properties = &run_response["result"]["structuredContent"]["data"]["schemas"]["gam_report_run"]
-        ["inputSchema"]["properties"];
+    let run_data = &run_response["result"]["structuredContent"]["data"];
+    assert_eq!(
+        sorted_string_values(&run_data["openai_allowed_tools"]),
+        vec![
+            "gam_network_catalog_list",
+            "gam_networks_list",
+            "gam_report_run"
+        ]
+    );
+    assert_eq!(
+        sorted_schema_names(run_data),
+        vec![
+            "gam_network_catalog_list",
+            "gam_networks_list",
+            "gam_report_run"
+        ]
+    );
+    let run_properties = &run_data["schemas"]["gam_report_run"]["inputSchema"]["properties"];
     assert_eq!(run_properties["poll_timeout_ms"]["minimum"], 1);
     assert_eq!(run_properties["poll_timeout_ms"]["maximum"], 86_400_000);
     assert_eq!(run_properties["initial_poll_interval_ms"]["minimum"], 5_000);
@@ -361,6 +408,74 @@ fn find_tools_models_complete_report_cold_start_and_async_continuation() {
     );
     assert_eq!(run_properties["result_page_size"]["minimum"], 1);
     assert_eq!(run_properties["result_page_size"]["maximum"], 1_000);
+
+    let existing_operation_response = process.call_tool(
+        344,
+        "find_tools",
+        json!({
+            "query":"continue waiting for an existing report operation",
+            "group":"reports",
+            "read_only":false,
+            "limit":10,
+            "include_schema":true
+        }),
+    );
+    let existing_operation_data =
+        &existing_operation_response["result"]["structuredContent"]["data"];
+    assert!(
+        !sorted_string_values(&existing_operation_data["openai_allowed_tools"])
+            .contains(&"gam_report_run")
+    );
+    assert!(!sorted_schema_names(existing_operation_data).contains(&"gam_report_run"));
+    let run_condition = existing_operation_data["results"]
+        .as_array()
+        .and_then(|results| {
+            results.iter().find(|result| {
+                result["type"] == "condition_only_match" && result["name"] == "gam_report_run"
+            })
+        })
+        .expect("existing-operation report-run condition guidance");
+    assert_eq!(run_condition["callable_as_tool"], false);
+    assert_eq!(run_condition["schema_exposed"], false);
+    assert_eq!(run_condition["before_tool"], "gam_report_operation_poll");
+    assert_eq!(run_condition["tool_already_selected"], true);
+}
+
+#[test]
+fn find_tools_exclusion_intent_suppresses_positive_provider_recovery() {
+    let mut process = StdioMcpProcess::start(env!("CARGO_BIN_EXE_google-ad-manager-mcp"));
+    let no_archive = process.call_tool(
+        342,
+        "find_tools",
+        json!({"query":"do not archive an ad unit","group":"trafficking","limit":20}),
+    );
+    let no_archive_data = &no_archive["result"]["structuredContent"]["data"];
+    assert!(
+        no_archive_data["match_summary"]["truncation_reasons"]
+            .as_array()
+            .is_some_and(|reasons| reasons.contains(&json!("excluded_query_terms")))
+    );
+    assert!(workflow_edges(no_archive_data).is_empty());
+
+    let no_scratchpad = process.call_tool(
+        343,
+        "find_tools",
+        json!({"query":"analyze delivery without scratchpad","read_only":true,"limit":20}),
+    );
+    let no_scratchpad_data = &no_scratchpad["result"]["structuredContent"]["data"];
+    assert!(
+        no_scratchpad_data["match_summary"]["truncation_reasons"]
+            .as_array()
+            .is_some_and(|reasons| reasons.contains(&json!("excluded_query_terms")))
+    );
+    assert!(
+        no_scratchpad_data["results"]
+            .as_array()
+            .is_some_and(|results| results.iter().all(|result| {
+                result["type"] != "filter_alternative"
+                    && result.get("local_state_alternatives").is_none()
+            }))
+    );
 }
 
 #[test]
@@ -1131,6 +1246,23 @@ fn find_tools_read_only_filter_partitions_all_scratchpad_tools() {
             "gam_scratchpad_query"
         ]
     );
+
+    let report_ingest_schema = process.call_tool(
+        128,
+        "find_tools",
+        json!({
+            "query":"gam_scratchpad_ingest_report_result_rows",
+            "group":"scratchpad",
+            "read_only":false,
+            "limit":1,
+            "include_schema":true
+        }),
+    );
+    let properties = &report_ingest_schema["result"]["structuredContent"]["data"]["schemas"]["gam_scratchpad_ingest_report_result_rows"]
+        ["inputSchema"]["properties"];
+    assert_eq!(properties["page_size"]["minimum"], 1);
+    assert_eq!(properties["page_size"]["maximum"], 1_000);
+    assert_eq!(properties["page_token"]["maxLength"], 4_096);
 }
 
 #[test]

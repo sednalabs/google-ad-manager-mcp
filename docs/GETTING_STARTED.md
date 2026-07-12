@@ -132,8 +132,12 @@ For reports:
 5. `gam_report_result_rows` when pagination is needed
 
 Report handles are bound to the requested network/report. The run POST has an
-empty body. Once it may have been dispatched, any transport, response, or
-handoff failure is non-replay-safe: do not automatically run the report again.
+empty body. Definitive 4xx rejection is an upstream API failure; once the POST
+may otherwise have been dispatched, transport, response, server, or handoff
+failure is non-replay-safe: do not automatically run the report again. The
+validated POST observation is reused before any poll GET, and deterministic
+result-size failures return bounded handles plus a non-executable smaller-page
+adjustment.
 Poll timeout is between 1 ms and 24 hours, the initial interval between 5 and 30
 seconds, result pages at 1,000 rows and 512 KiB, and polling applies its absolute
 deadline to every GET and sleep. Continue with the returned
@@ -187,6 +191,9 @@ For scratchpad analysis:
    `gam_scratchpad_ingest_report_result_rows`
 3. `gam_scratchpad_query`
 4. `gam_scratchpad_export_evidence_bundle`
+
+For report-row ingestion, use `page_size` from 1 through 1,000 and keep
+`page_token` within 4,096 bytes.
 
 ## 5. If auth looks configured but access still fails
 

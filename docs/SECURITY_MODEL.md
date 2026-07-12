@@ -46,6 +46,12 @@ counts. Provider semantics are computed only from the toolkit's bounded ranked
 query/group projection and are disabled when input truncation makes that
 projection fail closed; raw caller strings are never rescanned after search.
 Narrow schema expansion is capped at five direct-plus-companion tools.
+Toolkit-reported negative or excluded intent suppresses provider canned workflow
+and scratchpad recovery. Report starts create an upstream job and are registered
+with a non-read-only toolkit risk posture, so default read-only discovery
+excludes them. An explicit `read_only=false` search can expose the start tool,
+but existing-operation continuation intent projects it as condition-only to
+prevent duplicate report runs.
 The complete RMCP result is guarded at 64 KiB with a 48 KiB structured-envelope
 cap and a bounded actionable JSON text projection rather than a duplicate full
 payload. Failed Contract V1 results set MCP `isError=true` as well as
@@ -53,13 +59,17 @@ payload. Failed Contract V1 results set MCP `isError=true` as well as
 
 Report operation and result handles are length-bounded and identity-bound. The
 run request uses an empty body. Once the non-idempotent POST may have been
-dispatched, transport, response, and decode failures are uncertain handoffs with
-`automatic_replay_safe=false` and no automatic retry guidance. The operation
-name, `metadata.report`, and final `reportResult` must
-remain in one network/report scope. Operation/result HTTP bodies and complete
-MCP results have explicit caps, successful row payloads are shape-validated,
-and polling controls have fixed minima/maxima plus an absolute deadline over
-each GET and sleep. GET-only continuations preserve the optional expected report
+dispatched, transport, response, decode, and plausible server failures are
+uncertain handoffs with `automatic_replay_safe=false` and no automatic retry
+guidance; definitive 4xx rejections remain upstream API errors. The operation
+name, optional `metadata.report`, and final `reportResult` remain in one
+network/report scope. Known expected identity may fill omitted metadata but
+cannot override inconsistent present metadata. Invalid LRO result unions fail
+closed, terminal errors set MCP `isError`, and the validated POST observation
+seeds polling. Operation/result HTTP bodies and complete MCP results have
+explicit caps, successful row payloads are shape-validated, and deterministic
+size rejection preserves bounded handles with a non-executable smaller-page
+adjustment. GET-only continuations preserve the optional expected report
 identity and the last valid observation.
 
 ## Tool-surface restrictions
