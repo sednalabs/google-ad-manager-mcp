@@ -1489,10 +1489,7 @@ impl AdManagerClient {
         request: RequestBuilder,
         max_response_bytes: usize,
     ) -> Result<Value, AdManagerError> {
-        let mut response = request
-            .send()
-            .await
-            .map_err(|error| report_run_handoff_error(error))?;
+        let mut response = request.send().await.map_err(report_run_handoff_error)?;
         let status = response.status();
         if response
             .content_length()
@@ -1504,10 +1501,7 @@ impl AdManagerClient {
         }
         let mut bytes = Vec::new();
         loop {
-            let chunk = response
-                .chunk()
-                .await
-                .map_err(|error| report_run_handoff_error(error))?;
+            let chunk = response.chunk().await.map_err(report_run_handoff_error)?;
             let Some(chunk) = chunk else {
                 break;
             };
@@ -1535,7 +1529,7 @@ impl AdManagerClient {
                 "upstream returned an empty report-run handoff".to_string(),
             ));
         }
-        serde_json::from_slice(&bytes).map_err(|error| report_run_handoff_error(error))
+        serde_json::from_slice(&bytes).map_err(report_run_handoff_error)
     }
 
     async fn send_xml(&self, request: RequestBuilder) -> Result<(u16, String), AdManagerError> {
