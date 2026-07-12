@@ -27,12 +27,9 @@ pub(crate) fn success_with_text_summary(
     text_summary: impl Into<String>,
     started: Instant,
 ) -> CallToolResult {
-    CallToolResult {
-        content: vec![ContentBlock::text(text_summary)],
-        structured_content: Some(success_envelope_with_meta(data, json!({}), started)),
-        is_error: Some(false),
-        meta: None,
-    }
+    let mut result = CallToolResult::success(vec![ContentBlock::text(text_summary)]);
+    result.structured_content = Some(success_envelope_with_meta(data, json!({}), started));
+    result
 }
 
 pub(crate) fn success_envelope_with_meta(data: Value, meta: Value, started: Instant) -> Value {
