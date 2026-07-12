@@ -52,9 +52,11 @@ The default `include_schema=false` response omits schemas and hosted-client
 metadata and stays within the toolkit's 32 KiB compact-selection budget. Set
 `include_schema=true` only after discovery has narrowed the complete direct and
 companion selection to at most five tools; broader schema requests fail closed.
-Unrecognized group text is omitted. The structured Contract V1 envelope is
-capped at 48 KiB and the complete RMCP result at 64 KiB, with a short text
-summary rather than a duplicate JSON payload.
+Unrecognized or truncated group text is omitted. The structured Contract V1
+envelope is capped at 48 KiB and the complete RMCP result at 64 KiB. A bounded
+actionable JSON text projection exposes allowed tools, workflow edges, recovery,
+and schema names to content-only clients without duplicating the full payload;
+complete records and requested schemas remain in `structuredContent.data`.
 Omit `read_only`, set it to `null`, or set `read_only=true` to search only non-mutating execution
 paths, including plans, previews, and no-mutation proof
 reads. Every current scratchpad tool is excluded because the pinned scratchpad
@@ -65,7 +67,8 @@ classes are needed. Scratchpad close and drop operations are labelled
 destructive, while every other scratchpad tool is labelled mutating, without
 implying an upstream GAM write.
 
-For an explicit `group="scratchpad", read_only=true` no-match, recovery adds a
+For an explicit `group="scratchpad", read_only=true` no-match, or a no-match
+with strong scratchpad query intent under `read_only=true`, recovery adds a
 machine-readable `local_state_alternatives` record. It does not change the
 active filter or add scratchpad tools to `openai_allowed_tools`; it explains the
 explicit `group="scratchpad", read_only=false` retry, sets
@@ -117,7 +120,8 @@ string array, `active_filter` records the applied filters, and
 `retry.example_queries_validated_under_active_filter=true` states how the list
 was produced. Invalid groups can return no examples while listing alternatives
 from the complete strict list-visible inventory under the active `read_only`
-filter. Recovery never recommends turning off `read_only` merely to produce a
+filter. Dynamic groups, example queries, and local-state tool lists are capped
+and include total, returned, and truncated counts. Recovery never recommends turning off `read_only` merely to produce a
 match. The only scoped exception is a clear, exact scratchpad request whose
 separate local-state record makes the opt-in, upstream reads, and scope classes
 explicit; fail-closed searches do not receive it.
@@ -137,7 +141,9 @@ continuation.
 
 Operator language remains plan-first. Phrases such as pause, resume, or archive
 a line item map to `gam_soap_trafficking_plan`; deactivate or archive an ad unit
-maps to `gam_rest_write_plan`. Apply tools require `read_only=false` explicitly.
+maps to `gam_rest_write_plan`. Ad-unit archive/deactivate/retirement intent also
+adds network lookup, catalogue identity, dependency proof, and retirement
+assessment before that plan. Apply tools require `read_only=false` explicitly.
 
 ## `gam_network_catalog_list`
 
@@ -438,15 +444,25 @@ When `wait_for_completion=false`, the tool starts exactly one report run and
 returns its `operation_name`. Continue that same run with
 `gam_report_operation_poll`; do not call `gam_report_run` again merely to poll.
 The poll tool validates the existing operation name, waits for completion, and
-can fetch the first result page without creating another run.
+can fetch the first result page without creating another run. The run request,
+returned operation, polled operation, `metadata.report`, and final
+`reportResult` must all bind to the same network/report identity.
 Both the upstream handoff and caller input must match the exact
 `networks/{networkCode}/operations/reports/runs/{operationId}` resource shape;
 noncanonical values are rejected before polling.
+Operation responses are read through a 64 KiB limit and projected to documented
+fields. Result pages are read through a 512 KiB limit, accept page sizes from 1
+through 1,000, and pass model-visible and complete RMCP result guards. Poll
+timeouts are capped at 24 hours, initial intervals normalized to at least 250 ms and capped at 30 seconds, and each sleep
+ends at the absolute deadline rather than overshooting it.
 Post-start timeout or transport errors preserve `operation_name` and a
 GET-only poll continuation, including the effective fetch, page-size, timeout,
 and interval controls for replay. A terminal operation error, missing result,
 or noncanonical provider result includes terminal operation evidence but no
-poll continuation. If completion succeeds but first-page retrieval fails, the
+poll continuation. If the initial POST succeeds but its operation handoff is
+missing, malformed, or cross-target, the receipt reports an uncertain handoff,
+sets `automatic_replay_safe=false`, and prohibits automatic reruns. If
+completion succeeds but first-page retrieval fails, the
 error instead preserves `report_result`, page size, and a
 `gam_report_result_rows` continuation.
 
@@ -468,6 +484,13 @@ Write and trafficking tools are available as guarded preview/apply pairs:
 6. `gam_soap_trafficking_apply`
 7. `gam_yield_group_exclusions_preview`
 8. `gam_yield_group_exclusions_apply`
+
+Every REST/SOAP plan and every non-noop yield preview includes an
+`apply_rediscovery` object. It gives deferred-loading clients the exact
+`find_tools` request (`group="trafficking", read_only=false`) needed to load the
+matching apply schema, plus receipt paths for the reviewed request and
+confirmation token. The continuation requires explicit operator intent and
+does not authorize a mutation or weaken any apply gate.
 
 The default runtime mode is `preview_only`. In that mode, `gam_rest_write_plan`
 can return the exact REST request shape and confirmation token, but

@@ -39,6 +39,9 @@ surface, not an SDK mirror or generic upstream proxy.
   - typed omission accounting and bounded proof error fallbacks
 - `src/tool_surface.rs`
   - `ToolInventory` metadata for `find_tools`
+- `src/tool_discovery.rs`
+  - GAM vocabulary, workflow-companion DAGs, bounded recovery, and local-state
+    access-class guidance over toolkit-ranked results
 - `src/tools.rs`
   - MCP tool argument schemas, SOAP payload template rendering, and
     implementations
@@ -65,6 +68,17 @@ REST beta:
 - allowlisted REST write methods for ad units, placements, saved reports,
   labels, teams, contacts, custom fields, custom targeting keys, applications,
   sites, ad spots, and related batch state actions
+
+The report adapter treats long-running operation handles as bound capabilities,
+not free strings. A run response must bind its operation to the requested
+`networks/{network}/reports/{report}` through `metadata.report`; every poll must
+echo the requested operation name; and the final `reportResult` must belong to
+that same report. Operation reads are capped at 64 KiB and projected to the
+documented name/metadata/done/error/response fields. Result-page reads are
+capped at 512 KiB and page size 1,000, then pass model-visible and complete RMCP
+result guards. Poll controls are capped at 24 hours and 30 seconds, and an
+absolute deadline bounds every sleep. A malformed response after the initial
+POST is an uncertain handoff with automatic replay prohibited.
 
 SOAP v202605 by default:
 
@@ -136,7 +150,9 @@ before apply; a report cold-start and asynchronous continuation chain from
 network discovery through report catalog, run, operation poll, and rows;
 optional SOAP payload builder before SOAP plan; SOAP plan before SOAP apply;
 yield-group preview before apply; and filter-validated bounded empty-result
-recovery.
+recovery. Destructive ad-unit archive/deactivate/retirement intent also adds
+network and catalogue identity, dependency-probe, and retirement-assessment
+predecessors before the REST plan.
 The provider computes transitive prerequisites in deterministic topological
 order. Direct report-operation discovery adds network lookup, report catalog,
 and the original run as an optional cold-start branch when no operation name is
@@ -150,6 +166,9 @@ semantic inventory results; companion and recovery records are separate OpenAI
 extra results so guidance does not inflate search counts. Full schemas and
 hosted-client metadata are emitted only when `include_schema=true`, and only
 when the complete direct-plus-companion selection contains at most five tools.
+Content-only clients receive a bounded actionable JSON projection with allowed
+tools, workflow edges, recovery, and schema names; complete ranked records and
+schemas remain in structured content.
 
 Recovery candidates are a typed static catalog covering every current tool
 group and both mutation classes where a group exposes both. Candidate examples
@@ -159,7 +178,9 @@ active exact `group`/`read_only` filters as the failed search, always at
 `retry.example_queries` as a string array, adds `active_filter`, and marks the
 examples as validated under it. Invalid groups can have no examples while
 `available_groups` still offers alternatives from the complete strict
-list-visible inventory under the active `read_only` filter. Recovery never
+list-visible inventory under the active `read_only` filter. Dynamic group,
+query, and local-state tool lists are capped and report total, returned, and
+truncated counts. Recovery never
 relaxes an upstream-safety filter merely to force a match. A clear, exact
 scratchpad request can instead expose the separately scoped local-state option
 described below; fail-closed searches cannot.
@@ -170,7 +191,8 @@ For stateful workflows, recovery orders an executable cold-start entry before
 continuations. Report discovery supplies network lookup, report catalog lookup,
 one report run, existing-operation polling, and completed-result row retrieval;
 `gam_scratchpad_open_session` precedes scratchpad ingestion.
-An explicit scratchpad search under `read_only=true` remains empty because all
+An explicit scratchpad search, or a query with strong scratchpad intent, under
+`read_only=true` remains empty because all
 current scratchpad calls can touch local session state. Its recovery carries a
 separate `local_state_alternatives` contract that scopes an explicit
 `read_only=false` retry to MCP-local state, denies upstream GAM mutation, and
@@ -183,14 +205,18 @@ The provider rejects `limit=0` before inventory search. The public default is
 `match_summary.result_limit`, and `result_limit_clamped` diagnostics remain
 authoritative.
 The public projection removes free-form query text and query-derived terms and
-returns only presence, recognition, and term counts. Unrecognized group text is
-also omitted. Oversized inputs retain bounded compact responses, report their
+returns only presence, recognition, and term counts. Unrecognized or truncated
+group text is also omitted. Oversized inputs retain bounded compact responses, report their
 input truncation reason, and mark recovery fail-closed. Current full-group
 contracts require guided dependency edges and allowed-tool names to remain
 intact within the toolkit's 32 KiB compact data budget. The provider emits a
-short RMCP text summary instead of duplicating structured discovery data, then
+bounded actionable RMCP text projection rather than duplicating full
+structured discovery data, then
 guards the complete result at 64 KiB and its structured Contract V1 envelope at
 48 KiB.
+
+All Contract V1 failure helpers set MCP `isError=true` while retaining their
+stable `ok:false` structured envelope. Successes retain `isError=false`.
 
 Companion edges describe a guided sequence, not server-side invocation proof.
 Each record exposes `required_for_guided_sequence` and
