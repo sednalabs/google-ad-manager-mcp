@@ -318,18 +318,17 @@ fn validated_recovery_example_queries(
 
 fn available_groups(inventory: &ToolInventory, read_only: Option<bool>) -> Vec<String> {
     let mut groups = inventory
-        .search(
-            &ToolSearchFilter {
-                query: None,
-                group: None,
-                read_only,
-                limit: Some(100),
-            },
-            ToolOperation::List,
-            &ToolInventoryPolicy::strict(),
-        )
+        .capabilities()
         .into_iter()
-        .filter_map(|result| result.group)
+        .filter(|capability| {
+            inventory.is_allowed(
+                capability.name(),
+                ToolOperation::List,
+                &ToolInventoryPolicy::strict(),
+            )
+        })
+        .filter(|capability| read_only.is_none_or(|read_only| capability.read_only() == read_only))
+        .filter_map(|capability| capability.group().map(str::to_string))
         .collect::<Vec<_>>();
     groups.sort();
     groups.dedup();
@@ -339,12 +338,14 @@ fn available_groups(inventory: &ToolInventory, read_only: Option<bool>) -> Vec<S
 #[cfg(test)]
 mod tests {
     use super::{
-        REPRESENTATIVE_DISCOVERY_CANDIDATES, WorkflowCompanion, companion_result_records,
-        companion_tool_names, recovery_result_record, workflow_companions,
+        REPRESENTATIVE_DISCOVERY_CANDIDATES, WorkflowCompanion, available_groups,
+        companion_result_records, companion_tool_names, recovery_result_record,
+        workflow_companions,
     };
     use crate::tool_surface::build_tool_inventory;
     use mcp_toolkit_core::tool_inventory::{
-        ToolInventory, ToolInventoryPolicy, ToolOperation, ToolSearchFilter, ToolSearchResult,
+        ToolCapability, ToolExposure, ToolInventory, ToolInventoryPolicy, ToolOperation,
+        ToolSearchFilter, ToolSearchResult,
     };
     use serde_json::Value;
     use std::collections::BTreeSet;
@@ -724,6 +725,53 @@ mod tests {
                 "setup",
                 "trafficking",
             ])
+        );
+    }
+
+    #[test]
+    fn available_groups_scan_the_complete_list_visible_inventory() {
+        let mut capabilities = (0..105)
+            .map(|index| {
+                ToolCapability::new(format!("visible.{index:03}"))
+                    .with_group("catalog")
+                    .with_read_only(true)
+            })
+            .collect::<Vec<_>>();
+        capabilities.push(
+            ToolCapability::new("zz.late")
+                .with_group("late-group")
+                .with_read_only(true),
+        );
+        capabilities.push(
+            ToolCapability::new("zz.write")
+                .with_group("write-group")
+                .with_read_only(false),
+        );
+        capabilities.push(
+            ToolCapability::new("zz.call-only")
+                .with_group("call-only-group")
+                .with_read_only(true)
+                .with_exposure(ToolExposure::CallOnly),
+        );
+        capabilities.push(
+            ToolCapability::new("zz.disabled")
+                .with_group("disabled-group")
+                .with_read_only(true)
+                .with_exposure(ToolExposure::Disabled),
+        );
+        let inventory = ToolInventory::from_capabilities(capabilities).expect("inventory");
+
+        assert_eq!(
+            available_groups(&inventory, Some(true)),
+            vec!["catalog", "late-group"]
+        );
+        assert_eq!(
+            available_groups(&inventory, Some(false)),
+            vec!["write-group"]
+        );
+        assert_eq!(
+            available_groups(&inventory, None),
+            vec!["catalog", "late-group", "write-group"]
         );
     }
 

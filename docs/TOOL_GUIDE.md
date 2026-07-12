@@ -96,9 +96,10 @@ exact active `group`/`read_only` filters, and `limit=1`; its query is emitted
 only when the expected tool ranks first. `retry.example_queries` remains a
 string array, `active_filter` records the applied filters, and
 `retry.example_queries_validated_under_active_filter=true` states how the list
-was produced. Invalid groups can return no examples while listing valid group
-alternatives. Recovery never recommends turning off `read_only` merely to
-produce a match.
+was produced. Invalid groups can return no examples while listing alternatives
+from the complete strict list-visible inventory under the active `read_only`
+filter. Recovery never recommends turning off `read_only` merely to produce a
+match.
 
 Recovery examples are entry-point aware. A broad reports recovery starts with
 `gam_report_run`, then offers `gam_report_result_rows` only as an explicit

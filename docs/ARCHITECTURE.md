@@ -152,7 +152,8 @@ active exact `group`/`read_only` filters as the failed search, always at
 `limit=1`; only an expected rank-one match is serialized. The response keeps
 `retry.example_queries` as a string array, adds `active_filter`, and marks the
 examples as validated under it. Invalid groups can have no examples while
-`available_groups` still offers filter-valid alternatives. Recovery guidance
+`available_groups` still offers alternatives from the complete strict
+list-visible inventory under the active `read_only` filter. Recovery guidance
 never recommends relaxing the safety filter.
 For stateful workflows, recovery orders an executable cold-start entry before
 continuations: `gam_report_run` precedes completed-result row retrieval, and
