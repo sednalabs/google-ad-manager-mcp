@@ -20,7 +20,7 @@ pub(crate) struct RepresentativeDiscoveryCandidate {
     pub read_only: bool,
 }
 
-pub(crate) const REPRESENTATIVE_DISCOVERY_CANDIDATES: [RepresentativeDiscoveryCandidate; 14] = [
+pub(crate) const REPRESENTATIVE_DISCOVERY_CANDIDATES: [RepresentativeDiscoveryCandidate; 19] = [
     candidate(
         "set up and authenticate Google Ad Manager",
         "gam_auth_status",
@@ -36,6 +36,36 @@ pub(crate) const REPRESENTATIVE_DISCOVERY_CANDIDATES: [RepresentativeDiscoveryCa
     candidate(
         "plan a campaign line item with creatives",
         "gam_soap_trafficking_plan",
+        "trafficking",
+        true,
+    ),
+    candidate(
+        "pause a line item",
+        "gam_soap_trafficking_plan",
+        "trafficking",
+        true,
+    ),
+    candidate(
+        "resume a line item",
+        "gam_soap_trafficking_plan",
+        "trafficking",
+        true,
+    ),
+    candidate(
+        "archive a line item",
+        "gam_soap_trafficking_plan",
+        "trafficking",
+        true,
+    ),
+    candidate(
+        "deactivate an ad unit",
+        "gam_rest_write_plan",
+        "trafficking",
+        true,
+    ),
+    candidate(
+        "archive an ad unit",
+        "gam_rest_write_plan",
         "trafficking",
         true,
     ),
@@ -254,7 +284,11 @@ pub(crate) fn recovery_result_record(
         })
         .cloned()
         .collect::<Vec<_>>();
-    let example_queries = validated_recovery_example_queries(inventory, filter);
+    let example_queries = if fail_closed_reasons.is_empty() {
+        validated_recovery_example_queries(inventory, filter)
+    } else {
+        Vec::new()
+    };
     Some(json!({
         "type": "search_recovery",
         "status": "no_matches",
@@ -295,6 +329,7 @@ fn validated_recovery_example_queries(
                 .read_only
                 .is_none_or(|read_only| candidate.read_only == read_only)
         })
+        .filter(|candidate| candidate.read_only || filter.read_only == Some(false))
         .filter(|candidate| {
             let ranked = inventory.search_ranked(
                 &ToolSearchFilter {
@@ -797,6 +832,25 @@ mod tests {
                 |reasons| reasons.contains(&serde_json::json!("query_intent_ambiguous"))
             )
         );
+        assert!(recovery_queries(&ambiguous_recovery).is_empty());
+    }
+
+    #[test]
+    fn recovery_without_explicit_mutation_filter_never_suggests_apply() {
+        let inventory = build_tool_inventory().expect("inventory");
+        let filter = ToolSearchFilter {
+            query: Some("quasar zeppelin".to_string()),
+            group: None,
+            read_only: None,
+            limit: Some(10),
+        };
+        let recovery = recovery_for_filter(&inventory, &filter);
+        for query in recovery_queries(&recovery) {
+            assert!(
+                candidate_for_query(query).read_only,
+                "implicit mutation recovery query: {query}"
+            );
+        }
     }
 
     fn result(name: &str) -> ToolSearchResult {

@@ -167,7 +167,7 @@ pub(crate) fn build_tool_inventory() -> Result<ToolInventory, ToolInventoryError
         cap(
             "gam_rest_write_plan",
             "trafficking",
-            "Create a dry-run plan and confirmation token for an allowlisted Ad Manager REST write.",
+            "Create a dry-run plan and confirmation token for allowlisted Ad Manager REST create, patch, activate, deactivate, archive, or unarchive operations.",
             [
                 "google",
                 "ad-manager",
@@ -176,6 +176,16 @@ pub(crate) fn build_tool_inventory() -> Result<ToolInventory, ToolInventoryError
                 "plan",
                 "preview",
                 "inventory",
+                "create",
+                "patch",
+                "activate",
+                "deactivate",
+                "archive",
+                "unarchive",
+                "ad-unit",
+                "placement",
+                "report",
+                "label",
             ],
         )
         .with_risk_posture(GuardedActionPosture::preview())
@@ -214,7 +224,7 @@ pub(crate) fn build_tool_inventory() -> Result<ToolInventory, ToolInventoryError
         cap(
             "gam_soap_trafficking_plan",
             "trafficking",
-            "Create a dry-run plan and confirmation token for an allowlisted Ad Manager SOAP trafficking or forecast operation.",
+            "Create a dry-run plan and confirmation token for allowlisted Ad Manager SOAP trafficking actions such as pausing, resuming, or archiving line items, or for forecast operations.",
             [
                 "google",
                 "ad-manager",
@@ -226,6 +236,10 @@ pub(crate) fn build_tool_inventory() -> Result<ToolInventory, ToolInventoryError
                 "plan",
                 "campaign",
                 "creative",
+                "pause",
+                "resume",
+                "archive",
+                "action",
             ],
         )
         .with_risk_posture(GuardedActionPosture::preview())

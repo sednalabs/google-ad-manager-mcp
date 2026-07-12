@@ -286,6 +286,9 @@ reports `active_filter`, and marks
 `retry.example_queries_validated_under_active_filter=true`; an invalid group can
 therefore return no examples while still listing alternatives from the complete
 strict list-visible inventory under the active `read_only` filter.
+Ambiguous or truncated input marks recovery fail-closed and emits no canned
+example queries. Mutating examples are available only when the caller explicitly
+sets `read_only=false`.
 Stateful recovery examples begin with executable entry points: report runs
 before completed-result pagination, and scratchpad session opening before
 ingestion into that session.
@@ -296,14 +299,17 @@ the toolkit, which clamps `match_summary.result_limit` to 100 and reports
 set when full tool schemas are required.
 Oversized query or group inputs retain bounded fail-closed recovery and do not
 echo the full input.
-Omit `read_only` to search all tools. Set `read_only=true` to search only
-non-mutating execution paths, including plans, previews, and no-mutation proof
+Omit `read_only` or set `read_only=true` to search only non-mutating execution
+paths, including plans, previews, and no-mutation proof
 reads. Every current scratchpad tool is excluded because the pinned scratchpad
 runtime may create, refresh, or prune local session state even during queries,
 listings, and evidence export. Set `read_only=false` to search only write-like
-or local-state-mutating tools. `false` is still a filter; omit `read_only` to
-include both non-mutating and mutating tools. Guided predecessors may still be
+or local-state-mutating tools. Use two explicit searches when both mutation
+classes are needed. Guided predecessors may still be
 added to an apply result's allowed-tool list.
+Common operator phrases such as pausing or archiving a line item and
+deactivating or archiving an ad unit rank the corresponding non-mutating plan;
+they do not opt the caller into apply discovery.
 
 Each `workflow_companion` record reports `required_for_guided_sequence` and
 `server_call_enforced:false`. The legacy `required` field remains as an equal

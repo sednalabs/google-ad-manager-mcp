@@ -76,9 +76,9 @@ pub struct FindToolsArgs {
     /// Optional exact tool group filter, such as catalog, reports, trafficking, or scratchpad.
     #[serde(default)]
     pub group: Option<String>,
-    /// Filter by mutation behavior: omit for all tools; true for only non-mutating
-    /// execution paths, including previews but excluding all current scratchpad tools;
-    /// false for only write-like or local-state-mutating tools.
+    /// Filter by mutation behavior: omit or true for only non-mutating execution
+    /// paths, including previews but excluding all current scratchpad tools; false
+    /// for only write-like or local-state-mutating tools.
     #[serde(default)]
     pub read_only: Option<bool>,
     /// Maximum ranked inventory matches. Defaults to 20. Values above 100 are
@@ -526,7 +526,7 @@ impl AdManagerServer {
         let filter = ToolSearchFilter {
             query: args.query.clone(),
             group: args.group.clone(),
-            read_only: args.read_only,
+            read_only: Some(args.read_only.unwrap_or(true)),
             limit: Some(limit),
         };
         let ranked = self.inventory().search_ranked(

@@ -50,13 +50,13 @@ metadata and stays within the toolkit's 32 KiB compact-selection budget. Set
 `include_schema=true` only after discovery has narrowed the candidates.
 Oversized query or group inputs remain bounded, report their input truncation
 reason, mark recovery fail-closed, and do not echo the full input.
-Omit `read_only` to search all tools. Set `read_only=true` to search only
-non-mutating execution paths, including plans, previews, and no-mutation proof
+Omit `read_only` or set `read_only=true` to search only non-mutating execution
+paths, including plans, previews, and no-mutation proof
 reads. Every current scratchpad tool is excluded because the pinned scratchpad
 runtime may create, refresh, or prune local session state even during queries,
 listings, and evidence export. Set `read_only=false` to search only write-like
-or local-state-mutating tools. `false` is still a filter; omit `read_only` to
-include both non-mutating and mutating tools. Scratchpad close and drop
+or local-state-mutating tools. Use two explicit searches when both mutation
+classes are needed. Scratchpad close and drop
 operations are labelled destructive, while every other scratchpad tool is
 labelled mutating, without implying an upstream GAM write.
 
@@ -102,12 +102,18 @@ was produced. Invalid groups can return no examples while listing alternatives
 from the complete strict list-visible inventory under the active `read_only`
 filter. Recovery never recommends turning off `read_only` merely to produce a
 match.
+Ambiguous or truncated input marks recovery fail-closed and returns no canned
+example queries. Mutating examples require an explicit `read_only=false` search.
 
 Recovery examples are entry-point aware. A broad reports recovery starts with
 `gam_report_run`, then offers `gam_report_result_rows` only as an explicit
 completed-result continuation. A broad scratchpad recovery starts with
 `gam_scratchpad_open_session`, then offers ingestion as an existing-session
 continuation.
+
+Operator language remains plan-first. Phrases such as pause, resume, or archive
+a line item map to `gam_soap_trafficking_plan`; deactivate or archive an ad unit
+maps to `gam_rest_write_plan`. Apply tools require `read_only=false` explicitly.
 
 ## `gam_network_catalog_list`
 

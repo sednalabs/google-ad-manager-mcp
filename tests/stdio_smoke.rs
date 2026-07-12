@@ -45,57 +45,66 @@ fn stdio_initializes_and_lists_tools() {
 #[test]
 fn find_tools_is_semantic_compact_and_recoverable() {
     let mut process = StdioMcpProcess::start(env!("CARGO_BIN_EXE_google-ad-manager-mcp"));
-    for (offset, query, expected_tool) in [
+    for (offset, query, expected_tool, read_only) in [
         (
             0,
             "set up and authenticate Google Ad Manager",
             "gam_auth_status",
+            true,
         ),
         (
             1,
             "inspect ad units and placements",
             "gam_network_catalog_list",
+            true,
         ),
         (
             2,
             "plan a campaign line item with creatives",
             "gam_soap_trafficking_plan",
+            true,
         ),
         (
             3,
             "start a campaign delivery audit with a saved report",
             "gam_report_run",
+            true,
         ),
         (
             4,
             "fetch rows from a completed report result",
             "gam_report_result_rows",
+            true,
         ),
         (
             5,
             "check exchange and yield protection",
             "gam_exchange_protection_probe",
+            true,
         ),
         (
             6,
             "assess ad units for retirement",
             "gam_ad_unit_retirement_assessment",
+            true,
         ),
         (
             7,
             "open a scratchpad session for delivery analysis",
             "gam_scratchpad_open_session",
+            false,
         ),
         (
             8,
             "ingest line item delivery into an existing scratchpad session",
             "gam_scratchpad_ingest_soap_line_items",
+            false,
         ),
     ] {
         let response = process.call_tool(
             100 + offset,
             "find_tools",
-            json!({"query":query,"limit":10}),
+            json!({"query":query,"read_only":read_only,"limit":10}),
         );
         let data = &response["result"]["structuredContent"]["data"];
         assert!(data.get("schemas").is_none(), "query: {query}");
@@ -179,6 +188,38 @@ fn find_tools_is_semantic_compact_and_recoverable() {
             .is_some_and(|schemas| !schemas.is_empty())
     );
     assert!(full_data.get("openai_deferred_loading").is_some());
+}
+
+#[test]
+fn find_tools_operator_language_defaults_to_plan_only() {
+    let mut process = StdioMcpProcess::start(env!("CARGO_BIN_EXE_google-ad-manager-mcp"));
+    for (offset, query, expected_plan) in [
+        (0, "pause a line item", "gam_soap_trafficking_plan"),
+        (1, "resume a line item", "gam_soap_trafficking_plan"),
+        (2, "archive a line item", "gam_soap_trafficking_plan"),
+        (3, "deactivate an ad unit", "gam_rest_write_plan"),
+        (4, "archive an ad unit", "gam_rest_write_plan"),
+    ] {
+        let response = process.call_tool(
+            340 + offset,
+            "find_tools",
+            json!({"query":query,"group":"trafficking","limit":1}),
+        );
+        let data = &response["result"]["structuredContent"]["data"];
+        assert_eq!(data["read_only"], true, "query: {query}; data: {data}");
+        let direct = direct_results(data);
+        assert_eq!(direct.len(), 1, "query: {query}; data: {data}");
+        assert_eq!(direct[0]["name"], expected_plan, "query: {query}");
+        assert_eq!(direct[0]["read_only"], true, "query: {query}");
+        assert!(
+            data["openai_allowed_tools"]
+                .as_array()
+                .is_some_and(|tools| tools
+                    .iter()
+                    .all(|tool| { tool.as_str().is_some_and(|name| !name.ends_with("_apply")) })),
+            "default discovery exposed apply for query '{query}': {data}"
+        );
+    }
 }
 
 #[test]
@@ -533,7 +574,7 @@ fn find_tools_compact_models_exact_soap_dependencies() {
     let group_response = process.call_tool(
         132,
         "find_tools",
-        json!({"group":"trafficking","limit":100}),
+        json!({"group":"trafficking","read_only":false,"limit":100}),
     );
     let group_data = &group_response["result"]["structuredContent"]["data"];
     let group_allowed = group_data["openai_allowed_tools"]
@@ -554,7 +595,7 @@ fn find_tools_compact_models_exact_soap_dependencies() {
         "relation": "before",
         "name": "gam_soap_payload_build",
         "before_tool": "gam_soap_trafficking_plan",
-        "tool_already_selected": true,
+        "tool_already_selected": false,
         "required": false,
         "required_for_guided_sequence": false,
         "required_semantics": "guided_sequence_compatibility_alias",
@@ -564,7 +605,7 @@ fn find_tools_compact_models_exact_soap_dependencies() {
         "relation": "before",
         "name": "gam_soap_trafficking_plan",
         "before_tool": "gam_soap_trafficking_apply",
-        "tool_already_selected": true,
+        "tool_already_selected": false,
         "required": true,
         "required_for_guided_sequence": true,
         "required_semantics": "guided_sequence_compatibility_alias",
@@ -629,27 +670,32 @@ fn find_tools_broad_trafficking_keeps_edges_without_duplicate_injection() {
         "find_tools",
         json!({
             "group":"trafficking",
+            "read_only":false,
             "limit":100,
             "include_schema":true
         }),
     );
     let data = &response["result"]["structuredContent"]["data"];
-    let expected_names = vec![
+    let expected_direct_names = vec![
+        "gam_rest_write_apply",
+        "gam_soap_trafficking_apply",
+        "gam_yield_group_exclusions_apply",
+    ];
+    let expected_allowed_names = vec![
         "gam_rest_write_apply",
         "gam_rest_write_plan",
         "gam_soap_payload_build",
         "gam_soap_trafficking_apply",
         "gam_soap_trafficking_plan",
-        "gam_trafficking_tool_matrix",
         "gam_yield_group_exclusions_apply",
         "gam_yield_group_exclusions_preview",
     ];
-    assert_eq!(sorted_direct_names(data), expected_names);
+    assert_eq!(sorted_direct_names(data), expected_direct_names);
     assert_eq!(
         sorted_string_values(&data["openai_allowed_tools"]),
-        expected_names
+        expected_allowed_names
     );
-    assert_eq!(sorted_schema_names(data), expected_names);
+    assert_eq!(sorted_schema_names(data), expected_allowed_names);
     assert_eq!(
         workflow_edges(data),
         vec![
@@ -657,7 +703,7 @@ fn find_tools_broad_trafficking_keeps_edges_without_duplicate_injection() {
                 "relation": "before",
                 "name": "gam_rest_write_plan",
                 "before_tool": "gam_rest_write_apply",
-                "tool_already_selected": true,
+                "tool_already_selected": false,
                 "required": true,
                 "required_for_guided_sequence": true,
                 "required_semantics": "guided_sequence_compatibility_alias",
@@ -667,7 +713,7 @@ fn find_tools_broad_trafficking_keeps_edges_without_duplicate_injection() {
                 "relation": "before",
                 "name": "gam_soap_payload_build",
                 "before_tool": "gam_soap_trafficking_plan",
-                "tool_already_selected": true,
+                "tool_already_selected": false,
                 "required": false,
                 "required_for_guided_sequence": false,
                 "required_semantics": "guided_sequence_compatibility_alias",
@@ -677,7 +723,7 @@ fn find_tools_broad_trafficking_keeps_edges_without_duplicate_injection() {
                 "relation": "before",
                 "name": "gam_soap_trafficking_plan",
                 "before_tool": "gam_soap_trafficking_apply",
-                "tool_already_selected": true,
+                "tool_already_selected": false,
                 "required": true,
                 "required_for_guided_sequence": true,
                 "required_semantics": "guided_sequence_compatibility_alias",
@@ -687,7 +733,7 @@ fn find_tools_broad_trafficking_keeps_edges_without_duplicate_injection() {
                 "relation": "before",
                 "name": "gam_yield_group_exclusions_preview",
                 "before_tool": "gam_yield_group_exclusions_apply",
-                "tool_already_selected": true,
+                "tool_already_selected": false,
                 "required": true,
                 "required_for_guided_sequence": true,
                 "required_semantics": "guided_sequence_compatibility_alias",
