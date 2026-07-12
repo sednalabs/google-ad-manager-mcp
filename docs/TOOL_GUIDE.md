@@ -425,8 +425,11 @@ Both the upstream handoff and caller input must match the exact
 `networks/{networkCode}/operations/reports/runs/{operationId}` resource shape;
 noncanonical values are rejected before polling.
 Post-start timeout or transport errors preserve `operation_name` and a
-GET-only poll continuation. If completion succeeds but first-page retrieval
-fails, the error instead preserves `report_result` and a
+GET-only poll continuation, including the effective fetch, page-size, timeout,
+and interval controls for replay. A terminal operation error, missing result,
+or noncanonical provider result includes terminal operation evidence but no
+poll continuation. If completion succeeds but first-page retrieval fails, the
+error instead preserves `report_result`, page size, and a
 `gam_report_result_rows` continuation.
 
 Use `gam_report_result_rows` with the returned `report_result` when:

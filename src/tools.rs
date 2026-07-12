@@ -2597,7 +2597,7 @@ async fn poll_report_operation_tool_result(
     started: Instant,
 ) -> CallToolResult {
     let completed = match client
-        .wait_for_report_result(
+        .wait_for_report_result_with_state(
             options.operation_name,
             options.timeout,
             options.initial_interval,
@@ -2605,20 +2605,35 @@ async fn poll_report_operation_tool_result(
         .await
     {
         Ok(value) => value,
-        Err(err) => {
-            return contract::error_with_detail(
-                err,
+        Err(failure) => {
+            let detail = if failure.terminal {
                 json!({
                     "operation_name": options.operation_name,
                     "started_new_run": options.started_new_run,
+                    "terminal": true,
+                    "continuation_available": false,
+                    "operation": failure.operation
+                })
+            } else {
+                json!({
+                    "operation_name": options.operation_name,
+                    "started_new_run": options.started_new_run,
+                    "terminal": false,
+                    "operation": failure.operation,
                     "continuation": {
                         "tool": "gam_report_operation_poll",
-                        "arguments": { "operation_name": options.operation_name },
+                        "arguments": {
+                            "operation_name": options.operation_name,
+                            "fetch_first_page": options.fetch_first_page,
+                            "result_page_size": options.result_page_size,
+                            "poll_timeout_ms": duration_millis_u64(options.timeout),
+                            "initial_poll_interval_ms": duration_millis_u64(options.initial_interval)
+                        },
                         "starts_new_run": false
                     }
-                }),
-                started,
-            );
+                })
+            };
+            return contract::error_with_detail(failure.error, detail, started);
         }
     };
 
@@ -2637,7 +2652,11 @@ async fn poll_report_operation_tool_result(
                         "report_result": completed.report_result,
                         "continuation": {
                             "tool": "gam_report_result_rows",
-                            "arguments": { "result_name": completed.report_result },
+                            "arguments": {
+                                "result_name": completed.report_result,
+                                "page_size": options.result_page_size,
+                                "page_token": null
+                            },
                             "starts_new_run": false
                         }
                     }),
@@ -2664,6 +2683,10 @@ async fn poll_report_operation_tool_result(
         }),
         started,
     )
+}
+
+fn duration_millis_u64(duration: std::time::Duration) -> u64 {
+    duration.as_millis().min(u128::from(u64::MAX)) as u64
 }
 
 async fn ad_unit_retirement_tool_result<NF, NFut, IF, IFut, LF, LFut>(
@@ -7142,6 +7165,91 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn report_poll_rejects_a_malformed_provider_result_without_continuation() {
+        let operation_name = "networks/123/operations/reports/runs/789";
+        let malformed_result = "networks/123/reports/456?x=/results/987";
+        let (base_url, requests, server) = serve_report_http_sequence(vec![(
+            200,
+            json!({
+                "name":operation_name,
+                "done":true,
+                "response":{"reportResult":malformed_result}
+            }),
+        )]);
+        let client = AdManagerClient::for_test_api_base_url(base_url);
+        let server_under_test = AdManagerServer::new(crate::Settings::default())
+            .expect("build malformed-result report server")
+            .with_test_client(client);
+        let result = server_under_test
+            .gam_report_operation_poll(Parameters(ReportOperationPollArgs {
+                operation_name: operation_name.to_string(),
+                fetch_first_page: Some(false),
+                result_page_size: None,
+                poll_timeout_ms: Some(1_000),
+                initial_poll_interval_ms: Some(0),
+            }))
+            .await
+            .expect("poll malformed-result operation");
+        let response = result
+            .structured_content
+            .expect("structured malformed-result response");
+        assert_eq!(response["ok"], false);
+        assert_eq!(response["error"]["code"], "upstream_contract_error");
+        assert_eq!(response["error"]["detail"]["terminal"], true);
+        assert_eq!(response["error"]["detail"]["continuation_available"], false);
+        assert!(response["error"]["detail"].get("continuation").is_none());
+        assert_eq!(
+            response["error"]["detail"]["operation"]["response"]["reportResult"],
+            malformed_result
+        );
+
+        server.join().expect("join malformed-result report server");
+        let requests = requests.lock().expect("lock malformed-result requests");
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].starts_with(&format!("GET /v1/{operation_name} ")));
+    }
+
+    #[tokio::test]
+    async fn terminal_report_failure_does_not_offer_another_poll() {
+        let operation_name = "networks/123/operations/reports/runs/789";
+        let (base_url, requests, server) = serve_report_http_sequence(vec![(
+            200,
+            json!({
+                "name":operation_name,
+                "done":true,
+                "error":{"code":13,"message":"report execution failed"}
+            }),
+        )]);
+        let client = AdManagerClient::for_test_api_base_url(base_url);
+        let server_under_test = AdManagerServer::new(crate::Settings::default())
+            .expect("build failed-operation report server")
+            .with_test_client(client);
+        let result = server_under_test
+            .gam_report_operation_poll(Parameters(ReportOperationPollArgs {
+                operation_name: operation_name.to_string(),
+                fetch_first_page: Some(false),
+                result_page_size: None,
+                poll_timeout_ms: Some(1_000),
+                initial_poll_interval_ms: Some(0),
+            }))
+            .await
+            .expect("poll failed report operation");
+        let response = result
+            .structured_content
+            .expect("structured failed-operation response");
+        assert_eq!(response["ok"], false);
+        assert_eq!(response["error"]["code"], "report_run_failed");
+        assert_eq!(response["error"]["detail"]["terminal"], true);
+        assert_eq!(response["error"]["detail"]["continuation_available"], false);
+        assert!(response["error"]["detail"].get("continuation").is_none());
+
+        server.join().expect("join failed-operation report server");
+        let requests = requests.lock().expect("lock failed-operation requests");
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].starts_with(&format!("GET /v1/{operation_name} ")));
+    }
+
+    #[tokio::test]
     async fn report_poll_timeout_preserves_the_get_only_continuation() {
         let operation_name = "networks/123/operations/reports/runs/789";
         let (base_url, requests, server) =
@@ -7176,6 +7284,14 @@ mod tests {
         assert_eq!(
             response["error"]["detail"]["continuation"]["starts_new_run"],
             false
+        );
+        assert_eq!(
+            response["error"]["detail"]["continuation"]["arguments"]["fetch_first_page"],
+            false
+        );
+        assert_eq!(
+            response["error"]["detail"]["continuation"]["arguments"]["poll_timeout_ms"],
+            0
         );
         assert!(
             response["error"]["hint"]
@@ -7234,6 +7350,10 @@ mod tests {
         assert_eq!(
             response["error"]["detail"]["continuation"]["arguments"]["result_name"],
             report_result
+        );
+        assert_eq!(
+            response["error"]["detail"]["continuation"]["arguments"]["page_size"],
+            10
         );
 
         server.join().expect("join report rows server");

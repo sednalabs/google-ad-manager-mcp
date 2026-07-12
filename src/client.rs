@@ -600,6 +600,13 @@ pub struct CompletedReportRun {
     pub report_result: String,
 }
 
+#[derive(Debug)]
+pub(crate) struct ReportPollFailure {
+    pub error: AdManagerError,
+    pub operation: Option<Value>,
+    pub terminal: bool,
+}
+
 #[derive(Clone)]
 pub struct AdManagerClient {
     http: Client,
@@ -864,21 +871,48 @@ impl AdManagerClient {
         timeout: Duration,
         initial_interval: Duration,
     ) -> Result<CompletedReportRun, AdManagerError> {
-        let operation_name = validate_operation_name(operation_name)?;
+        self.wait_for_report_result_with_state(operation_name, timeout, initial_interval)
+            .await
+            .map_err(|failure| failure.error)
+    }
+
+    pub(crate) async fn wait_for_report_result_with_state(
+        &self,
+        operation_name: &str,
+        timeout: Duration,
+        initial_interval: Duration,
+    ) -> Result<CompletedReportRun, ReportPollFailure> {
+        let operation_name =
+            validate_operation_name(operation_name).map_err(|error| ReportPollFailure {
+                error,
+                operation: None,
+                terminal: true,
+            })?;
         let started = Instant::now();
         let mut interval = initial_interval.max(Duration::from_millis(250));
 
         loop {
-            let operation = self.get_json(&operation_name, &[]).await?;
+            let operation =
+                self.get_json(&operation_name, &[])
+                    .await
+                    .map_err(|error| ReportPollFailure {
+                        error,
+                        operation: None,
+                        terminal: false,
+                    })?;
             if operation
                 .get("done")
                 .and_then(Value::as_bool)
                 .unwrap_or(false)
             {
                 if let Some(error) = operation.get("error") {
-                    return Err(AdManagerError::UpstreamApi {
-                        status: 500,
-                        message: clip_message(error.to_string()),
+                    return Err(ReportPollFailure {
+                        error: AdManagerError::ReportRunFailed {
+                            operation_name: operation_name.to_string(),
+                            message: clip_message(error.to_string()),
+                        },
+                        operation: Some(operation),
+                        terminal: true,
                     });
                 }
                 let report_result = operation
@@ -887,20 +921,39 @@ impl AdManagerClient {
                     .and_then(Value::as_str)
                     .map(ToOwned::to_owned);
                 if let Some(report_result) = report_result {
+                    let report_result = validate_report_result_name(&report_result).map_err(|_| {
+                        ReportPollFailure {
+                            error: AdManagerError::UpstreamContract {
+                                field: "operation.response.reportResult",
+                                message: "must match networks/<networkCode>/reports/<reportId>/results/<resultId>"
+                                    .to_string(),
+                            },
+                            operation: Some(operation.clone()),
+                            terminal: true,
+                        }
+                    })?;
                     return Ok(CompletedReportRun {
                         operation,
                         report_result,
                     });
                 }
-                return Err(AdManagerError::ReportRunMissingResult {
-                    operation_name: operation_name.to_string(),
+                return Err(ReportPollFailure {
+                    error: AdManagerError::ReportRunMissingResult {
+                        operation_name: operation_name.to_string(),
+                    },
+                    operation: Some(operation),
+                    terminal: true,
                 });
             }
 
             if started.elapsed() >= timeout {
-                return Err(AdManagerError::ReportRunTimeout {
-                    operation_name: operation_name.to_string(),
-                    timeout_ms: timeout.as_millis().min(u128::from(u64::MAX)) as u64,
+                return Err(ReportPollFailure {
+                    error: AdManagerError::ReportRunTimeout {
+                        operation_name: operation_name.to_string(),
+                        timeout_ms: timeout.as_millis().min(u128::from(u64::MAX)) as u64,
+                    },
+                    operation: Some(operation),
+                    terminal: false,
                 });
             }
 
