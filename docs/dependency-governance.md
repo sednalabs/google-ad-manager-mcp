@@ -34,6 +34,67 @@ When you add a new direct dependency or make a major upgrade, include a short
 PR note that records why the crate is needed, which safer alternatives were
 considered, and how you would roll the change back.
 
+## Toolkit and RMCP upgrade receipts
+
+The semantic-discovery change advances all six direct toolkit packages together
+from immutable revision
+`679d7a4d93ba33f582ea8ac3f23e15e0c2d133f9` to
+`f90934bd647d3d114ae3b651b11b58a0363c3bc4`. The interval is intentionally
+documented as two compatibility and rollback domains even though it lands in
+one pull request.
+
+### Receipt 1: runtime, auth, and catalogue compatibility
+
+- **Range:** `679d7a4d93ba33f582ea8ac3f23e15e0c2d133f9` through the
+  pre-discovery commit `87d21ed9749d0178717ad6c464512080d1af3791`.
+- **Impact:** RMCP moves from 1.8.0 to 2.1.0 and `rmcp-macros` from 1.8.0 to
+  2.2.0. The toolkit range also includes Google ADC/OAuth hardening, shared
+  response primitives, policy provenance, JWT-claim isolation, and explicit
+  complete-catalogue collection.
+- **Reason:** keep the server on one coherent toolkit revision and consume the
+  reviewed runtime, authentication, catalogue, and testing contracts that the
+  ranked-discovery API builds upon.
+- **Alternatives considered:** remaining on the old pin would omit required
+  catalogue/discovery contracts; copying selected toolkit code into this server
+  would create a second security and maintenance authority; mixing toolkit
+  package revisions or RMCP macro/runtime versions would be unsupported.
+- **Compatibility proof:** exact server head
+  `e52c68b2eac4ddc94402f504f5c6b4ea3e43940a` passed hosted
+  [Rust baseline](https://github.com/sednalabs/google-ad-manager-mcp/actions/runs/29198446153),
+  [Cargo package readiness](https://github.com/sednalabs/google-ad-manager-mcp/actions/runs/29198446138),
+  and [dependency governance](https://github.com/sednalabs/google-ad-manager-mcp/actions/runs/29198446127).
+  Those lanes cover compilation, Clippy, focused stdio/tool contracts, package
+  installation, dependency policy, and the RMCP pin check.
+- **Rollback:** restore every toolkit dependency and test dependency to the old
+  immutable revision in one change, restore the corresponding lockfile and
+  schema snapshot, and revert code that uses post-pin toolkit/RMCP APIs. Re-run
+  the same hosted compatibility lanes before release. Do not roll back only one
+  toolkit crate or only `rmcp-macros`.
+
+### Receipt 2: ranked and bounded discovery
+
+- **Range:** pre-discovery commit
+  `87d21ed9749d0178717ad6c464512080d1af3791` to
+  `f90934bd647d3d114ae3b651b11b58a0363c3bc4`.
+- **Impact:** adds toolkit-owned deterministic ranking, query and metadata
+  bounds, match-completeness diagnostics, OpenAI selection shaping, and compact
+  response serialization. GAM owns only its tool vocabulary, workflow edges,
+  provider-specific recovery, and final public-output policy.
+- **Reason:** one shared ranking and compactness authority is safer and easier
+  to improve than a GAM-only search implementation.
+- **Alternatives considered:** pinning to `87d21ed` and implementing ranking,
+  truncation, or compact serialization locally would duplicate generic logic;
+  exposing the full tool catalogue without deferred discovery would preserve
+  the original agent-ergonomics problem.
+- **Compatibility proof:** the same exact-head hosted lanes above pass the
+  complete semantic, dependency-edge, schema-union, redaction, result-bound,
+  auth, and stdio contract suite.
+- **Rollback:** remove the ranked `find_tools` integration and its discovery
+  contracts, restore the prior tool schema snapshot, and pin every toolkit
+  package to `87d21ed9749d0178717ad6c464512080d1af3791`. If the runtime/auth
+  uplift must also be rolled back, follow Receipt 1 instead. Re-run hosted
+  baseline, package readiness, and dependency governance before release.
+
 ## Auth dependency note
 
 `mcp-toolkit-auth` is a direct dependency because this server delegates Google
