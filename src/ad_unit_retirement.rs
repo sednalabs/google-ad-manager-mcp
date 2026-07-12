@@ -1,5 +1,6 @@
 mod descendants;
 mod inventory;
+mod receipt;
 
 #[cfg(test)]
 mod tests;
@@ -14,6 +15,10 @@ use crate::{AdManagerError, fingerprint::stable_fingerprint};
 
 use descendants::{DescendantScanInput, scan_descendants_with_reader, scoped_numeric_id};
 use inventory::{blocked_identity, summarize_identities, summarize_identity, validate_targets};
+use receipt::{
+    RetirementEvidenceReceipt, current_unix_seconds, grade_evidence_bundle,
+    validate_evidence_bundle_structure,
+};
 
 pub(crate) use descendants::MAX_DESCENDANT_PAGE_BYTES;
 
@@ -45,6 +50,10 @@ pub(crate) struct AdUnitRetirementAssessmentArgs {
     /// One to ten exact canonical positive numeric ad-unit ids to assess.
     #[schemars(with = "Vec<RetirementAdUnitIdSchema>", length(min = 1, max = 10))]
     pub ad_unit_ids: Vec<String>,
+    /// Freshness-bound external proof receipts. Raw reports and telemetry are not accepted.
+    #[serde(default)]
+    #[schemars(length(max = 5))]
+    pub evidence: Vec<RetirementEvidenceReceipt>,
     /// Number of ordered ad-unit catalog rows to request per hierarchy page. Defaults to 1000.
     #[schemars(range(min = 1, max = 1000))]
     pub ad_unit_page_size: Option<u32>,
@@ -75,6 +84,7 @@ where
         .iter()
         .map(|target| target.ad_unit_id.clone())
         .collect::<Vec<_>>();
+    validate_evidence_bundle_structure(&args.evidence)?;
 
     let (network_result, network_request_attempted) = read_network(network_code.clone()).await;
     let effective_root_id = network_result
@@ -144,12 +154,18 @@ where
         read_ad_unit_page,
     )
     .await;
-
+    let evidence = grade_evidence_bundle(
+        &args.evidence,
+        &network_code,
+        &target_ids,
+        current_unix_seconds()?,
+    )?;
     build_preflight_response(
         network_code,
         target_ids,
         identity,
         descendants,
+        evidence,
         ProviderRequestSummary {
             network_attempted_count: usize::from(network_request_attempted),
             effective_root_attempted_count: usize::from(effective_root_request_attempted),
@@ -180,12 +196,21 @@ fn build_preflight_response(
     target_ids: Vec<String>,
     identity: Value,
     descendants: Value,
+    evidence: Value,
     provider_requests: ProviderRequestSummary,
     scan_config: HierarchyScanConfig,
 ) -> Result<Value, AdManagerError> {
     let target_count = target_ids.len();
-    let assessment_fingerprint =
-        stable_fingerprint(&json!({"identity":&identity,"descendants":&descendants}).to_string());
+    let assessment_fingerprint = stable_fingerprint(
+        &json!({
+            "network_code":&network_code,
+            "target_ad_unit_ids":&target_ids,
+            "identity":&identity,
+            "descendants":&descendants,
+            "evidence":&evidence
+        })
+        .to_string(),
+    );
     let total_request_attempted_count = provider_requests.identity_attempted_count
         + provider_requests.network_attempted_count
         + provider_requests.effective_root_attempted_count
@@ -195,14 +220,12 @@ fn build_preflight_response(
         "target_ad_unit_ids": target_ids,
         "identity": identity,
         "descendants": descendants,
-        "evidence": not_run_surface(
-            "Dependency, delivery, protection, site-contract, and telemetry evidence grading is a later assessment stage."
-        ),
+        "evidence": evidence,
         "recommendation": {
             "decision": "not_run",
             "automated_retirement_eligible": false,
             "safe_to_archive_or_retire": false,
-            "reason": "Exact current identity is preflight evidence only; it does not establish retirement eligibility."
+            "reason": "Evidence is graded but the final operator-review recommendation is a later assessment stage."
         },
         "assessment_fingerprint": assessment_fingerprint,
         "provider_requests": {
@@ -217,10 +240,10 @@ fn build_preflight_response(
         "mutation_performed": false,
         "authorization": {
             "archive_or_deactivate_authorized": false,
-            "reason": "This read-only preflight does not authorize or apply an archive, deactivate, rename, or retarget operation."
+            "reason": "This read-only assessment grades supplied evidence but does not verify operator identity, authorize, or apply an archive, deactivate, rename, or retarget operation."
         },
         "response_contract": {
-            "stage": "hierarchy_reconciliation",
+            "stage": "evidence_grading",
             "compact": true,
             "max_targets": MAX_RETIREMENT_TARGETS,
             "max_inner_data_bytes": MAX_INNER_DATA_BYTES,
@@ -272,13 +295,6 @@ fn bounded_scan_parameter(
         ));
     }
     Ok(value)
-}
-
-fn not_run_surface(reason: &str) -> Value {
-    json!({
-        "proof_state": "not_run",
-        "reason": reason
-    })
 }
 
 pub(crate) fn response_bytes(response: &Value) -> usize {

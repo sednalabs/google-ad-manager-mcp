@@ -2,8 +2,11 @@ use std::collections::BTreeMap;
 
 use serde_json::{Value, json};
 
+use crate::evidence::{EVIDENCE_PRODUCER_CONTRACT_VERSION, EvidenceSource, EvidenceState};
+
 use super::descendants::*;
 use super::inventory::*;
+use super::receipt::*;
 use super::*;
 
 fn args(network_code: &str, ad_unit_ids: &[&str]) -> AdUnitRetirementAssessmentArgs {
@@ -13,9 +16,557 @@ fn args(network_code: &str, ad_unit_ids: &[&str]) -> AdUnitRetirementAssessmentA
             .iter()
             .map(|value| (*value).to_string())
             .collect(),
+        evidence: Vec::new(),
         ad_unit_page_size: Some(100),
         max_ad_units: Some(100),
     }
+}
+
+fn receipt(
+    source: EvidenceSource,
+    state: EvidenceState,
+    observed_at: u64,
+) -> RetirementEvidenceReceipt {
+    let windowed = matches!(
+        source,
+        EvidenceSource::DeliveryReport | EvidenceSource::Telemetry
+    );
+    RetirementEvidenceReceipt {
+        network_code: "1234567".to_string(),
+        source,
+        source_version: match source {
+            EvidenceSource::DependencyProbe | EvidenceSource::ExchangeProtectionReview => {
+                EVIDENCE_PRODUCER_CONTRACT_VERSION
+            }
+            EvidenceSource::DeliveryReport => "gam-report-v1",
+            EvidenceSource::SiteContract => "site-contract-v1",
+            EvidenceSource::Telemetry => "telemetry-v1",
+        }
+        .to_string(),
+        state,
+        result_hash: Some(
+            if matches!(
+                source,
+                EvidenceSource::DependencyProbe | EvidenceSource::ExchangeProtectionReview
+            ) {
+                "0123456789abcdef"
+            } else {
+                "sha256:0123456789abcdef"
+            }
+            .to_string(),
+        ),
+        observed_at_unix_seconds: Some(observed_at),
+        ttl_seconds: Some(3_600),
+        target_ad_unit_ids: vec!["200".to_string()],
+        window_start_unix_seconds: windowed
+            .then_some(observed_at.saturating_sub(MIN_ACTIVITY_WINDOW_SECONDS)),
+        window_end_unix_seconds: windowed.then_some(observed_at),
+        manual_ui_proof_included: false,
+        note: None,
+        provenance: matches!(
+            source,
+            EvidenceSource::DependencyProbe | EvidenceSource::ExchangeProtectionReview
+        )
+        .then(|| crate::evidence::EVIDENCE_PROVENANCE.to_string()),
+        operator_action: matches!(
+            source,
+            EvidenceSource::DependencyProbe | EvidenceSource::ExchangeProtectionReview
+        )
+        .then(|| crate::evidence::EVIDENCE_OPERATOR_ACTION.to_string()),
+    }
+}
+
+#[test]
+fn evidence_is_network_source_target_and_freshness_bound() {
+    let mut evidence = receipt(
+        EvidenceSource::DeliveryReport,
+        EvidenceState::CompleteClear,
+        3_999_900,
+    );
+    let clear = grade_evidence(
+        "delivery",
+        EvidenceSource::DeliveryReport,
+        Some(&evidence),
+        "1234567",
+        &["200".to_string()],
+        4_000_000,
+        false,
+    )
+    .expect("clear evidence");
+    assert_eq!(clear["state"], "complete_clear");
+    assert_eq!(clear["binding_valid"], true);
+
+    evidence.source = EvidenceSource::Telemetry;
+    let mismatch = grade_evidence(
+        "delivery",
+        EvidenceSource::DeliveryReport,
+        Some(&evidence),
+        "1234567",
+        &["200".to_string()],
+        4_000_000,
+        false,
+    )
+    .expect("mismatched evidence");
+    assert_eq!(mismatch["state"], "invalid_binding");
+    assert!(mismatch["binding_errors"].as_array().is_some_and(|errors| {
+        errors.iter().any(|error| error.as_str() == Some("source"))
+            && errors
+                .iter()
+                .any(|error| error.as_str() == Some("source_version"))
+    }));
+
+    evidence.source = EvidenceSource::DeliveryReport;
+    evidence.source_version = "gam-report-v1".to_string();
+    evidence.target_ad_unit_ids = vec!["0200".to_string()];
+    let invalid_target = grade_evidence(
+        "delivery",
+        EvidenceSource::DeliveryReport,
+        Some(&evidence),
+        "1234567",
+        &["200".to_string()],
+        4_000_000,
+        false,
+    )
+    .expect("noncanonical target grades fail-closed");
+    assert_eq!(invalid_target["state"], "invalid_binding");
+    assert!(
+        invalid_target["binding_errors"]
+            .as_array()
+            .is_some_and(|errors| { errors.iter().any(|error| error.as_str() == Some("targets")) })
+    );
+}
+
+#[test]
+fn evidence_rejects_unknown_versions_without_echoing_unbounded_enums() {
+    let mut evidence = receipt(
+        EvidenceSource::DeliveryReport,
+        EvidenceState::CompleteClear,
+        3_999_900,
+    );
+    evidence.source_version = "gam-report-v99".to_string();
+    let graded = grade_evidence(
+        "delivery",
+        EvidenceSource::DeliveryReport,
+        Some(&evidence),
+        "1234567",
+        &["200".to_string()],
+        4_000_000,
+        false,
+    )
+    .expect("unknown version grades fail-closed");
+    assert_eq!(graded["state"], "invalid_binding");
+
+    let payload = json!({
+        "network_code":"1234567",
+        "source":"x".repeat(16 * 1024),
+        "source_version":"gam-report-v1",
+        "state":"complete_clear",
+        "result_hash":"sha256:0123456789abcdef",
+        "observed_at_unix_seconds":3_999_900,
+        "ttl_seconds":3_600,
+        "target_ad_unit_ids":["200"],
+        "window_start_unix_seconds":1_407_900,
+        "window_end_unix_seconds":3_999_900,
+        "manual_ui_proof_included":false,
+        "note":null
+    });
+    let error = serde_json::from_value::<RetirementEvidenceReceipt>(payload)
+        .expect_err("unknown evidence sources must be rejected")
+        .to_string();
+    assert_eq!(error, "unsupported retirement evidence source");
+}
+
+#[test]
+fn producer_v3_receipts_enforce_hash_ttl_and_source_state_contracts() {
+    let mut dependency = receipt(
+        EvidenceSource::DependencyProbe,
+        EvidenceState::CompleteClear,
+        3_999_900,
+    );
+    dependency.result_hash = Some("sha256:0123456789abcdef".to_string());
+    let bad_hash = grade_evidence(
+        "dependency",
+        EvidenceSource::DependencyProbe,
+        Some(&dependency),
+        "1234567",
+        &["200".to_string()],
+        4_000_000,
+        false,
+    )
+    .expect("producer hash mismatch grades fail-closed");
+    assert_eq!(bad_hash["state"], "invalid_binding");
+    assert!(bad_hash["binding_errors"].as_array().is_some_and(|errors| {
+        errors
+            .iter()
+            .any(|error| error.as_str() == Some("result_hash"))
+    }));
+
+    dependency.result_hash = Some("0123456789abcdef".to_string());
+    dependency.ttl_seconds = Some(7_200);
+    let bad_ttl = grade_evidence(
+        "dependency",
+        EvidenceSource::DependencyProbe,
+        Some(&dependency),
+        "1234567",
+        &["200".to_string()],
+        4_000_000,
+        false,
+    )
+    .expect("producer TTL mismatch grades fail-closed");
+    assert_eq!(bad_ttl["state"], "invalid_binding");
+    assert!(
+        bad_ttl["binding_errors"]
+            .as_array()
+            .is_some_and(|errors| { errors.iter().any(|error| error.as_str() == Some("ttl")) })
+    );
+
+    let mut protection = receipt(
+        EvidenceSource::ExchangeProtectionReview,
+        EvidenceState::CompleteClear,
+        3_999_900,
+    );
+    protection.manual_ui_proof_included = true;
+    let impossible_state = grade_evidence(
+        "exchange_protection",
+        EvidenceSource::ExchangeProtectionReview,
+        Some(&protection),
+        "1234567",
+        &["200".to_string()],
+        4_000_000,
+        true,
+    )
+    .expect("source-impossible state grades fail-closed");
+    assert_eq!(impossible_state["state"], "invalid_binding");
+    assert!(
+        impossible_state["binding_errors"]
+            .as_array()
+            .is_some_and(|errors| {
+                errors
+                    .iter()
+                    .any(|error| error.as_str() == Some("source_state"))
+            })
+    );
+}
+
+#[test]
+fn built_in_producer_receipt_round_trips_into_the_consumer() {
+    let template = crate::evidence::evidence_receipt_template(
+        "1234567",
+        EvidenceSource::DependencyProbe,
+        EvidenceState::CompleteClear,
+        "0123456789abcdef",
+        vec!["200".to_string()],
+    )
+    .expect("producer receipt template");
+    let receipt: RetirementEvidenceReceipt =
+        serde_json::from_value(template).expect("producer receipt must deserialize");
+    let graded = grade_evidence(
+        "dependency",
+        EvidenceSource::DependencyProbe,
+        Some(&receipt),
+        "1234567",
+        &["200".to_string()],
+        receipt
+            .observed_at_unix_seconds
+            .expect("producer observation time"),
+        false,
+    )
+    .expect("producer receipt must grade");
+    assert_eq!(graded["state"], "complete_clear");
+    assert_eq!(graded["binding_valid"], true);
+}
+
+#[test]
+fn receipt_target_ids_are_required_and_partial_blockers_remain_incomplete() {
+    let payload = json!({
+        "network_code":"1234567",
+        "source":"dependency_probe",
+        "source_version":EVIDENCE_PRODUCER_CONTRACT_VERSION,
+        "state":"complete_clear",
+        "result_hash":"0123456789abcdef",
+        "observed_at_unix_seconds":3_999_900,
+        "ttl_seconds":3_600,
+        "window_start_unix_seconds":null,
+        "window_end_unix_seconds":null,
+        "manual_ui_proof_included":false,
+        "note":null,
+        "provenance":null,
+        "operator_action":null
+    });
+    assert!(serde_json::from_value::<RetirementEvidenceReceipt>(payload).is_err());
+
+    let raw_payload = json!({
+        "network_code":"1234567",
+        "source":"dependency_probe",
+        "source_version":EVIDENCE_PRODUCER_CONTRACT_VERSION,
+        "state":"complete_clear",
+        "result_hash":"0123456789abcdef",
+        "observed_at_unix_seconds":3_999_900,
+        "ttl_seconds":3_600,
+        "target_ad_unit_ids":["200"],
+        "window_start_unix_seconds":null,
+        "window_end_unix_seconds":null,
+        "manual_ui_proof_included":false,
+        "note":null,
+        "provenance":null,
+        "operator_action":null,
+        "raw_report":{"rows":[{"sensitive":"payload"}]}
+    });
+    assert!(serde_json::from_value::<RetirementEvidenceReceipt>(raw_payload).is_err());
+
+    let partial = receipt(
+        EvidenceSource::DependencyProbe,
+        EvidenceState::PartialBlocked,
+        3_999_900,
+    );
+    let graded = grade_evidence(
+        "dependency",
+        EvidenceSource::DependencyProbe,
+        Some(&partial),
+        "1234567",
+        &["200".to_string()],
+        4_000_000,
+        false,
+    )
+    .expect("partial blocker grades safely");
+    assert_eq!(graded["state"], "partial_blocked");
+    assert_eq!(graded["complete_for_summary"], false);
+}
+
+#[test]
+fn evidence_windows_and_ttl_fail_closed() {
+    let mut evidence = receipt(
+        EvidenceSource::DeliveryReport,
+        EvidenceState::CompleteClear,
+        3_995_000,
+    );
+    evidence.ttl_seconds = Some(60);
+    let stale = grade_evidence(
+        "delivery",
+        EvidenceSource::DeliveryReport,
+        Some(&evidence),
+        "1234567",
+        &["200".to_string()],
+        4_000_000,
+        false,
+    )
+    .expect("stale evidence");
+    assert_eq!(stale["state"], "stale");
+
+    evidence.observed_at_unix_seconds = Some(3_999_900);
+    evidence.window_start_unix_seconds = Some(3_999_800);
+    evidence.window_end_unix_seconds = Some(3_999_900);
+    evidence.ttl_seconds = Some(3_600);
+    let short = grade_evidence(
+        "delivery",
+        EvidenceSource::DeliveryReport,
+        Some(&evidence),
+        "1234567",
+        &["200".to_string()],
+        4_000_000,
+        false,
+    )
+    .expect("short window grades fail-closed");
+    assert_eq!(short["state"], "invalid_binding");
+
+    evidence.window_start_unix_seconds = None;
+    evidence.window_end_unix_seconds = None;
+    let missing = grade_evidence(
+        "delivery",
+        EvidenceSource::DeliveryReport,
+        Some(&evidence),
+        "1234567",
+        &["200".to_string()],
+        4_000_000,
+        false,
+    )
+    .expect("missing window grades fail-closed");
+    assert_eq!(missing["state"], "invalid_binding");
+}
+
+#[test]
+fn protection_clear_requires_manual_ui_proof() {
+    let mut evidence = receipt(
+        EvidenceSource::ExchangeProtectionReview,
+        EvidenceState::ManualUiProofRequired,
+        3_999_900,
+    );
+    let required = grade_evidence(
+        "exchange_protection",
+        EvidenceSource::ExchangeProtectionReview,
+        Some(&evidence),
+        "1234567",
+        &["200".to_string()],
+        4_000_000,
+        true,
+    )
+    .expect("manual proof required");
+    assert_eq!(required["state"], "manual_ui_proof_required");
+    assert_eq!(required["complete_for_summary"], false);
+
+    evidence.manual_ui_proof_included = true;
+    let clear = grade_evidence(
+        "exchange_protection",
+        EvidenceSource::ExchangeProtectionReview,
+        Some(&evidence),
+        "1234567",
+        &["200".to_string()],
+        4_000_000,
+        true,
+    )
+    .expect("manual proof accepted");
+    assert_eq!(clear["state"], "complete_clear");
+    assert_eq!(clear["complete_for_summary"], true);
+}
+
+#[test]
+fn evidence_bundle_rejects_duplicate_sources_and_reports_missing_surfaces() {
+    let dependency = receipt(
+        EvidenceSource::DependencyProbe,
+        EvidenceState::CompleteClear,
+        3_999_900,
+    );
+    assert!(
+        grade_evidence_bundle(
+            &[dependency.clone(), dependency],
+            "1234567",
+            &["200".to_string()],
+            4_000_000,
+        )
+        .is_err()
+    );
+    let empty = grade_evidence_bundle(&[], "1234567", &["200".to_string()], 4_000_000)
+        .expect("missing receipts remain explicit");
+    for surface in [
+        "dependency",
+        "delivery",
+        "exchange_protection",
+        "site_contract",
+        "telemetry",
+    ] {
+        assert_eq!(empty[surface]["state"], "not_run");
+        assert!(empty[surface].get("complete_for_summary").is_none());
+    }
+}
+
+#[test]
+fn evidence_note_limit_counts_characters_not_utf8_bytes() {
+    let five_hundred_multibyte_characters = "é".repeat(500);
+    assert!(validate_note(Some(&five_hundred_multibyte_characters)).is_ok());
+
+    let five_hundred_and_one_characters = "é".repeat(501);
+    assert!(validate_note(Some(&five_hundred_and_one_characters)).is_err());
+}
+
+#[tokio::test]
+async fn invalid_evidence_fails_before_any_provider_request() {
+    let dependency = receipt(
+        EvidenceSource::DependencyProbe,
+        EvidenceState::CompleteClear,
+        3_999_900,
+    );
+    let mut invalid_args = args("1234567", &["200"]);
+    invalid_args.evidence = vec![dependency.clone(), dependency];
+
+    let result =
+        assess_ad_unit_retirement_with_readers(
+            &invalid_args,
+            |_network_code| async move { panic!("network reader must not run") },
+            |_network_code, _resource_name| async move { panic!("identity reader must not run") },
+            |_network_code, _page_size, _page_token| async move {
+                panic!("catalog reader must not run")
+            },
+        )
+        .await;
+    assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn evidence_freshness_is_rechecked_after_provider_reads() {
+    let observed_at = current_unix_seconds().expect("current time");
+    let mut delivery = receipt(
+        EvidenceSource::DeliveryReport,
+        EvidenceState::CompleteClear,
+        observed_at,
+    );
+    delivery.ttl_seconds = Some(1);
+    let mut assessment_args = args("1234567", &["200"]);
+    assessment_args.evidence = vec![delivery];
+
+    let response = assess_ad_unit_retirement_with_readers(
+        &assessment_args,
+        |_network_code| async move { (Ok(network_row("100")), true) },
+        |_network_code, resource_name| async move {
+            if resource_name == "networks/1234567/adUnits/100" {
+                return (Ok(effective_root_row("100", "50")), true);
+            }
+            (
+                Ok(json!({
+                    "name":resource_name,
+                    "adUnitCode":"fixture_unit",
+                    "status":"ACTIVE",
+                    "adUnitSizes":[],
+                    "parentAdUnit":"networks/1234567/adUnits/100",
+                    "hasChildren":false,
+                    "updateTime":"2026-07-10T00:00:00Z"
+                })),
+                true,
+            )
+        },
+        |_network_code, _page_size, _page_token| async move {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            let payload = json!({"adUnits":[
+                catalog_row("50", None, true, "ACTIVE"),
+                catalog_row("100", Some("50"), true, "ACTIVE"),
+                catalog_row("200", Some("100"), false, "ACTIVE")
+            ]});
+            let bytes = payload.to_string().len();
+            (Ok((payload, bytes)), true)
+        },
+    )
+    .await
+    .expect("assessment returns stale grading");
+    assert_eq!(response["evidence"]["delivery"]["state"], "stale");
+    assert_eq!(
+        response["evidence"]["delivery"]["complete_for_summary"],
+        false
+    );
+}
+
+#[test]
+fn assessment_fingerprint_is_network_and_target_bound() {
+    let identity = json!({"proof_state":"complete_clear","result_fingerprint":"identity"});
+    let descendants =
+        json!({"proof_state":"complete_clear","descendant_result_fingerprint":"descendants"});
+    let evidence = json!({"dependency":{"state":"not_run"}});
+    let build = |network_code: &str, target_id: &str| {
+        build_preflight_response(
+            network_code.to_string(),
+            vec![target_id.to_string()],
+            identity.clone(),
+            descendants.clone(),
+            evidence.clone(),
+            ProviderRequestSummary {
+                network_attempted_count: 1,
+                effective_root_attempted_count: 1,
+                identity_attempted_count: 1,
+                descendant_page_attempted_count: 1,
+            },
+            HierarchyScanConfig {
+                page_size: 100,
+                max_ad_units: 100,
+            },
+        )
+        .expect("bounded assessment")
+    };
+    assert_ne!(
+        build("1234567", "200")["assessment_fingerprint"],
+        build("7654321", "200")["assessment_fingerprint"]
+    );
+    assert_ne!(
+        build("1234567", "200")["assessment_fingerprint"],
+        build("1234567", "201")["assessment_fingerprint"]
+    );
 }
 
 fn child_claims(values: &[(&str, bool)]) -> BTreeMap<String, bool> {
@@ -925,7 +1476,8 @@ async fn successful_preflight_reconciles_hierarchy_and_keeps_later_surfaces_not_
 
     assert_eq!(response["identity"]["proof_state"], "complete_clear");
     assert_eq!(response["descendants"]["proof_state"], "complete_clear");
-    assert_eq!(response["evidence"]["proof_state"], "not_run");
+    assert_eq!(response["evidence"]["dependency"]["state"], "not_run");
+    assert_eq!(response["evidence"]["telemetry"]["state"], "not_run");
     assert_eq!(response["recommendation"]["decision"], "not_run");
     assert_eq!(
         response["recommendation"]["safe_to_archive_or_retire"],
@@ -1017,6 +1569,7 @@ fn response_size_guard_fails_closed() {
             vec!["200".to_string()],
             oversized_identity,
             json!({"proof_state":"complete_clear"}),
+            json!({"dependency":{"state":"not_run"}}),
             ProviderRequestSummary {
                 network_attempted_count: 1,
                 effective_root_attempted_count: 1,

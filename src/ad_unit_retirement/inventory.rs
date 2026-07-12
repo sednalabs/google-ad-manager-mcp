@@ -48,7 +48,7 @@ pub(super) fn validate_targets(
     Ok(targets.into_values().collect())
 }
 
-fn validate_canonical_positive_id(
+pub(super) fn validate_canonical_positive_id(
     field: &'static str,
     value: &str,
 ) -> Result<String, AdManagerError> {

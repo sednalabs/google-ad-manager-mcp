@@ -33,7 +33,7 @@ surface, not an SDK mirror or generic upstream proxy.
 - `src/evidence.rs`
   - neutral evidence receipts, fingerprints, and Contract/RMCP byte limits
 - `src/ad_unit_retirement.rs` and `src/ad_unit_retirement/`
-  - staged exact-identity retirement preflight and compact identity summaries
+  - staged exact-identity, hierarchy, and freshness-bound evidence assessment
 - `src/probe_projection/`
   - semantic-preserving compact exchange/dependency proof projections
   - typed omission accounting and bounded proof error fallbacks
@@ -167,9 +167,15 @@ catalog chain plus exact network/effective-root reads, reconciles child flags
 for every catalog row, reports external descendants, and returns a
 deterministic child-first target order. Malformed pages, pagination drift,
 cross-network paths, catalog gaps, or caps fail closed while already-observed
-positive descendant blockers remain visible. External evidence grading and the
-final recommendation remain explicit `not_run` surfaces. The tool never
-authorizes or applies a GAM mutation.
+positive descendant blockers remain visible. It then grades at most one
+caller-supplied receipt for each dependency, delivery, exchange/protection,
+site-contract, and telemetry surface. Receipt conclusions are bound to the
+exact network and target set, a supported source contract, an opaque result
+hash, observation time, TTL, and, for delivery or telemetry, a recent window of
+at least 30 days. Exchange/protection clear proof additionally requires a
+recorded manual GAM UI review. Receipt provenance remains
+`caller_supplied_unverified`; the final recommendation remains explicitly
+`not_run`. The tool never authorizes or applies a GAM mutation.
 
 `gam_yield_group_exclusions_preview` and
 `gam_yield_group_exclusions_apply` are the typed mutation path for descendant-safe

@@ -83,7 +83,7 @@ pub(crate) fn build_tool_inventory() -> Result<ToolInventory, ToolInventoryError
         cap(
             "gam_ad_unit_retirement_assessment",
             "catalog",
-            "Read-only exact-identity and bounded hierarchy preflight for one to ten canonical ad-unit ids; later evidence and recommendation stages remain incomplete.",
+            "Read-only exact-identity, hierarchy, and freshness-bound evidence assessment for one to ten canonical ad-unit ids; the final recommendation remains incomplete.",
             [
                 "google",
                 "ad-manager",
