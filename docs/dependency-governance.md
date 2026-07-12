@@ -57,7 +57,9 @@ one pull request.
 - **Alternatives considered:** remaining on the old pin would omit required
   catalogue/discovery contracts; copying selected toolkit code into this server
   would create a second security and maintenance authority; mixing toolkit
-  package revisions or RMCP macro/runtime versions would be unsupported.
+  package revisions would be unsupported. The coherent toolkit lock
+  intentionally resolves `rmcp` 2.1.0 with its compatible `rmcp-macros` 2.2.0;
+  independently pinning or rolling back the macro crate is unsupported.
 - **Compatibility proof:** exact server head
   `e52c68b2eac4ddc94402f504f5c6b4ea3e43940a` passed hosted
   [Rust baseline](https://github.com/sednalabs/google-ad-manager-mcp/actions/runs/29198446153),
@@ -65,11 +67,13 @@ one pull request.
   and [dependency governance](https://github.com/sednalabs/google-ad-manager-mcp/actions/runs/29198446127).
   Those lanes cover compilation, Clippy, focused stdio/tool contracts, package
   installation, dependency policy, and the RMCP pin check.
-- **Rollback:** restore every toolkit dependency and test dependency to the old
-  immutable revision in one change, restore the corresponding lockfile and
-  schema snapshot, and revert code that uses post-pin toolkit/RMCP APIs. Re-run
-  the same hosted compatibility lanes before release. Do not roll back only one
-  toolkit crate or only `rmcp-macros`.
+- **Rollback:** use the standard reviewed revert path for the complete pull
+  request back to server base
+  `97a37896cc5fe8883ce5c0ee8432f7750de0f78a`. That restores every toolkit
+  dependency and test dependency to the old immutable revision together with
+  the matching lockfile, schema snapshot, and pre-upgrade source. Re-run the
+  same hosted compatibility lanes before release. Do not roll back only one
+  toolkit crate or independently pin `rmcp-macros`.
 
 ### Receipt 2: ranked and bounded discovery
 
@@ -89,11 +93,32 @@ one pull request.
 - **Compatibility proof:** the same exact-head hosted lanes above pass the
   complete semantic, dependency-edge, schema-union, redaction, result-bound,
   auth, and stdio contract suite.
-- **Rollback:** remove the ranked `find_tools` integration and its discovery
-  contracts, restore the prior tool schema snapshot, and pin every toolkit
-  package to `87d21ed9749d0178717ad6c464512080d1af3791`. If the runtime/auth
-  uplift must also be rolled back, follow Receipt 1 instead. Re-run hosted
-  baseline, package readiness, and dependency governance before release.
+- **Rollback:** this partial path is a reviewed reconstruction, not a revert to
+  an existing GAM commit. Apply this manifest as one atomic change:
+  - change all six toolkit revisions in `Cargo.toml` from `f90934bd` to
+    `87d21ed9`, then regenerate `Cargo.lock`;
+  - delete `src/tool_discovery.rs` and remove only its module declaration from
+    `src/lib.rs`;
+  - remove `FindToolsArgs`, the `find_tools` handler, its result guards, and its
+    discovery-only imports and helpers from `src/tools.rs`, while retaining the
+    `gam_report_operation_poll` arguments and handler;
+  - reconstruct `src/tool_surface.rs` from the pull-request base, then reapply
+    the `gam_report_operation_poll` capability so `find_tools` and the
+    provider discovery metadata/action lexemes are absent but report polling
+    remains registered;
+  - remove only the `find_tools` contracts from `tests/stdio_smoke.rs` and its
+    expected tool list, while retaining all `gam_report_operation_poll`
+    contracts and its expected tool-list entry;
+  - remove the `find_tools` sections from `README.md`, `docs/ARCHITECTURE.md`,
+    `docs/SECURITY_MODEL.md`, and `docs/TOOL_GUIDE.md`, while retaining report
+    polling documentation in those files and `docs/GETTING_STARTED.md`; and
+  - regenerate `spec/tool_schema_snapshot.v1.json` from the retained router.
+  Do not restore the pull-request base schema snapshot, because it predates
+  report polling. The resulting tool-list and schema contracts must contain
+  `gam_report_operation_poll` and must not contain `find_tools`. Re-run hosted
+  baseline, package readiness, dependency governance, and the complete stdio
+  tool-list/schema contracts. If the runtime/auth uplift must also be rolled
+  back, follow Receipt 1 instead.
 
 ## Auth dependency note
 
