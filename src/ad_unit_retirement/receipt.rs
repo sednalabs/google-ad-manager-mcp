@@ -329,7 +329,7 @@ fn canonical_id_set(ids: &[String]) -> Option<BTreeSet<String>> {
     Some(canonical)
 }
 
-fn validate_note(note: Option<&str>) -> Result<(), AdManagerError> {
+pub(super) fn validate_note(note: Option<&str>) -> Result<(), AdManagerError> {
     if note.is_some_and(|value| {
         value.chars().count() > 500 || value.chars().any(|ch| ch.is_control() && ch != '\t')
     }) {
