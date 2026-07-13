@@ -557,15 +557,20 @@ fn report_discovery_intent(query: Option<&str>) -> ReportDiscoveryIntent {
     {
         return ReportDiscoveryIntent::Unspecified;
     }
-    let clear_new_run_action = has_clear_report_start_action(&terms, report_context, &normalized);
+    let new_run_tail = report_start_action_tail(&terms, report_context, &normalized);
+    let has_new_run_action_object = new_run_tail.is_some();
+    let clear_new_run_action = new_run_tail.is_some_and(report_start_tail_is_safe);
     let explicit_existing_operation_reference = has_explicit_existing_report_operation_reference(
         &terms,
         report_context,
         canonical_operation_count > 0,
-        clear_new_run_action,
+        has_new_run_action_object,
     );
-    let report_run_noun_reference =
-        has_explicit_existing_report_run_reference(&terms, report_context, clear_new_run_action);
+    let report_run_noun_reference = has_explicit_existing_report_run_reference(
+        &terms,
+        report_context,
+        has_new_run_action_object,
+    );
     if (explicit_existing_operation_reference || report_run_noun_reference)
         && report_reference_query_is_authoritative(&terms)
     {
@@ -652,6 +657,7 @@ fn has_clear_report_result_retrieval(query: Option<&str>) -> bool {
                         | "from"
                         | "for"
                         | "of"
+                        | "its"
                         | "name"
                         | "id"
                         | "me"
@@ -666,7 +672,7 @@ fn has_explicit_existing_report_operation_reference(
     terms: &[&str],
     report_context: bool,
     has_canonical_operation: bool,
-    clear_new_run_action: bool,
+    has_new_run_action_object: bool,
 ) -> bool {
     if has_canonical_operation {
         return true;
@@ -697,14 +703,14 @@ fn has_explicit_existing_report_operation_reference(
         explicit_existing_modifier
             || direct_numeric_identity
             || labelled_identity_has_value
-            || (labelled_identity && !clear_new_run_action)
+            || (labelled_identity && !has_new_run_action_object)
     })
 }
 
 fn has_explicit_existing_report_run_reference(
     terms: &[&str],
     report_context: bool,
-    clear_new_run_action: bool,
+    has_new_run_action_object: bool,
 ) -> bool {
     if !report_context {
         return false;
@@ -724,19 +730,25 @@ fn has_explicit_existing_report_run_reference(
         let labelled_identity = next == Some("id");
         let labelled_identity_has_value =
             labelled_identity && terms.get(index + 2).copied().is_some_and(is_numeric_term);
+        let preceding_report_modifier = matches!(previous, Some("report" | "reports"))
+            && index
+                .checked_sub(2)
+                .map(|modifier| terms[modifier])
+                .is_some_and(is_existing_reference_modifier);
         let explicit_identity = next.is_some_and(is_numeric_term)
             || labelled_identity_has_value
-            || previous.is_some_and(is_existing_reference_modifier);
+            || previous.is_some_and(is_existing_reference_modifier)
+            || preceding_report_modifier;
         if explicit_identity {
             return true;
         }
-        if labelled_identity && !clear_new_run_action {
+        if labelled_identity && !has_new_run_action_object {
             return true;
         }
         if reference_has_reverse_report_binding(terms, index) {
             return true;
         }
-        if clear_new_run_action {
+        if has_new_run_action_object {
             return false;
         }
         true
@@ -747,25 +759,27 @@ fn run_has_report_binding(terms: &[&str], run_index: usize) -> bool {
     if reference_has_non_report_relation_target(terms, run_index) {
         return false;
     }
-    if run_index > 0 && matches!(terms[run_index - 1], "report" | "reports") {
-        return true;
-    }
-    if let Some(report_index) = terms[..run_index]
-        .iter()
-        .rposition(|term| matches!(*term, "report" | "reports"))
-        && terms[report_index + 1..run_index]
-            .iter()
-            .all(|term| is_report_operation_bridge_term(term))
+    if run_index > 0
+        && matches!(terms[run_index - 1], "report" | "reports")
+        && report_term_is_reference_anchor(terms, run_index - 1)
     {
         return true;
     }
-    let Some(relative_report_index) = terms[run_index + 1..]
+    if let Some(report_index) = (0..run_index).rev().find(|index| {
+        matches!(terms[*index], "report" | "reports")
+            && report_term_is_reference_anchor(terms, *index)
+    }) && terms[report_index + 1..run_index]
         .iter()
-        .position(|term| matches!(*term, "report" | "reports"))
-    else {
+        .all(|term| is_report_operation_bridge_term(term))
+    {
+        return true;
+    }
+    let Some(report_index) = (run_index + 1..terms.len()).find(|index| {
+        matches!(terms[*index], "report" | "reports")
+            && report_term_is_reference_anchor(terms, *index)
+    }) else {
         return false;
     };
-    let report_index = run_index + 1 + relative_report_index;
     let bridge = &terms[run_index + 1..report_index];
     bridge.iter().any(|term| matches!(*term, "for" | "of"))
         && bridge
@@ -777,25 +791,27 @@ fn operation_has_report_binding(terms: &[&str], operation_index: usize) -> bool 
     if reference_has_non_report_relation_target(terms, operation_index) {
         return false;
     }
-    if operation_index > 0 && matches!(terms[operation_index - 1], "report" | "reports") {
-        return true;
-    }
-    if let Some(report_index) = terms[..operation_index]
-        .iter()
-        .rposition(|term| matches!(*term, "report" | "reports"))
-        && terms[report_index + 1..operation_index]
-            .iter()
-            .all(|term| is_report_operation_bridge_term(term))
+    if operation_index > 0
+        && matches!(terms[operation_index - 1], "report" | "reports")
+        && report_term_is_reference_anchor(terms, operation_index - 1)
     {
         return true;
     }
-    let Some(relative_report_index) = terms[operation_index + 1..]
+    if let Some(report_index) = (0..operation_index).rev().find(|index| {
+        matches!(terms[*index], "report" | "reports")
+            && report_term_is_reference_anchor(terms, *index)
+    }) && terms[report_index + 1..operation_index]
         .iter()
-        .position(|term| matches!(*term, "report" | "reports"))
-    else {
+        .all(|term| is_report_operation_bridge_term(term))
+    {
+        return true;
+    }
+    let Some(report_index) = (operation_index + 1..terms.len()).find(|index| {
+        matches!(terms[*index], "report" | "reports")
+            && report_term_is_reference_anchor(terms, *index)
+    }) else {
         return false;
     };
-    let report_index = operation_index + 1 + relative_report_index;
     let bridge = &terms[operation_index + 1..report_index];
     bridge.iter().any(|term| matches!(*term, "for" | "of"))
         && bridge
@@ -804,45 +820,53 @@ fn operation_has_report_binding(terms: &[&str], operation_index: usize) -> bool 
 }
 
 fn reference_has_non_report_relation_target(terms: &[&str], reference_index: usize) -> bool {
-    let local_tail = terms[reference_index + 1..]
-        .split(|term| matches!(*term, "and" | "then"))
-        .next()
-        .unwrap_or_default();
-    let Some(relation_index) = local_tail
-        .iter()
-        .position(|term| matches!(*term, "for" | "of" | "with" | "to"))
-    else {
-        return false;
-    };
-    let relation = local_tail[relation_index];
-    let target = &local_tail[relation_index + 1..];
-    if target.is_empty()
-        || target
-            .iter()
-            .any(|term| matches!(*term, "report" | "reports"))
-    {
-        return false;
-    }
-    if matches!(relation, "for" | "of") {
-        return true;
-    }
-    target.iter().any(|term| {
-        matches!(
-            *term,
-            "advertiser"
-                | "campaign"
-                | "network"
-                | "networks"
-                | "ad"
-                | "unit"
-                | "line"
-                | "item"
-                | "order"
-                | "creative"
-                | "deployment"
-                | "server"
-        )
+    let tail = &terms[reference_index + 1..];
+    tail.iter().enumerate().any(|(relation_index, relation)| {
+        if !matches!(*relation, "for" | "of" | "with" | "to") {
+            return false;
+        }
+        let target = tail[relation_index + 1..]
+            .split(|term| matches!(*term, "and" | "then" | "for" | "of" | "with" | "to"))
+            .next()
+            .unwrap_or_default();
+        !target.is_empty()
+            && !target
+                .iter()
+                .any(|term| matches!(*term, "report" | "reports"))
+            && target
+                .iter()
+                .any(|term| is_non_report_reference_domain(term))
     })
+}
+
+fn is_non_report_reference_domain(term: &str) -> bool {
+    matches!(
+        term,
+        "advertiser"
+            | "advertisers"
+            | "campaign"
+            | "campaigns"
+            | "network"
+            | "networks"
+            | "inventory"
+            | "ad"
+            | "ads"
+            | "unit"
+            | "units"
+            | "line"
+            | "item"
+            | "items"
+            | "order"
+            | "orders"
+            | "creative"
+            | "creatives"
+            | "placement"
+            | "placements"
+            | "yield"
+            | "exchange"
+            | "deployment"
+            | "server"
+    )
 }
 
 fn report_reference_identities_are_coherent(
@@ -923,8 +947,11 @@ fn reference_labels_canonical_operation(terms: &[&str], reference_index: usize) 
 }
 
 fn reference_has_non_report_premodifier(terms: &[&str], reference_index: usize) -> bool {
-    for previous in terms[..reference_index].iter().rev().copied() {
-        if matches!(previous, "report" | "reports") {
+    for previous_index in (0..reference_index).rev() {
+        let previous = terms[previous_index];
+        if matches!(previous, "report" | "reports")
+            && report_term_is_reference_anchor(terms, previous_index)
+        {
             return false;
         }
         if matches!(
@@ -1006,7 +1033,9 @@ fn has_unbound_canonical_reference(terms: &[&str]) -> bool {
             {
                 return reference_has_non_report_premodifier(terms, previous_index - 1);
             }
-            if matches!(previous, "report" | "reports") {
+            if matches!(previous, "report" | "reports")
+                && report_term_is_reference_anchor(terms, previous_index)
+            {
                 return false;
             }
             if matches!(
@@ -1065,6 +1094,13 @@ fn has_unbound_canonical_reference(terms: &[&str]) -> bool {
     })
 }
 
+fn report_term_is_reference_anchor(terms: &[&str], index: usize) -> bool {
+    let previous = index.checked_sub(1).map(|previous| terms[previous]);
+    let next = terms.get(index + 1).copied();
+    !((index == 0 || matches!(previous, Some("and" | "then")))
+        && matches!(next, Some("and" | "then")))
+}
+
 fn has_unbound_non_operation_identity(terms: &[&str]) -> bool {
     terms.iter().enumerate().any(|(index, term)| {
         if matches!(*term, "name" | "handle" | "id") {
@@ -1105,7 +1141,7 @@ fn numeric_is_bounded_pagination_count(terms: &[&str], index: usize) -> bool {
     }
     if !matches!(
         previous,
-        "first" | "show" | "fetch" | "get" | "list" | "retrieve" | "return" | "me"
+        "first" | "show" | "view" | "fetch" | "get" | "list" | "retrieve" | "return" | "me"
     ) {
         return false;
     }
@@ -1115,7 +1151,10 @@ fn numeric_is_bounded_pagination_count(terms: &[&str], index: usize) -> bool {
             found_unit = true;
             break;
         }
-        if !matches!(term, "the" | "report" | "reports" | "result" | "results") {
+        if !matches!(
+            term,
+            "the" | "of" | "its" | "report" | "reports" | "result" | "results"
+        ) {
             return false;
         }
     }
@@ -1132,6 +1171,7 @@ fn numeric_is_bounded_pagination_count(terms: &[&str], index: usize) -> bool {
         if matches!(
             prefix,
             "show"
+                | "view"
                 | "fetch"
                 | "get"
                 | "list"
@@ -1190,13 +1230,12 @@ fn is_report_reverse_bridge_term(term: &str) -> bool {
 }
 
 fn reference_has_reverse_report_binding(terms: &[&str], reference_index: usize) -> bool {
-    let Some(relative_report_index) = terms[reference_index + 1..]
-        .iter()
-        .position(|term| matches!(*term, "report" | "reports"))
-    else {
+    let Some(report_index) = (reference_index + 1..terms.len()).find(|index| {
+        matches!(terms[*index], "report" | "reports")
+            && report_term_is_reference_anchor(terms, *index)
+    }) else {
         return false;
     };
-    let report_index = reference_index + 1 + relative_report_index;
     let bridge = &terms[reference_index + 1..report_index];
     bridge.iter().any(|term| matches!(*term, "for" | "of"))
         && bridge
@@ -1218,6 +1257,7 @@ fn is_report_operation_bridge_term(term: &str) -> bool {
                 | "s"
                 | "most"
                 | "show"
+                | "me"
                 | "fetch"
                 | "fetching"
                 | "get"
@@ -1246,7 +1286,9 @@ fn has_scoped_report_continuation(terms: &[&str]) -> bool {
             return false;
         }
         terms.iter().enumerate().any(|(report_index, report_term)| {
-            if !matches!(*report_term, "report" | "reports") {
+            if !matches!(*report_term, "report" | "reports")
+                || !report_term_is_reference_anchor(terms, report_index)
+            {
                 return false;
             }
             let (start, end) = if continuation_index < report_index {
@@ -1339,30 +1381,34 @@ fn is_report_reference_article(term: &str) -> bool {
     is_report_determiner(term) || term == "saved"
 }
 
-fn has_clear_report_start_action(terms: &[&str], report_context: bool, normalized: &str) -> bool {
+fn report_start_action_tail<'a>(
+    terms: &'a [&'a str],
+    report_context: bool,
+    normalized: &str,
+) -> Option<&'a [&'a str]> {
     if !report_context {
-        return false;
+        return None;
     }
-    terms.iter().enumerate().any(|(index, term)| {
+    terms.iter().enumerate().find_map(|(index, term)| {
         if !is_report_start_action(term) {
-            return false;
+            return None;
         }
         if has_non_execution_report_language(terms, index, normalized) {
-            return false;
+            return None;
         }
         let object_terms = &terms[index + 1..];
         if let Some(consumed) = campaign_delivery_audit_report_object_end(object_terms) {
-            return report_start_tail_is_safe(&object_terms[consumed..]);
+            return Some(&object_terms[consumed..]);
         }
         for (candidate_index, candidate) in object_terms.iter().enumerate() {
             if matches!(*candidate, "report" | "reports") {
-                return report_start_tail_is_safe(&object_terms[candidate_index + 1..]);
+                return Some(&object_terms[candidate_index + 1..]);
             }
             if !is_report_object_modifier(candidate) {
-                return false;
+                return None;
             }
         }
-        false
+        None
     })
 }
 
@@ -2690,6 +2736,8 @@ mod tests {
             "fetch rows from a completed report result",
             "show me rows from a completed report result",
             "show first 100 rows from a completed report result",
+            "view 100 rows from a completed report result",
+            "view the first 100 of its rows from a completed report result",
         ] {
             let mut results = vec![result("gam_report_operation_poll")];
             let resolution = resolve_report_discovery(
@@ -2812,6 +2860,8 @@ mod tests {
             "check the report and retrieve its operation id",
             "poll report operation 123 and get the first 100 report result rows",
             "poll report operation 123 to completion",
+            "check the report and show me its operation id",
+            "poll report operation 123 and get the first 100 of its result rows",
         ] {
             let mut results = vec![result("gam_report_run")];
             let companions = workflow_companions(&results, Some(query));
@@ -2927,6 +2977,8 @@ mod tests {
             "start a report and fetch the first 100 rows",
             "start a report and get its operation id",
             "start a report and retrieve its first 100 result rows",
+            "start a report and get the first 100 of its result rows",
+            "start a report and retrieve its operation id for polling",
             "start a campaign delivery audit with my saved report",
             "launch the saved report and check its status",
             "can you start a report",
@@ -2992,7 +3044,10 @@ mod tests {
             "advertiser_get_current_operation=networks/123/operations/reports/runs/789",
             "check report operation networks/123/operations/reports/runs/789 and advertiser get operation networks/123/operations/reports/runs/789",
             "check operation_name=networks/123/operations/reports/runs/789 with advertiser",
+            "check operation_name=networks/123/operations/reports/runs/789 with the report to advertiser",
+            "check operation_name=networks/123/operations/reports/runs/789 then use it for advertiser",
             "check report operation 123 with campaign",
+            "check report operation 123 with inventory",
             "check report operation 123 to advertiser",
             "check report operation networks/123/operations/reports/runs/789 and advertiser operation networks/123/operations/reports/runs/789",
             "check report operation 123 and report operation 456",
@@ -3010,6 +3065,9 @@ mod tests {
             "check operation_name=networks/123/operations/reports/runs/789.report",
             "check networks/123/operations/reports/runs/789 and networks/123/operations/reports/runs/789.report",
             "check https://example.invalid/networks/123/operations/reports/runs/789",
+            "start a report and get its operation id and use it",
+            "check the advertiser, then report and retrieve its operation_name=networks/123/operations/reports/runs/789",
+            "check the advertiser, then report and retrieve operation",
             "start a report without waiting",
         ] {
             assert_eq!(

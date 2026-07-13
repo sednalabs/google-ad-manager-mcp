@@ -8018,6 +8018,8 @@ mod tests {
             "start a report and fetch the first 100 rows",
             "start a report and get its operation id",
             "start a report and retrieve its first 100 result rows",
+            "start a report and get the first 100 of its result rows",
+            "start a report and retrieve its operation id for polling",
         ] {
             let explicit_start = server
                 .find_tools(Parameters(FindToolsArgs {
@@ -8107,6 +8109,8 @@ mod tests {
             "check the report and retrieve its operation id",
             "poll report operation 123 and get the first 100 report result rows",
             "poll report operation 123 to completion",
+            "check the report and show me its operation id",
+            "poll report operation 123 and get the first 100 of its result rows",
             "check operation handle networks/123/operations/reports/runs/run_456-abc",
             "check operation handle `networks/123/operations/reports/runs/789`",
             "check operation_name=networks/123/operations/reports/runs/789",
@@ -8186,7 +8190,10 @@ mod tests {
             "advertiser_get_current_operation=networks/123/operations/reports/runs/789",
             "check report operation networks/123/operations/reports/runs/789 and advertiser get operation networks/123/operations/reports/runs/789",
             "check operation_name=networks/123/operations/reports/runs/789 with advertiser",
+            "check operation_name=networks/123/operations/reports/runs/789 with the report to advertiser",
+            "check operation_name=networks/123/operations/reports/runs/789 then use it for advertiser",
             "check report operation 123 with campaign",
+            "check report operation 123 with inventory",
             "check report operation 123 to advertiser",
             "check report operation networks/123/operations/reports/runs/789 and advertiser operation networks/123/operations/reports/runs/789",
             "check report operation 123 and report operation 456",
@@ -8204,6 +8211,9 @@ mod tests {
             "check operation_name=networks/123/operations/reports/runs/789.report",
             "check networks/123/operations/reports/runs/789 and networks/123/operations/reports/runs/789.report",
             "check https://example.invalid/networks/123/operations/reports/runs/789",
+            "start a report and get its operation id and use it",
+            "check the advertiser, then report and retrieve its operation_name=networks/123/operations/reports/runs/789",
+            "check the advertiser, then report and retrieve operation",
             "start a report without waiting",
         ] {
             let ambiguous_action = server
@@ -8245,6 +8255,8 @@ mod tests {
             "fetch rows from a completed report result",
             "show me rows from a completed report result",
             "show first 100 rows from a completed report result",
+            "view 100 rows from a completed report result",
+            "view the first 100 of its rows from a completed report result",
         ] {
             let completed_result = server
                 .find_tools(Parameters(FindToolsArgs {
