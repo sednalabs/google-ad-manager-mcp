@@ -521,7 +521,7 @@ fn has_clear_report_result_retrieval(query: Option<&str>) -> bool {
     let terms = strip_report_directive_prefix(&terms);
     if !terms.first().is_some_and(|term| {
         matches!(
-            **term,
+            *term,
             "fetch" | "get" | "list" | "retrieve" | "show" | "view"
         )
     }) {
