@@ -466,6 +466,7 @@ fn is_ad_unit_retirement_intent(query: Option<&str>) -> bool {
 
 struct NormalizedReportDiscoveryQuery {
     text: String,
+    clause_text: String,
     canonical_operations: BTreeSet<String>,
     invalid_canonical_reference: bool,
 }
@@ -524,8 +525,10 @@ fn normalize_report_discovery_query(query: &str) -> NormalizedReportDiscoveryQue
     }
     redacted.push_str(&query[cursor..]);
 
+    let clause_text = redacted.to_ascii_lowercase();
     NormalizedReportDiscoveryQuery {
-        text: redacted.to_ascii_lowercase().replace(['-', '_'], " "),
+        text: clause_text.replace(['-', '_'], " "),
+        clause_text,
         canonical_operations,
         invalid_canonical_reference,
     }
@@ -536,8 +539,9 @@ fn report_discovery_intent(query: Option<&str>) -> ReportDiscoveryIntent {
         return ReportDiscoveryIntent::Unspecified;
     };
     let normalized_query = normalize_report_discovery_query(query);
-    let normalized = normalized_query.text;
     let canonical_operation_count = normalized_query.canonical_operations.len();
+    let clause_text = normalized_query.clause_text;
+    let normalized = normalized_query.text;
     let terms = normalized
         .split(|character: char| !character.is_ascii_alphanumeric())
         .filter(|term| !term.is_empty())
@@ -557,9 +561,12 @@ fn report_discovery_intent(query: Option<&str>) -> ReportDiscoveryIntent {
     {
         return ReportDiscoveryIntent::Unspecified;
     }
-    let new_run_tail = report_start_action_tail(&terms, report_context, &normalized);
-    let has_new_run_action_object = new_run_tail.is_some();
-    let clear_new_run_action = new_run_tail.is_some_and(report_start_tail_is_safe);
+    let new_run_action = report_start_action_tail(&terms, report_context, &clause_text);
+    let (has_new_run_action_object, clear_new_run_action) = match new_run_action {
+        ReportStartActionTail::NoCandidate => (false, false),
+        ReportStartActionTail::Candidate(tail) => (true, report_start_tail_is_safe(tail)),
+        ReportStartActionTail::Rejected => (true, false),
+    };
     let explicit_existing_operation_reference = has_explicit_existing_report_operation_reference(
         &terms,
         report_context,
@@ -1432,54 +1439,60 @@ fn is_report_reference_article(term: &str) -> bool {
     is_report_determiner(term) || term == "saved"
 }
 
+enum ReportStartActionTail<'a> {
+    NoCandidate,
+    Candidate(&'a [&'a str]),
+    Rejected,
+}
+
 fn report_start_action_tail<'a>(
     terms: &'a [&'a str],
     report_context: bool,
-    normalized: &str,
-) -> Option<&'a [&'a str]> {
+    clause_text: &str,
+) -> ReportStartActionTail<'a> {
     if !report_context {
-        return None;
+        return ReportStartActionTail::NoCandidate;
     }
-    let term_spans = ascii_alphanumeric_term_spans(normalized);
-    terms.iter().enumerate().find_map(|(index, term)| {
+    let term_spans = ascii_alphanumeric_term_spans(clause_text);
+    for (index, term) in terms.iter().enumerate() {
         if !is_report_start_action(term) {
-            return None;
+            continue;
         }
-        if has_non_execution_report_language(terms, index, normalized) {
-            return None;
+        if has_non_execution_report_language(terms, index, clause_text) {
+            continue;
         }
         let object_terms = &terms[index + 1..];
         if let Some(consumed) = campaign_delivery_audit_report_object_end(object_terms) {
             let report_index = index + consumed;
             if report_action_object_crosses_clause_boundary(
-                normalized,
+                clause_text,
                 &term_spans,
                 index,
                 report_index,
             ) {
-                return None;
+                return ReportStartActionTail::Rejected;
             }
-            return Some(&object_terms[consumed..]);
+            return ReportStartActionTail::Candidate(&object_terms[consumed..]);
         }
         for (candidate_index, candidate) in object_terms.iter().enumerate() {
             if matches!(*candidate, "report" | "reports") {
                 let report_index = index + candidate_index + 1;
                 if report_action_object_crosses_clause_boundary(
-                    normalized,
+                    clause_text,
                     &term_spans,
                     index,
                     report_index,
                 ) {
-                    return None;
+                    return ReportStartActionTail::Rejected;
                 }
-                return Some(&object_terms[candidate_index + 1..]);
+                return ReportStartActionTail::Candidate(&object_terms[candidate_index + 1..]);
             }
             if !is_report_object_modifier(candidate) {
-                return None;
+                break;
             }
         }
-        None
-    })
+    }
+    ReportStartActionTail::NoCandidate
 }
 
 fn ascii_alphanumeric_term_spans(text: &str) -> Vec<(usize, usize)> {
@@ -1510,14 +1523,24 @@ fn report_action_object_crosses_clause_boundary(
         return true;
     };
     normalized[*action_end..*report_start]
-        .chars()
-        .any(|character| {
-            (character.is_ascii_punctuation()
-                && !matches!(
-                    character,
-                    '\'' | '"' | '`' | '(' | ')' | '[' | ']' | '{' | '}'
-                ))
-                || matches!(character, '\u{2013}' | '\u{2014}')
+        .char_indices()
+        .any(|(offset, character)| {
+            if character.is_ascii_alphanumeric() || character.is_whitespace() {
+                return false;
+            }
+            let absolute_index = *action_end + offset;
+            if matches!(character, '-' | '_' | '\'') {
+                let previous = normalized[..absolute_index].chars().next_back();
+                let next = normalized[absolute_index + character.len_utf8()..]
+                    .chars()
+                    .next();
+                if previous.is_some_and(|term| term.is_ascii_alphanumeric())
+                    && next.is_some_and(|term| term.is_ascii_alphanumeric())
+                {
+                    return false;
+                }
+            }
+            true
         })
 }
 
@@ -3070,6 +3093,7 @@ mod tests {
             "start a report",
             "run the report",
             "run the current-quarter delivery report",
+            "run the current_quarter delivery report",
             "run the latest report",
             "run this report",
             "start my saved report",
@@ -3206,6 +3230,11 @@ mod tests {
             "launch the campaign, report now",
             "launch the campaign. report now",
             "launch the campaign: report now",
+            "launch the campaign - report now",
+            "launch the campaign (report now)",
+            "launch the campaign\u{ff1b} report now",
+            "launch the campaign\u{2014} report now",
+            "launch the campaign; report run",
         ] {
             assert_eq!(
                 report_discovery_intent(Some(query)),

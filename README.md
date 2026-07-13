@@ -307,7 +307,8 @@ discovery only when the bounded toolkit query places an explicit start, run,
 launch, or execute action before a report object and the caller sets
 `read_only=false`. The action must follow a bounded directive prefix. Only
 recognized report-object modifiers may occur between that action and object,
-with no intervening clause punctuation, and any tail must be empty or a bounded
+with no intervening clause, grouping, or non-word punctuation, and any tail must
+be empty or a bounded
 continuation of the newly started run;
 planning, explanatory, negative, or unrelated language fails closed. Bare,
 existing-state, and reverse `run of/for ... report` noun phrases expose only
@@ -332,7 +333,9 @@ Unbound identities and identities assigned or premodified by another domain
 block report-continuation fallback, and an identity label without a value cannot
 override a new-run action object, even when a later tail term makes the complete
 start request invalid. Invalid start tails therefore fail closed instead of
-being reinterpreted as existing-operation requests. Conjunction-led imperative
+being reinterpreted as existing-operation requests; a rejected punctuated
+action-object candidate also blocks generic continuation fallback.
+Conjunction-led imperative
 uses of `report` are not ownership anchors, including when bounded directive
 fillers separate the conjunction from the verb. Coordinated noun relation
 targets are evaluated as a whole, so any non-report GAM domain in the target

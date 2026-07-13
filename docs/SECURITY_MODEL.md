@@ -194,8 +194,8 @@ Reading saved-report definitions, operation state, and result pages is
 read-only. Starting a saved report creates an upstream job and is explicitly
 non-read-only. Discovery authorizes that start only when an action verb precedes
 a report object under `read_only=false`, follows a bounded directive prefix,
-uses only recognized report modifiers with no clause punctuation between action
-and object, and has an
+uses only recognized report modifiers with no clause, grouping, or non-word
+punctuation between action and object, and has an
 empty or bounded newly-started-run continuation tail. Planning, explanatory,
 negative, or unrelated language fails closed. Bare, existing-state, and reverse
 `run of/for ... report` noun phrases fail closed to existing-operation polling
@@ -220,7 +220,9 @@ Unbound identities and identities related to or
 premodified by another domain block generic report-continuation fallback, and a
 label without a value cannot override a new-run action object, even when a later
 tail term makes the complete start request invalid. Invalid start tails fail
-closed instead of being reinterpreted as existing-operation requests.
+closed instead of being reinterpreted as existing-operation requests; a
+rejected punctuated action-object candidate also blocks generic continuation
+fallback.
 Conjunction-led imperative uses of `report` are not ownership anchors, including
 across bounded directive fillers. Coordinated noun relation targets are
 evaluated as a whole, and any non-report GAM domain in the target fails closed

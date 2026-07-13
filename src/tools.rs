@@ -8236,6 +8236,11 @@ mod tests {
             "launch the campaign, report now",
             "launch the campaign. report now",
             "launch the campaign: report now",
+            "launch the campaign - report now",
+            "launch the campaign (report now)",
+            "launch the campaign\u{ff1b} report now",
+            "launch the campaign\u{2014} report now",
+            "launch the campaign; report run",
         ] {
             let ambiguous_action = server
                 .find_tools(Parameters(FindToolsArgs {
@@ -8353,6 +8358,7 @@ mod tests {
 
         for query in [
             "run the current-quarter delivery report",
+            "run the current_quarter delivery report",
             "run the latest report",
             "run this report",
             "start my saved report",
