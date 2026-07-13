@@ -8249,6 +8249,11 @@ mod tests {
             "launch the campaign; report run of the report",
             "show the campaign\u{ff1b} report result rows",
             "check report operation 123 to completion and run inventory report",
+            "start a report then poll it; run the report",
+            "start a report then poll it, run the report",
+            "start a report then poll it and start a new report",
+            "start a report then poll it and launch another report",
+            "start a report then poll it and execute the saved report",
         ] {
             let ambiguous_action = server
                 .find_tools(Parameters(FindToolsArgs {
