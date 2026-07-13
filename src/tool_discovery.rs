@@ -565,9 +565,14 @@ fn report_discovery_intent(query: Option<&str>) -> ReportDiscoveryIntent {
     let (has_new_run_action_object, clear_new_run_action, rejected_new_run_action) =
         match new_run_action {
             ReportStartActionTail::NoCandidate => (false, false, false),
-            ReportStartActionTail::Candidate(tail) => {
-                (true, report_start_tail_is_safe(tail), false)
-            }
+            ReportStartActionTail::Candidate {
+                tail,
+                tail_start_index,
+            } => (
+                true,
+                report_start_tail_is_safe(tail, tail_start_index, &clause_text),
+                false,
+            ),
             ReportStartActionTail::Rejected => (true, false, true),
         };
     if rejected_new_run_action {
@@ -1449,7 +1454,10 @@ fn is_report_reference_article(term: &str) -> bool {
 
 enum ReportStartActionTail<'a> {
     NoCandidate,
-    Candidate(&'a [&'a str]),
+    Candidate {
+        tail: &'a [&'a str],
+        tail_start_index: usize,
+    },
     Rejected,
 }
 
@@ -1467,28 +1475,12 @@ fn report_start_action_tail<'a>(
             continue;
         }
         let object_terms = &terms[index + 1..];
-        let candidate =
-            if let Some(consumed) = campaign_delivery_audit_report_object_end(object_terms) {
-                Some((index + consumed, &object_terms[consumed..]))
-            } else {
-                let mut found = None;
-                for (candidate_index, candidate) in object_terms.iter().enumerate() {
-                    if matches!(*candidate, "report" | "reports") {
-                        found = Some((
-                            index + candidate_index + 1,
-                            &object_terms[candidate_index + 1..],
-                        ));
-                        break;
-                    }
-                    if !is_report_object_modifier(candidate) {
-                        break;
-                    }
-                }
-                found
-            };
-        let Some((report_index, tail)) = candidate else {
+        let Some(consumed) = report_start_object_end(object_terms) else {
             continue;
         };
+        let report_index = index + consumed;
+        let tail_start_index = report_index + 1;
+        let tail = &object_terms[consumed..];
         if has_non_execution_report_language(terms, index, clause_text, &term_spans)
             || report_action_object_crosses_clause_boundary(
                 clause_text,
@@ -1499,9 +1491,27 @@ fn report_start_action_tail<'a>(
         {
             return ReportStartActionTail::Rejected;
         }
-        return ReportStartActionTail::Candidate(tail);
+        return ReportStartActionTail::Candidate {
+            tail,
+            tail_start_index,
+        };
     }
     ReportStartActionTail::NoCandidate
+}
+
+fn report_start_object_end(object_terms: &[&str]) -> Option<usize> {
+    if let Some(consumed) = campaign_delivery_audit_report_object_end(object_terms) {
+        return Some(consumed);
+    }
+    for (candidate_index, candidate) in object_terms.iter().enumerate() {
+        if matches!(*candidate, "report" | "reports") {
+            return Some(candidate_index + 1);
+        }
+        if !is_report_object_modifier(candidate) {
+            break;
+        }
+    }
+    None
 }
 
 fn ascii_alphanumeric_term_spans(text: &str) -> Vec<(usize, usize)> {
@@ -1848,9 +1858,27 @@ fn campaign_delivery_audit_report_object_end(terms: &[&str]) -> Option<usize> {
     matches!(terms.get(index), Some(&"report" | &"reports")).then_some(index + 1)
 }
 
-fn report_start_tail_is_safe(terms: &[&str]) -> bool {
+fn report_start_tail_is_safe(terms: &[&str], tail_start_index: usize, clause_text: &str) -> bool {
     if terms.is_empty() {
         return true;
+    }
+    let term_spans = ascii_alphanumeric_term_spans(clause_text);
+    let Some((_, report_end)) = tail_start_index
+        .checked_sub(1)
+        .and_then(|report_index| term_spans.get(report_index))
+    else {
+        return false;
+    };
+    let Some((_, tail_end)) = term_spans.get(tail_start_index + terms.len() - 1) else {
+        return false;
+    };
+    if report_range_has_invalid_separator(clause_text, *report_end, *tail_end, true) {
+        return false;
+    }
+    if terms.iter().enumerate().any(|(index, term)| {
+        is_report_start_action(term) && report_start_object_end(&terms[index + 1..]).is_some()
+    }) {
+        return false;
     }
     if terms.iter().all(|term| matches!(*term, "now" | "please")) {
         return true;
@@ -3319,6 +3347,11 @@ mod tests {
             "launch the campaign; report run of the report",
             "show the campaign\u{ff1b} report result rows",
             "check report operation 123 to completion and run inventory report",
+            "start a report then poll it; run the report",
+            "start a report then poll it, run the report",
+            "start a report then poll it and start a new report",
+            "start a report then poll it and launch another report",
+            "start a report then poll it and execute the saved report",
         ] {
             assert_eq!(
                 report_discovery_intent(Some(query)),
