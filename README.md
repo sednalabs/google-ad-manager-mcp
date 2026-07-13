@@ -321,9 +321,11 @@ Operation bodies are read through a 64 KiB cap and projected to documented
 fields; result pages are read through a 512 KiB cap, use a maximum page size of
 1,000, validate the documented object/row/page-token/count shapes, and pass
 complete-result size guards. Direct row-fetch failures preserve the exact
-bounded result/page handles. Only transport, 408, 429, and 5xx failures expose
-an executable GET continuation; permanent or malformed failures require
-remediation without unchanged replay. Poll timeouts are between 1 ms and 24 hours;
+bounded result and page-size handles. Opaque page tokens are not duplicated into
+error output; the receipt records bounded token context and requires the caller
+to retain the original request for an exact retry. Only transport, 408, 429,
+and 5xx failures expose a GET continuation; permanent or malformed failures
+require remediation without unchanged replay. Poll timeouts are between 1 ms and 24 hours;
 initial intervals are between 5 and 30 seconds with bounded exponential backoff.
 The absolute deadline covers in-flight GETs as well as sleeps. A timed-out
 continuation increases the bounded timeout instead of replaying the expired
@@ -332,8 +334,9 @@ and a safely resumable GET continuation. A definitive poll-time 4xx other than
 408 or 429 instead returns remediation-required detail without an executable
 continuation and without claiming that the operation itself is terminal.
 A deterministic result-size failure
-returns bounded operation, report, result, and page handles plus a non-executable
-smaller-page adjustment; it never repeats the same oversized page request. If
+returns bounded operation, report, result, and page context plus a non-executable
+smaller-page adjustment with `automatic_replay_safe=false`; it never repeats the
+same oversized page request. If
 page size 1 still exceeds the bound, reduce the saved report dimensions or
 filters before starting a new run.
 

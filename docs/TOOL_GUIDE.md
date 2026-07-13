@@ -508,13 +508,19 @@ continuation. Authentication failures and definitive first-page 4xx responses
 other than 408 or 429 preserve the handle but require remediation without an
 executable unchanged continuation.
 Direct `gam_report_result_rows` failures follow the same contract and preserve
-the exact bounded `result_name`, `page_size`, and `page_token`. Only transport,
-408, 429, and 5xx failures return an executable continuation with those same
-arguments. Invalid input, authentication, permanent 4xx, malformed JSON, and
-provider-contract failures require remediation and expose no unchanged retry.
+the exact bounded `result_name` and `page_size`. Opaque `page_token` values are
+not copied into error output: the receipt records whether a token was supplied
+and its byte length, while retryable continuations require the caller to reuse
+the exact token from the original request. Raw token length is checked before
+interpretation, and leading or trailing whitespace is rejected rather than
+silently normalized. Only transport, 408, 429, and 5xx
+failures return a GET continuation. Invalid input, authentication, permanent
+4xx, malformed JSON, and provider-contract failures require remediation and
+expose no unchanged retry.
 Deterministic upstream or final RMCP result-size failures instead preserve
-bounded operation/report/result/page handles and expose a non-executable smaller
-page adjustment. They do not repeat the rejected page size; a page already at
+bounded operation/report/result/page context, set
+`automatic_replay_safe=false`, and expose a non-executable smaller page
+adjustment. They do not repeat the rejected page size; a page already at
 size 1 has no smaller recommendation and requires reducing the saved report's
 dimensions or filters before a new run.
 

@@ -887,13 +887,7 @@ impl AdManagerClient {
             }
             query.push(("pageSize", page_size.to_string()));
         }
-        if let Some(page_token) = non_empty(page_token) {
-            if page_token.len() > MAX_REPORT_PAGE_TOKEN_BYTES {
-                return Err(AdManagerError::invalid(
-                    "page_token",
-                    format!("must be at most {MAX_REPORT_PAGE_TOKEN_BYTES} bytes"),
-                ));
-            }
+        if let Some(page_token) = validate_report_page_token(page_token)? {
             query.push(("pageToken", page_token));
         }
         let payload = self
@@ -902,7 +896,8 @@ impl AdManagerClient {
                 &query,
                 MAX_REPORT_RESULT_RESPONSE_BYTES,
             )
-            .await?;
+            .await
+            .map_err(sanitize_report_result_fetch_error)?;
         validate_report_result_rows_payload(&payload)?;
         Ok(payload)
     }
@@ -2349,6 +2344,40 @@ pub(crate) fn validate_report_result_name(value: &str) -> Result<String, AdManag
     Ok(trimmed.to_string())
 }
 
+pub(crate) fn validate_report_page_token(
+    page_token: Option<String>,
+) -> Result<Option<String>, AdManagerError> {
+    let Some(page_token) = page_token else {
+        return Ok(None);
+    };
+    if page_token.len() > MAX_REPORT_PAGE_TOKEN_BYTES {
+        return Err(AdManagerError::invalid(
+            "page_token",
+            format!("must be at most {MAX_REPORT_PAGE_TOKEN_BYTES} bytes"),
+        ));
+    }
+    if page_token.is_empty() {
+        return Ok(None);
+    }
+    if page_token.trim() != page_token {
+        return Err(AdManagerError::invalid(
+            "page_token",
+            "must not contain leading or trailing whitespace",
+        ));
+    }
+    Ok(Some(page_token))
+}
+
+fn sanitize_report_result_fetch_error(error: AdManagerError) -> AdManagerError {
+    match error {
+        AdManagerError::UpstreamApi { status, .. } => AdManagerError::UpstreamApi {
+            status,
+            message: "report-result row request was rejected".to_string(),
+        },
+        other => other,
+    }
+}
+
 pub(crate) fn canonical_report_name(
     network_code: &str,
     report_id: &str,
@@ -2721,13 +2750,14 @@ mod tests {
     use std::thread;
 
     use super::{
-        AD_UNIT_HIERARCHY_FIELDS, AdManagerClient, CatalogCollection, MAX_SOAP_RESPONSE_XML_BYTES,
-        NETWORK_HIERARCHY_FIELDS, RestWriteOperation, RestWriteResource, SOAP_ENVELOPE_NAMESPACE,
-        SoapTraffickingOperation, ad_unit_hierarchy_list_query, classify_soap_impact, clip_message,
+        AD_UNIT_HIERARCHY_FIELDS, AdManagerClient, CatalogCollection, MAX_REPORT_PAGE_TOKEN_BYTES,
+        MAX_SOAP_RESPONSE_XML_BYTES, NETWORK_HIERARCHY_FIELDS, RestWriteOperation,
+        RestWriteResource, SOAP_ENVELOPE_NAMESPACE, SoapTraffickingOperation,
+        ad_unit_hierarchy_list_query, classify_soap_impact, clip_message,
         clip_message_with_truncation, clip_xml_response, extract_xml_tag, project_report_operation,
-        validate_operation_name, validate_report_operation_binding, validate_report_result_name,
-        validate_report_result_rows_payload, validate_report_run_handoff, validate_rest_write_body,
-        validate_soap_payload_xml,
+        validate_operation_name, validate_report_operation_binding, validate_report_page_token,
+        validate_report_result_name, validate_report_result_rows_payload,
+        validate_report_run_handoff, validate_rest_write_body, validate_soap_payload_xml,
     };
     use crate::{AdManagerError, Settings};
     use serde_json::{Value, json};
@@ -3036,6 +3066,27 @@ mod tests {
                 "9".repeat(33)
             ))
             .is_err()
+        );
+    }
+
+    #[test]
+    fn report_page_tokens_are_raw_bounded_and_never_normalized() {
+        assert_eq!(
+            validate_report_page_token(None).expect("omitted token"),
+            None
+        );
+        assert_eq!(
+            validate_report_page_token(Some(String::new())).expect("empty token"),
+            None
+        );
+        assert_eq!(
+            validate_report_page_token(Some("page token".to_string())).expect("opaque token"),
+            Some("page token".to_string())
+        );
+        assert!(validate_report_page_token(Some(" page-a".to_string())).is_err());
+        assert!(validate_report_page_token(Some("page-a ".to_string())).is_err());
+        assert!(
+            validate_report_page_token(Some(" ".repeat(MAX_REPORT_PAGE_TOKEN_BYTES + 1))).is_err()
         );
     }
 

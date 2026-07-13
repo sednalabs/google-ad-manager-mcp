@@ -114,6 +114,16 @@ pub(crate) fn result_contract_error_with_detail(
 }
 
 pub fn error_with_detail(err: AdManagerError, detail: Value, started: Instant) -> CallToolResult {
+    let hint = err.hint();
+    error_with_detail_and_hint(err, detail, hint, started)
+}
+
+pub fn error_with_detail_and_hint(
+    err: AdManagerError,
+    detail: Value,
+    hint: &str,
+    started: Instant,
+) -> CallToolResult {
     CallToolResult::structured_error(json!({
         "ok": false,
         "error": {
@@ -121,7 +131,7 @@ pub fn error_with_detail(err: AdManagerError, detail: Value, started: Instant) -
             "reason": err.reason(),
             "message": redact_secret_text(&err.to_string()),
             "category": err.category(),
-            "hint": err.hint(),
+            "hint": hint,
             "detail": redact_secret_value(detail),
         },
         "meta": {

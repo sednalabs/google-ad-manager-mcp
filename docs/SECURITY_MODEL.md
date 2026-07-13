@@ -201,17 +201,24 @@ This server bounds that surface by:
   deadline over every in-flight GET
 - validating successful fetchRows objects, row arrays, page tokens, and row
   counts before returning `ok:true`
-- preserving exact bounded result/page handles on row-fetch failures while
-  exposing executable GET continuation only for transport, 408, 429, and 5xx
-  failures; invalid input, authentication, permanent 4xx, malformed JSON, and
+- preserving exact bounded result/page-size handles on row-fetch failures while
+  keeping opaque page tokens in the caller's original request; receipts expose
+  only bounded token context and require that original context for exact retry
+- exposing GET continuation only for transport, 408, 429, and 5xx failures;
+  invalid input, authentication, permanent 4xx, malformed JSON, and
   provider-contract failures require remediation
 - requiring saved-report dimensions or filters to be reduced when page size 1
-  still exceeds the response bound; scratchpad ingestion does not bypass that
+  still exceeds the response bound; deterministic oversize receipts set
+  `automatic_replay_safe=false`, and scratchpad ingestion does not bypass that
   same fetch bound
 
 ## Public logging and diagnostics
 
 Errors are redacted before being returned through Contract V1 envelopes.
+Transport error messages suppress the underlying request URL and query string;
+the typed error retains the source only for internal error chaining.
+Report-row rejection envelopes also suppress the provider response body while
+retaining the HTTP status and typed remediation/retry classification.
 Secret-bearing tokens such as `access_token`, `private_key`, and bearer headers
 are replaced with `[redacted]`. When an explicit credential marker has no
 inline syntactic value boundary, the remainder of that diagnostic is redacted;
