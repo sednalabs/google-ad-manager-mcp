@@ -192,7 +192,11 @@ fn find_tools_is_semantic_compact_and_recoverable() {
     let full = process.call_tool(
         109,
         "find_tools",
-        json!({"query":"report rows","limit":1,"include_schema":true}),
+        json!({
+            "query":"fetch rows from a completed report result",
+            "limit":1,
+            "include_schema":true
+        }),
     );
     let full_data = &full["result"]["structuredContent"]["data"];
     assert!(
