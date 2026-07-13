@@ -828,6 +828,7 @@ fn report_reference_identities_are_coherent(
         && canonical_operation_count + explicit_operation_run_identities(terms).len() <= 1
         && !has_unbound_or_cross_domain_reference(terms)
         && !has_unbound_non_operation_identity(terms)
+        && !has_unbound_canonical_reference(terms)
 }
 
 fn explicit_operation_run_identities(terms: &[&str]) -> BTreeSet<String> {
@@ -889,10 +890,11 @@ fn reference_has_explicit_identity(terms: &[&str], reference_index: usize) -> bo
 }
 
 fn reference_labels_canonical_operation(terms: &[&str], reference_index: usize) -> bool {
-    terms
-        .get(reference_index + 1)
-        .is_some_and(|term| matches!(*term, "name" | "handle" | "id"))
-        && terms.get(reference_index + 2) == Some(&CANONICAL_REPORT_OPERATION_TERM)
+    terms.get(reference_index + 1) == Some(&CANONICAL_REPORT_OPERATION_TERM)
+        || (terms
+            .get(reference_index + 1)
+            .is_some_and(|term| matches!(*term, "name" | "handle" | "id"))
+            && terms.get(reference_index + 2) == Some(&CANONICAL_REPORT_OPERATION_TERM))
 }
 
 fn reference_has_non_report_premodifier(terms: &[&str], reference_index: usize) -> bool {
@@ -908,6 +910,8 @@ fn reference_has_non_report_premodifier(terms: &[&str], reference_index: usize) 
                 | "show"
                 | "return"
                 | "fetch"
+                | "get"
+                | "retrieve"
                 | "start"
                 | "launch"
                 | "execute"
@@ -920,7 +924,7 @@ fn reference_has_non_report_premodifier(terms: &[&str], reference_index: usize) 
         {
             return false;
         }
-        if matches!(previous, "s" | "most" | "new")
+        if matches!(previous, "s" | "its" | "most" | "new")
             || is_report_determiner(previous)
             || is_existing_reference_modifier(previous)
         {
@@ -929,6 +933,82 @@ fn reference_has_non_report_premodifier(terms: &[&str], reference_index: usize) 
         return true;
     }
     false
+}
+
+fn has_unbound_canonical_reference(terms: &[&str]) -> bool {
+    terms.iter().enumerate().any(|(index, term)| {
+        if *term != CANONICAL_REPORT_OPERATION_TERM {
+            return false;
+        }
+        if reference_has_non_report_relation_target(terms, index) {
+            return true;
+        }
+        let mut cursor = index;
+        while cursor > 0 {
+            let previous_index = cursor - 1;
+            let previous = terms[previous_index];
+            if matches!(previous, "operation" | "operations" | "run" | "runs") {
+                return reference_has_non_report_premodifier(terms, previous_index);
+            }
+            if matches!(previous, "name" | "handle" | "id")
+                && previous_index > 0
+                && matches!(
+                    terms[previous_index - 1],
+                    "operation" | "operations" | "run" | "runs"
+                )
+            {
+                return reference_has_non_report_premodifier(terms, previous_index - 1);
+            }
+            if matches!(previous, "report" | "reports") {
+                return false;
+            }
+            if matches!(
+                previous,
+                "and"
+                    | "then"
+                    | "use"
+                    | "show"
+                    | "return"
+                    | "fetch"
+                    | "get"
+                    | "retrieve"
+                    | "start"
+                    | "launch"
+                    | "execute"
+                    | "select"
+                    | "choose"
+                    | "please"
+                    | "now"
+                    | "me"
+            ) || is_report_continuation_term(previous)
+            {
+                return false;
+            }
+            if matches!(previous, "s" | "its" | "most" | "new")
+                || is_report_determiner(previous)
+                || is_existing_reference_modifier(previous)
+                || matches!(
+                    previous,
+                    "for"
+                        | "of"
+                        | "to"
+                        | "with"
+                        | "result"
+                        | "results"
+                        | "row"
+                        | "rows"
+                        | "page"
+                        | "pages"
+                        | "first"
+                )
+            {
+                cursor = previous_index;
+                continue;
+            }
+            return true;
+        }
+        false
+    })
 }
 
 fn has_unbound_non_operation_identity(terms: &[&str]) -> bool {
@@ -1294,6 +1374,8 @@ fn report_reference_query_is_authoritative(terms: &[&str]) -> bool {
                 | "select"
                 | "choose"
                 | "fetch"
+                | "get"
+                | "retrieve"
                 | "return"
                 | CANONICAL_REPORT_OPERATION_TERM
         ))
@@ -1341,10 +1423,17 @@ fn report_reference_query_is_authoritative(terms: &[&str]) -> bool {
                     | "execute"
                     | "fetch"
                     | "fetching"
+                    | "get"
+                    | "getting"
+                    | "retrieve"
+                    | "retrieving"
                     | "return"
                     | "returning"
                     | "first"
                     | "page"
+                    | "pages"
+                    | "row"
+                    | "rows"
                     | "immediately"
                     | "asynchronously"
                     | "async"
@@ -1405,13 +1494,23 @@ fn report_start_tail_is_safe(terms: &[&str]) -> bool {
         is_report_continuation_term(term)
             || matches!(
                 *term,
-                "show" | "showing" | "return" | "returning" | "fetch" | "fetching"
+                "show"
+                    | "showing"
+                    | "return"
+                    | "returning"
+                    | "fetch"
+                    | "fetching"
+                    | "get"
+                    | "getting"
+                    | "retrieve"
+                    | "retrieving"
             )
     });
     starts_as_continuation
         && has_continuation_action
         && terms.iter().all(|term| {
             is_report_continuation_term(term)
+                || is_numeric_term(term)
                 || matches!(
                     *term,
                     "and"
@@ -1423,6 +1522,10 @@ fn report_start_tail_is_safe(terms: &[&str]) -> bool {
                         | "returning"
                         | "fetch"
                         | "fetching"
+                        | "get"
+                        | "getting"
+                        | "retrieve"
+                        | "retrieving"
                         | "it"
                         | "is"
                         | "its"
@@ -1442,6 +1545,9 @@ fn report_start_tail_is_safe(terms: &[&str]) -> bool {
                         | "handle"
                         | "first"
                         | "page"
+                        | "pages"
+                        | "row"
+                        | "rows"
                         | "immediately"
                         | "for"
                         | "of"
@@ -2587,6 +2693,10 @@ mod tests {
             "start a new report then poll the current run",
             "current report operation",
             "use the latest report operation",
+            "check the report and return its operation id",
+            "get the status of report operation 123",
+            "retrieve existing report operation 123",
+            "poll report operation 123 and fetch the first 100 rows",
         ] {
             let mut results = vec![result("gam_report_run")];
             let companions = workflow_companions(&results, Some(query));
@@ -2698,6 +2808,8 @@ mod tests {
             "start a report asynchronously",
             "start a report and return the run id",
             "start a report and show the operation id",
+            "start a report and return its operation handle",
+            "start a report and fetch the first 100 rows",
             "start a campaign delivery audit with my saved report",
             "launch the saved report and check its status",
             "can you start a report",
@@ -2758,6 +2870,9 @@ mod tests {
             "use network operation 123 for my saved report",
             "use advertiser operation 123 for my saved report",
             "use advertiser's current operation 123 for my saved report",
+            "advertiser's operation: networks/123/operations/reports/runs/789",
+            "campaign=networks/123/operations/reports/runs/789",
+            "check report operation networks/123/operations/reports/runs/789 and advertiser operation networks/123/operations/reports/runs/789",
             "check report operation 123 and report operation 456",
             "check report operation 123 and 456",
             "check networks/111/operations/reports/runs/456 and networks/222/operations/reports/runs/789",
@@ -2770,6 +2885,7 @@ mod tests {
             "show report result rows for advertiser id 123",
             "show report result rows for advertiser 123, page 2",
             "check operation_name=networks/123/operations/reports/runs/789?x=1",
+            "check https://example.invalid/networks/123/operations/reports/runs/789",
             "start a report without waiting",
         ] {
             assert_eq!(
