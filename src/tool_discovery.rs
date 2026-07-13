@@ -579,7 +579,7 @@ fn report_discovery_intent(query: Option<&str>) -> ReportDiscoveryIntent {
 
     if clear_new_run_action {
         ReportDiscoveryIntent::ExplicitNewRun
-    } else if has_scoped_report_continuation(&terms) {
+    } else if !has_new_run_action_object && has_scoped_report_continuation(&terms) {
         ReportDiscoveryIntent::ExistingOperationContinuation
     } else {
         ReportDiscoveryIntent::Unspecified
@@ -826,13 +826,10 @@ fn reference_has_non_report_relation_target(terms: &[&str], reference_index: usi
             return false;
         }
         let target = tail[relation_index + 1..]
-            .split(|term| matches!(*term, "and" | "then" | "for" | "of" | "with" | "to"))
+            .split(|term| matches!(*term, "for" | "of" | "with" | "to"))
             .next()
             .unwrap_or_default();
         !target.is_empty()
-            && !target
-                .iter()
-                .any(|term| matches!(*term, "report" | "reports"))
             && target
                 .iter()
                 .any(|term| is_non_report_reference_domain(term))
@@ -1097,8 +1094,8 @@ fn has_unbound_canonical_reference(terms: &[&str]) -> bool {
 fn report_term_is_reference_anchor(terms: &[&str], index: usize) -> bool {
     let previous = index.checked_sub(1).map(|previous| terms[previous]);
     let next = terms.get(index + 1).copied();
-    !((index == 0 || matches!(previous, Some("and" | "then")))
-        && matches!(next, Some("and" | "then")))
+    !matches!(previous, Some("and" | "then"))
+        && !(index == 0 && matches!(next, Some("and" | "then")))
 }
 
 fn has_unbound_non_operation_identity(terms: &[&str]) -> bool {
@@ -2862,6 +2859,7 @@ mod tests {
             "poll report operation 123 to completion",
             "check the report and show me its operation id",
             "poll report operation 123 and get the first 100 of its result rows",
+            "check operation 123 for the current report and poll to completion",
         ] {
             let mut results = vec![result("gam_report_run")];
             let companions = workflow_companions(&results, Some(query));
@@ -3069,6 +3067,12 @@ mod tests {
             "check the advertiser, then report and retrieve its operation_name=networks/123/operations/reports/runs/789",
             "check the advertiser, then report and retrieve operation",
             "start a report without waiting",
+            "start a report and check inventory",
+            "inspect inventory and report it",
+            "inspect inventory and report operation_name=networks/123/operations/reports/runs/789",
+            "check operation 123 for the report and its advertiser",
+            "check operation_name=networks/123/operations/reports/runs/789 for the report and its advertiser",
+            "check operation 123 for the report and its inventory",
         ] {
             assert_eq!(
                 report_discovery_intent(Some(query)),

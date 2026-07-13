@@ -219,7 +219,10 @@ Unbound identities and identities related to or
 premodified by another domain block generic report-continuation fallback, and a
 label without a value cannot override a new-run action object, even when a later
 tail term makes the complete start request invalid. Invalid start tails fail
-closed instead of being reinterpreted as existing-operation requests. Generic
+closed instead of being reinterpreted as existing-operation requests.
+Conjunction-led imperative uses of `report` are not ownership anchors.
+Coordinated relation targets are evaluated as a whole, and any non-report GAM
+domain in the target fails closed even if the target also names a report. Generic
 non-report operation identity cannot inject the report poll tool.
 Bounded `get`/`retrieve` continuations and `first N ... rows` requests use the
 same clause and identity checks. A `to` or `with` target naming another GAM
