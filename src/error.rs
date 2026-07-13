@@ -124,8 +124,11 @@ impl AdManagerError {
             Self::AuthBootstrap(_) => {
                 "Run gam_auth_status or gam_auth_login_command to inspect or configure credentials."
             }
-            Self::Transport(_) | Self::UpstreamJson(_) => {
+            Self::Transport(_) => {
                 "Retry the request, then confirm the Google principal can access the target network."
+            }
+            Self::UpstreamJson(_) => {
+                "Inspect the malformed provider response and adapter contract before retrying; do not automatically replay the unchanged request."
             }
             Self::UpstreamApi {
                 status: 401 | 403, ..
@@ -145,6 +148,9 @@ impl AdManagerError {
                 ..
             } => {
                 "Inspect the completed operation, terminal state, and saved report identity; do not repeat the unchanged poll until the provider contract issue is understood."
+            }
+            Self::UpstreamContract { field, .. } if field.starts_with("report_result_rows") => {
+                "Preserve the exact result and page handles, then inspect the saved report and provider response; do not automatically repeat the unchanged row fetch."
             }
             Self::UpstreamContract { .. } => {
                 "Do not reuse the malformed provider value; retry the read and report an adapter or upstream contract defect if it persists."
@@ -206,5 +212,23 @@ mod tests {
             };
             assert!(error.hint().starts_with("Retry the request"));
         }
+    }
+
+    #[test]
+    fn malformed_report_result_hints_do_not_contradict_remediation_receipts() {
+        let json_error = AdManagerError::UpstreamJson(
+            serde_json::from_str::<serde_json::Value>("{").expect_err("malformed JSON"),
+        );
+        assert!(json_error.hint().contains("do not automatically replay"));
+
+        let contract_error = AdManagerError::UpstreamContract {
+            field: "report_result_rows.rows",
+            message: "must be an array".to_string(),
+        };
+        assert!(
+            contract_error
+                .hint()
+                .contains("do not automatically repeat")
+        );
     }
 }

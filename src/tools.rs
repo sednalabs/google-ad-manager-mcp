@@ -22,12 +22,12 @@ use crate::ad_unit_retirement::{
 use crate::auth_ux::{gcloud_adc_login_command, shell_join_with_cloudsdk_config};
 use crate::client::{
     AdManagerClient, CatalogCollection, CompletedReportRun, DEFAULT_SOAP_API_VERSION,
-    MAX_REPORT_INITIAL_POLL_INTERVAL_MS, MAX_REPORT_RESULT_PAGE_SIZE, RestWriteOperation,
-    RestWritePlan, RestWriteResource, SoapTraffickingApplyResult, SoapTraffickingOperation,
-    SoapTraffickingPlan, YieldGroupUpdateSoapRequest, canonical_report_name,
-    project_report_operation, report_operation_name_for_report, soap_error_message_with_truncation,
-    validate_operation_name, validate_report_result_name, validate_report_run_handoff,
-    validate_soap_api_version,
+    MAX_REPORT_INITIAL_POLL_INTERVAL_MS, MAX_REPORT_PAGE_TOKEN_BYTES, MAX_REPORT_RESULT_PAGE_SIZE,
+    RestWriteOperation, RestWritePlan, RestWriteResource, SoapTraffickingApplyResult,
+    SoapTraffickingOperation, SoapTraffickingPlan, YieldGroupUpdateSoapRequest,
+    canonical_report_name, project_report_operation, report_operation_name_for_report,
+    soap_error_message_with_truncation, validate_operation_name, validate_report_result_name,
+    validate_report_run_handoff, validate_soap_api_version,
 };
 use crate::config::{
     GCLOUD_ADC_REQUIRED_SCOPE, MAX_REPORT_POLL_TIMEOUT_MS, server_adc_credentials_path,
@@ -794,7 +794,7 @@ impl ReportSizeHandoff {
                 "guidance": if recommended_page_size.is_some() {
                     "Issue a new explicit rows request with the smaller recommended page size and the same requested page token."
                 } else {
-                    "The minimum page size was already used; preserve the result handle and use bounded scratchpad ingestion or report an adapter defect instead of repeating the same request."
+                    "The minimum page size was already used; reduce the saved report dimensions or filters and run it again. If one row still exceeds the bound, report an adapter or upstream contract defect instead of repeating this result request."
                 },
             })
         });
@@ -2104,6 +2104,18 @@ impl AdManagerServer {
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(str::to_string);
+        if requested_page_token
+            .as_ref()
+            .is_some_and(|page_token| page_token.len() > MAX_REPORT_PAGE_TOKEN_BYTES)
+        {
+            return Ok(contract::error(
+                AdManagerError::invalid(
+                    "page_token",
+                    format!("must be at most {MAX_REPORT_PAGE_TOKEN_BYTES} bytes"),
+                ),
+                started,
+            ));
+        }
         let handoff = ReportSizeHandoff {
             result_name: Some(result_name.clone()),
             requested_page_size: args.page_size,
@@ -2112,7 +2124,7 @@ impl AdManagerServer {
         };
         match self
             .client()
-            .get_report_result_rows(&result_name, args.page_size, requested_page_token)
+            .get_report_result_rows(&result_name, args.page_size, requested_page_token.clone())
             .await
         {
             Ok(payload) => {
@@ -2136,7 +2148,15 @@ impl AdManagerServer {
             Err(err) if deterministic_report_result_size_failure(&err) => {
                 Ok(contract::error_with_detail(err, handoff.receipt(), started))
             }
-            Err(err) => Ok(contract::error(err, started)),
+            Err(err) => {
+                let detail = report_result_rows_failure_detail(
+                    &err,
+                    &result_name,
+                    args.page_size,
+                    requested_page_token.as_deref(),
+                );
+                Ok(contract::error_with_detail(err, detail, started))
+            }
         }
     }
 
@@ -3476,13 +3496,65 @@ async fn poll_report_operation_tool_result(
     )
 }
 
-fn report_result_fetch_requires_remediation(error: &AdManagerError) -> bool {
-    matches!(error, AdManagerError::AuthBootstrap(_))
+fn report_result_fetch_is_retryable(error: &AdManagerError) -> bool {
+    matches!(error, AdManagerError::Transport(_))
         || matches!(
             error,
             AdManagerError::UpstreamApi { status, .. }
-                if (400..500).contains(status) && !matches!(*status, 408 | 429)
+                if matches!(*status, 408 | 429) || (500..600).contains(status)
         )
+}
+
+fn report_result_rows_failure_detail(
+    error: &AdManagerError,
+    result_name: &str,
+    page_size: Option<u32>,
+    page_token: Option<&str>,
+) -> Value {
+    if !report_result_fetch_is_retryable(error) {
+        let operator_action = match error {
+            AdManagerError::InvalidInput { .. } => {
+                "Correct the result resource, page size, or page token before fetching rows again. Preserve the valid result handle, but do not automatically replay the unchanged request."
+            }
+            AdManagerError::AuthBootstrap(_) | AdManagerError::UpstreamApi { .. } => {
+                "Correct authentication, access, or the result resource identity before fetching rows again. Preserve the result handle for inspection; do not automatically replay the unchanged request."
+            }
+            AdManagerError::UpstreamJson(_) | AdManagerError::UpstreamContract { .. } => {
+                "The provider response did not satisfy the bounded report-row contract. Preserve the exact result and page handles, inspect the saved report, and do not automatically replay the unchanged request until the contract issue is understood."
+            }
+            _ => {
+                "Remediate the reported failure before fetching rows again; do not automatically replay the unchanged request."
+            }
+        };
+        json!({
+            "result_name": result_name,
+            "page_size": page_size,
+            "page_token": page_token,
+            "fetch_outcome": "remediation_required",
+            "continuation_available": false,
+            "automatic_replay_safe": false,
+            "operator_action": operator_action
+        })
+    } else {
+        json!({
+            "result_name": result_name,
+            "page_size": page_size,
+            "page_token": page_token,
+            "fetch_outcome": "retryable_failure",
+            "continuation_available": true,
+            "automatic_replay_safe": true,
+            "continuation": {
+                "tool": "gam_report_result_rows",
+                "arguments": {
+                    "result_name": result_name,
+                    "page_size": page_size,
+                    "page_token": page_token
+                },
+                "starts_new_run": false,
+                "safe_method": "GET"
+            }
+        })
+    }
 }
 
 fn report_result_fetch_failure_detail(
@@ -3492,37 +3564,13 @@ fn report_result_fetch_failure_detail(
     page_size: Option<u32>,
     completed: &CompletedReportRun,
 ) -> Value {
-    if report_result_fetch_requires_remediation(error) {
-        json!({
-            "operation_name": operation_name,
-            "started_new_run": started_new_run,
-            "report_name": completed.report_name,
-            "report_result": completed.report_result,
-            "fetch_outcome": "remediation_required",
-            "continuation_available": false,
-            "automatic_replay_safe": false,
-            "operator_action": "Correct authentication, access, or the result resource identity before fetching rows again. Preserve the report_result handle for inspection; do not automatically replay the unchanged request."
-        })
-    } else {
-        json!({
-            "operation_name": operation_name,
-            "started_new_run": started_new_run,
-            "report_name": completed.report_name,
-            "report_result": completed.report_result,
-            "fetch_outcome": "retryable_failure",
-            "continuation_available": true,
-            "automatic_replay_safe": true,
-            "continuation": {
-                "tool": "gam_report_result_rows",
-                "arguments": {
-                    "result_name": completed.report_result,
-                    "page_size": page_size,
-                    "page_token": null
-                },
-                "starts_new_run": false
-            }
-        })
-    }
+    let mut detail =
+        report_result_rows_failure_detail(error, &completed.report_result, page_size, None);
+    detail["operation_name"] = Value::String(operation_name.to_string());
+    detail["started_new_run"] = Value::Bool(started_new_run);
+    detail["report_name"] = Value::String(completed.report_name.clone());
+    detail["report_result"] = Value::String(completed.report_result.clone());
+    detail
 }
 
 fn report_poll_controls(
@@ -8088,6 +8136,11 @@ mod tests {
         assert_eq!(receipt["adjustment"]["executable"], false);
         assert_eq!(receipt["adjustment"]["recommended_page_size"], Value::Null);
         assert_eq!(receipt["adjustment"]["minimum_page_size_reached"], true);
+        let guidance = receipt["adjustment"]["guidance"]
+            .as_str()
+            .expect("minimum-page guidance");
+        assert!(guidance.contains("saved report dimensions or filters"));
+        assert!(!guidance.contains("scratchpad"));
     }
 
     fn serve_report_http_sequence(responses: Vec<(u16, Value)>) -> ReportTestServer {
@@ -8749,9 +8802,17 @@ mod tests {
     #[tokio::test]
     async fn report_poll_only_advertises_continuation_for_retryable_get_failures() {
         let operation_name = "networks/123/operations/reports/runs/789";
-        for (status, continuation_available) in
-            [(400, false), (408, true), (429, true), (500, true)]
-        {
+        for (status, continuation_available) in [
+            (400, false),
+            (401, false),
+            (403, false),
+            (404, false),
+            (408, true),
+            (422, false),
+            (429, true),
+            (500, true),
+            (503, true),
+        ] {
             let (base_url, requests, server) =
                 serve_report_http_sequence(vec![(status, json!({"error":"poll request failed"}))]);
             let client = AdManagerClient::for_test_api_base_url(base_url);
@@ -9756,6 +9817,133 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn direct_report_rows_only_retries_transient_get_failures() {
+        let report_result = "networks/123/reports/456/results/987";
+        for (status, continuation_available) in
+            [(400, false), (408, true), (429, true), (500, true)]
+        {
+            let (base_url, requests, server) =
+                serve_report_http_sequence(vec![(status, json!({"error":"rows request failed"}))]);
+            let client = AdManagerClient::for_test_api_base_url(base_url);
+            let server_under_test = AdManagerServer::new(crate::Settings::default())
+                .expect("build direct rows status server")
+                .with_test_client(client);
+            let result = server_under_test
+                .gam_report_result_rows(Parameters(ReportResultRowsArgs {
+                    result_name: report_result.to_string(),
+                    page_size: Some(25),
+                    page_token: Some("page-a".to_string()),
+                }))
+                .await
+                .expect("classify direct rows status");
+            let response = result
+                .structured_content
+                .expect("direct rows status response");
+            let detail = &response["error"]["detail"];
+            assert_eq!(detail["result_name"], report_result);
+            assert_eq!(detail["page_size"], 25);
+            assert_eq!(detail["page_token"], "page-a");
+            assert_eq!(detail["continuation_available"], continuation_available);
+            assert_eq!(detail["automatic_replay_safe"], continuation_available);
+            if continuation_available {
+                assert_eq!(detail["fetch_outcome"], "retryable_failure");
+                assert_eq!(detail["continuation"]["tool"], "gam_report_result_rows");
+                assert_eq!(
+                    detail["continuation"]["arguments"],
+                    json!({
+                        "result_name": report_result,
+                        "page_size": 25,
+                        "page_token": "page-a"
+                    })
+                );
+                assert_eq!(detail["continuation"]["starts_new_run"], false);
+                assert_eq!(detail["continuation"]["safe_method"], "GET");
+            } else {
+                assert_eq!(detail["fetch_outcome"], "remediation_required");
+                assert!(detail.get("continuation").is_none());
+            }
+
+            server.join().expect("join direct rows status server");
+            let requests = requests.lock().expect("lock direct rows requests");
+            assert_eq!(requests.len(), 1);
+            assert!(requests[0].starts_with(&format!(
+                "GET /v1/{report_result}:fetchRows?pageSize=25&pageToken=page-a "
+            )));
+        }
+    }
+
+    #[tokio::test]
+    async fn direct_report_rows_rejects_oversized_page_token_before_provider_access() {
+        let report_result = "networks/123/reports/456/results/987";
+        let (base_url, requests, server) = serve_report_http_sequence(Vec::new());
+        let client = AdManagerClient::for_test_api_base_url(base_url);
+        let server_under_test = AdManagerServer::new(crate::Settings::default())
+            .expect("build oversized page-token server")
+            .with_test_client(client);
+        let result = server_under_test
+            .gam_report_result_rows(Parameters(ReportResultRowsArgs {
+                result_name: report_result.to_string(),
+                page_size: Some(25),
+                page_token: Some("x".repeat(MAX_REPORT_PAGE_TOKEN_BYTES + 1)),
+            }))
+            .await
+            .expect("reject oversized page token");
+        let response = result
+            .structured_content
+            .expect("oversized page-token response");
+        assert_eq!(response["error"]["code"], "invalid_input");
+        assert!(response["error"].get("detail").is_none());
+
+        server.join().expect("join unused page-token server");
+        assert!(
+            requests
+                .lock()
+                .expect("lock unused page-token requests")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn malformed_direct_report_rows_failure_requires_remediation_with_exact_handles() {
+        let error = AdManagerError::UpstreamJson(
+            serde_json::from_str::<Value>("{").expect_err("malformed JSON"),
+        );
+        let detail = report_result_rows_failure_detail(
+            &error,
+            "networks/123/reports/456/results/987",
+            Some(10),
+            Some("page-b"),
+        );
+        assert_eq!(
+            detail["result_name"],
+            "networks/123/reports/456/results/987"
+        );
+        assert_eq!(detail["page_size"], 10);
+        assert_eq!(detail["page_token"], "page-b");
+        assert_eq!(detail["fetch_outcome"], "remediation_required");
+        assert_eq!(detail["continuation_available"], false);
+        assert_eq!(detail["automatic_replay_safe"], false);
+        assert!(detail.get("continuation").is_none());
+    }
+
+    #[test]
+    fn direct_report_rows_unknown_failure_classes_fail_closed() {
+        let error = AdManagerError::WriteActionDisabled {
+            operation: "future_report_result_side_effect",
+        };
+        let detail = report_result_rows_failure_detail(
+            &error,
+            "networks/123/reports/456/results/987",
+            Some(10),
+            Some("page-c"),
+        );
+        assert_eq!(detail["fetch_outcome"], "remediation_required");
+        assert_eq!(detail["continuation_available"], false);
+        assert_eq!(detail["automatic_replay_safe"], false);
+        assert!(detail.get("continuation").is_none());
+    }
+
+    #[tokio::test]
     async fn report_result_rows_rejects_empty_success_payloads() {
         let report_result = "networks/123/reports/456/results/987";
         let (base_url, requests, server) = serve_report_http_sequence(vec![(200, json!({}))]);
@@ -9774,6 +9962,15 @@ mod tests {
         assert_eq!(result.is_error, Some(true));
         let response = result.structured_content.expect("malformed rows response");
         assert_eq!(response["error"]["code"], "upstream_contract_error");
+        assert_eq!(response["error"]["detail"]["result_name"], report_result);
+        assert_eq!(response["error"]["detail"]["page_size"], 10);
+        assert!(response["error"]["detail"]["page_token"].is_null());
+        assert_eq!(
+            response["error"]["detail"]["fetch_outcome"],
+            "remediation_required"
+        );
+        assert_eq!(response["error"]["detail"]["continuation_available"], false);
+        assert!(response["error"]["detail"].get("continuation").is_none());
 
         server.join().expect("join malformed report rows server");
         assert_eq!(

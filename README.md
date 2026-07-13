@@ -320,7 +320,10 @@ GET only. Invalid long-running-operation result unions fail closed.
 Operation bodies are read through a 64 KiB cap and projected to documented
 fields; result pages are read through a 512 KiB cap, use a maximum page size of
 1,000, validate the documented object/row/page-token/count shapes, and pass
-complete-result size guards. Poll timeouts are between 1 ms and 24 hours;
+complete-result size guards. Direct row-fetch failures preserve the exact
+bounded result/page handles. Only transport, 408, 429, and 5xx failures expose
+an executable GET continuation; permanent or malformed failures require
+remediation without unchanged replay. Poll timeouts are between 1 ms and 24 hours;
 initial intervals are between 5 and 30 seconds with bounded exponential backoff.
 The absolute deadline covers in-flight GETs as well as sleeps. A timed-out
 continuation increases the bounded timeout instead of replaying the expired
@@ -330,7 +333,9 @@ and a safely resumable GET continuation. A definitive poll-time 4xx other than
 continuation and without claiming that the operation itself is terminal.
 A deterministic result-size failure
 returns bounded operation, report, result, and page handles plus a non-executable
-smaller-page adjustment; it never repeats the same oversized page request.
+smaller-page adjustment; it never repeats the same oversized page request. If
+page size 1 still exceeds the bound, reduce the saved report dimensions or
+filters before starting a new run.
 
 `limit` defaults to 20 and must be at least 1. Values above 100 are passed to
 the toolkit, which clamps `match_summary.result_limit` to 100 and reports

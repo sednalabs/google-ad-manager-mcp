@@ -201,6 +201,13 @@ This server bounds that surface by:
   deadline over every in-flight GET
 - validating successful fetchRows objects, row arrays, page tokens, and row
   counts before returning `ok:true`
+- preserving exact bounded result/page handles on row-fetch failures while
+  exposing executable GET continuation only for transport, 408, 429, and 5xx
+  failures; invalid input, authentication, permanent 4xx, malformed JSON, and
+  provider-contract failures require remediation
+- requiring saved-report dimensions or filters to be reduced when page size 1
+  still exceeds the response bound; scratchpad ingestion does not bypass that
+  same fetch bound
 
 ## Public logging and diagnostics
 

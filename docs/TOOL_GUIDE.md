@@ -507,10 +507,16 @@ preserves `report_result`, page size, and a `gam_report_result_rows`
 continuation. Authentication failures and definitive first-page 4xx responses
 other than 408 or 429 preserve the handle but require remediation without an
 executable unchanged continuation.
+Direct `gam_report_result_rows` failures follow the same contract and preserve
+the exact bounded `result_name`, `page_size`, and `page_token`. Only transport,
+408, 429, and 5xx failures return an executable continuation with those same
+arguments. Invalid input, authentication, permanent 4xx, malformed JSON, and
+provider-contract failures require remediation and expose no unchanged retry.
 Deterministic upstream or final RMCP result-size failures instead preserve
 bounded operation/report/result/page handles and expose a non-executable smaller
 page adjustment. They do not repeat the rejected page size; a page already at
-size 1 has no smaller recommendation.
+size 1 has no smaller recommendation and requires reducing the saved report's
+dimensions or filters before a new run.
 
 Use `gam_report_result_rows` with the returned `report_result` when:
 
