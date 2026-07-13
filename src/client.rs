@@ -1025,6 +1025,19 @@ impl AdManagerClient {
                     }
                 }
             };
+            if let Some((projected_operation, message)) =
+                terminal_report_failure_observation(&operation, &operation_name)
+            {
+                return Err(ReportPollFailure {
+                    error: AdManagerError::ReportRunFailed {
+                        operation_name: operation_name.to_string(),
+                        message,
+                    },
+                    operation: Some(projected_operation),
+                    expected_report_name: bound_report_name,
+                    terminal: true,
+                });
+            }
             let (report_name, projected_operation) = match validate_report_operation_binding(
                 &operation,
                 Some(&operation_name),
@@ -1032,19 +1045,15 @@ impl AdManagerClient {
             ) {
                 Ok(value) => value,
                 Err(error) => {
-                    let completed_without_report_binding =
+                    let completed_success_identity_failure =
                         operation.get("done").and_then(Value::as_bool) == Some(true)
-                            && bound_report_name.is_none()
-                            && operation
-                                .get("metadata")
-                                .and_then(Value::as_object)
-                                .and_then(|metadata| metadata.get("report"))
-                                .is_none();
-                    let (error, observed_operation) = if completed_without_report_binding {
+                            && operation.get("error").is_none()
+                            && operation.get("response").is_some_and(Value::is_object);
+                    let (error, observed_operation) = if completed_success_identity_failure {
                         (
                             AdManagerError::UpstreamContract {
                                 field: "operation.completed_report_identity",
-                                message: "completed operation did not expose a safe report identity in metadata.report or response.reportResult"
+                                message: "completed successful operation did not expose a safe, mutually consistent report identity in metadata.report or response.reportResult"
                                     .to_string(),
                             },
                             Some(project_report_operation(&operation)),
@@ -1069,17 +1078,6 @@ impl AdManagerClient {
                 .and_then(Value::as_bool)
                 .unwrap_or(false)
             {
-                if let Some(error) = operation.get("error") {
-                    return Err(ReportPollFailure {
-                        error: AdManagerError::ReportRunFailed {
-                            operation_name: operation_name.to_string(),
-                            message: clip_message(error.to_string()),
-                        },
-                        operation: Some(projected_operation),
-                        expected_report_name: bound_report_name,
-                        terminal: true,
-                    });
-                }
                 let report_result = operation
                     .get("response")
                     .and_then(|value| value.get("reportResult"))
@@ -1695,6 +1693,37 @@ impl AdManagerClient {
             .map_err(|err| AdManagerError::AuthBootstrap(err.to_string()))?;
         Ok(token.as_str().to_string())
     }
+}
+
+fn terminal_report_failure_observation(
+    operation: &Value,
+    expected_operation_name: &str,
+) -> Option<(Value, String)> {
+    if operation.get("done").and_then(Value::as_bool) != Some(true)
+        || !operation.get("error").is_some_and(Value::is_object)
+        || operation.get("response").is_some()
+    {
+        return None;
+    }
+    let operation_name = operation.get("name").and_then(Value::as_str)?;
+    let operation_name = validate_operation_name(operation_name).ok()?;
+    if operation_name != expected_operation_name {
+        return None;
+    }
+    let message = operation
+        .get("error")
+        .and_then(|error| error.get("message"))
+        .and_then(Value::as_str)
+        .map(|message| clip_message(message.to_string()))
+        .unwrap_or_else(|| {
+            clip_message(
+                operation
+                    .get("error")
+                    .expect("terminal report failure has an error")
+                    .to_string(),
+            )
+        });
+    Some((project_report_operation(operation), message))
 }
 
 fn bounded_response_limit_error(
@@ -3092,6 +3121,99 @@ mod tests {
             }
         });
         assert!(validate_report_operation_binding(&cross_network, None, None).is_err());
+    }
+
+    #[tokio::test]
+    async fn terminal_report_error_precedes_report_identity_validation() {
+        let operation_name = "networks/123/operations/reports/runs/789";
+        let client = AdManagerClient::from_settings(&Settings::default());
+        for metadata in [
+            None,
+            Some(Value::Null),
+            Some(json!({"report": null})),
+            Some(json!({"report": "not-a-report"})),
+            Some(json!({"report": "networks/999/reports/456"})),
+        ] {
+            let mut operation = json!({
+                "name": operation_name,
+                "done": true,
+                "error": {"code": 13, "message": "private terminal failure"}
+            });
+            if let Some(metadata) = metadata {
+                operation["metadata"] = metadata;
+            }
+            let failure = client
+                .wait_for_report_result_with_state(
+                    operation_name,
+                    None,
+                    Some(operation),
+                    std::time::Duration::from_millis(1_000),
+                    std::time::Duration::from_millis(5_000),
+                )
+                .await
+                .expect_err("terminal error must not require report identity");
+            assert!(matches!(
+                failure.error,
+                AdManagerError::ReportRunFailed { .. }
+            ));
+            assert!(failure.terminal);
+            assert!(failure.expected_report_name.is_none());
+            assert_eq!(
+                failure
+                    .operation
+                    .as_ref()
+                    .and_then(|operation| operation.get("name"))
+                    .and_then(Value::as_str),
+                Some(operation_name)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn completed_success_with_invalid_present_identity_requires_remediation() {
+        let operation_name = "networks/123/operations/reports/runs/789";
+        let client = AdManagerClient::from_settings(&Settings::default());
+        for metadata in [
+            Value::Null,
+            json!({"report": null}),
+            json!({"report": "not-a-report"}),
+            json!({"report": "networks/999/reports/456"}),
+        ] {
+            let operation = json!({
+                "name": operation_name,
+                "metadata": metadata,
+                "done": true,
+                "response": {
+                    "reportResult": "networks/123/reports/456/results/987"
+                }
+            });
+            let failure = client
+                .wait_for_report_result_with_state(
+                    operation_name,
+                    None,
+                    Some(operation),
+                    std::time::Duration::from_millis(1_000),
+                    std::time::Duration::from_millis(5_000),
+                )
+                .await
+                .expect_err("invalid present identity must require remediation");
+            assert!(matches!(
+                failure.error,
+                AdManagerError::UpstreamContract {
+                    field: "operation.completed_report_identity",
+                    ..
+                }
+            ));
+            assert!(!failure.terminal);
+            assert_eq!(
+                failure
+                    .operation
+                    .as_ref()
+                    .and_then(|operation| operation.get("name"))
+                    .and_then(Value::as_str),
+                Some(operation_name)
+            );
+        }
     }
 
     #[test]

@@ -9071,6 +9071,117 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn metadata_free_or_invalid_terminal_report_failure_remains_terminal() {
+        let operation_name = "networks/123/operations/reports/runs/789";
+        for metadata in [
+            None,
+            Some(Value::Null),
+            Some(json!({"report": null})),
+            Some(json!({"report": "not-a-report"})),
+            Some(json!({"report": "networks/999/reports/456"})),
+        ] {
+            let mut operation = json!({
+                "name": operation_name,
+                "done": true,
+                "error": {
+                    "code": 13,
+                    "message": "authorization=private-terminal-secret report failed"
+                }
+            });
+            if let Some(metadata) = metadata {
+                operation["metadata"] = metadata;
+            }
+            let (base_url, requests, server) = serve_report_http_sequence(vec![(200, operation)]);
+            let client = AdManagerClient::for_test_api_base_url(base_url);
+            let server_under_test = AdManagerServer::new(crate::Settings::default())
+                .expect("build identity-free terminal report server")
+                .with_test_client(client);
+            let result = server_under_test
+                .gam_report_operation_poll(Parameters(ReportOperationPollArgs {
+                    operation_name: operation_name.to_string(),
+                    expected_report_name: None,
+                    fetch_first_page: Some(false),
+                    result_page_size: None,
+                    poll_timeout_ms: Some(1_000),
+                    initial_poll_interval_ms: Some(5_000),
+                }))
+                .await
+                .expect("classify identity-free terminal report failure");
+            let response = result
+                .structured_content
+                .expect("identity-free terminal response");
+            assert_eq!(response["error"]["code"], "report_run_failed");
+            assert_eq!(response["error"]["detail"]["terminal"], true);
+            assert_eq!(response["error"]["detail"]["continuation_available"], false);
+            assert_eq!(
+                response["error"]["detail"]["operation"]["name"],
+                operation_name
+            );
+            assert!(response["error"]["detail"].get("continuation").is_none());
+            assert!(!response.to_string().contains("private-terminal-secret"));
+            server.join().expect("join identity-free terminal server");
+            assert_eq!(requests.lock().expect("lock terminal requests").len(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn completed_success_with_present_invalid_identity_has_no_poll_continuation() {
+        let operation_name = "networks/123/operations/reports/runs/789";
+        for metadata in [
+            Value::Null,
+            json!({"report": null}),
+            json!({"report": "not-a-report"}),
+            json!({"report": "networks/999/reports/456"}),
+        ] {
+            let (base_url, requests, server) = serve_report_http_sequence(vec![(
+                200,
+                json!({
+                    "name": operation_name,
+                    "metadata": metadata,
+                    "done": true,
+                    "response": {
+                        "reportResult": "networks/123/reports/456/results/987"
+                    }
+                }),
+            )]);
+            let client = AdManagerClient::for_test_api_base_url(base_url);
+            let server_under_test = AdManagerServer::new(crate::Settings::default())
+                .expect("build invalid completed-success identity server")
+                .with_test_client(client);
+            let result = server_under_test
+                .gam_report_operation_poll(Parameters(ReportOperationPollArgs {
+                    operation_name: operation_name.to_string(),
+                    expected_report_name: None,
+                    fetch_first_page: Some(false),
+                    result_page_size: None,
+                    poll_timeout_ms: Some(1_000),
+                    initial_poll_interval_ms: Some(5_000),
+                }))
+                .await
+                .expect("classify invalid completed-success identity");
+            let response = result
+                .structured_content
+                .expect("invalid completed-success identity response");
+            assert_eq!(response["error"]["code"], "upstream_contract_error");
+            assert_eq!(response["error"]["detail"]["terminal"], false);
+            assert_eq!(
+                response["error"]["detail"]["poll_outcome"],
+                "remediation_required"
+            );
+            assert_eq!(response["error"]["detail"]["continuation_available"], false);
+            assert_eq!(
+                response["error"]["detail"]["operation"]["name"],
+                operation_name
+            );
+            assert!(response["error"]["detail"].get("continuation").is_none());
+            server
+                .join()
+                .expect("join invalid completed-success server");
+            assert_eq!(requests.lock().expect("lock completed requests").len(), 1);
+        }
+    }
+
+    #[tokio::test]
     async fn completed_report_without_result_is_terminal_and_preserves_evidence() {
         let operation_name = "networks/123/operations/reports/runs/789";
         let (base_url, requests, server) = serve_report_http_sequence(vec![(
