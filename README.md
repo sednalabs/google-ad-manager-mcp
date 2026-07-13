@@ -312,8 +312,10 @@ planning, explanatory, negative, or unrelated language fails closed. Bare,
 latest, current, and reverse `run of/for ... report` noun phrases expose only
 the GET-based existing-operation continuation, and only when the complete query
 is a bounded report command or reference rather than explanatory or
-deliberative prose. Direct poll matches are filtered by that same authority
-decision under both read-only and write-like discovery filters. An explicit
+deliberative prose. Direct poll matches and poll workflow companions are
+filtered by that same authority decision under both read-only and write-like
+discovery filters; bounded completed-result retrieval retains its optional poll
+predecessor. An explicit
 report operation or run identity takes precedence only when it is locally bound
 to the report clause; an identity assigned through `for` or `of` to another
 domain is not a report identity, and an identity label without a value cannot
