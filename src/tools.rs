@@ -8739,34 +8739,49 @@ mod tests {
     #[tokio::test]
     async fn report_poll_rejects_cross_target_operation_and_result_bindings() {
         let requested_operation = "networks/123/operations/reports/runs/789";
-        for body in [
-            json!({
+        for (body, continuation_available) in [
+            (
+                json!({
                 "name":"networks/123/operations/reports/runs/790",
                 "metadata":{"report":"networks/123/reports/456"},
                 "done":false
-            }),
-            json!({
+                }),
+                true,
+            ),
+            (
+                json!({
                 "name":requested_operation,
                 "metadata":{"report":"networks/999/reports/456"},
                 "done":false
-            }),
-            json!({
+                }),
+                true,
+            ),
+            (
+                json!({
                 "name":requested_operation,
                 "metadata":{"report":"networks/123/reports/456"},
                 "done":true,
                 "response":{"reportResult":"networks/123/reports/999/results/987"}
-            }),
-            json!({
+                }),
+                false,
+            ),
+            (
+                json!({
                 "name":requested_operation,
                 "metadata":{"report":"networks/123/reports/456"},
                 "done":"false"
-            }),
-            json!({
+                }),
+                true,
+            ),
+            (
+                json!({
                 "name":requested_operation,
                 "metadata":{"report":"networks/123/reports/456"},
                 "done":true,
                 "response":{"reportResult":42}
-            }),
+                }),
+                false,
+            ),
         ] {
             let (base_url, requests, server) = serve_report_http_sequence(vec![(200, body)]);
             let client = AdManagerClient::for_test_api_base_url(base_url);
@@ -8791,11 +8806,26 @@ mod tests {
             assert_eq!(response["ok"], false);
             assert_eq!(response["error"]["code"], "upstream_contract_error");
             assert_eq!(response["error"]["detail"]["terminal"], false);
-            assert_eq!(response["error"]["detail"]["continuation_available"], true);
             assert_eq!(
-                response["error"]["detail"]["continuation"]["arguments"]["expected_report_name"],
-                "networks/123/reports/456"
+                response["error"]["detail"]["continuation_available"],
+                continuation_available
             );
+            if continuation_available {
+                assert_eq!(
+                    response["error"]["detail"]["continuation"]["arguments"]["expected_report_name"],
+                    "networks/123/reports/456"
+                );
+            } else {
+                assert_eq!(
+                    response["error"]["detail"]["poll_outcome"],
+                    "remediation_required"
+                );
+                assert!(response["error"]["detail"].get("continuation").is_none());
+                assert_eq!(
+                    response["error"]["detail"]["operation"]["name"],
+                    requested_operation
+                );
+            }
 
             server.join().expect("join cross-target report server");
             let requests = requests.lock().expect("lock cross-target requests");
@@ -8919,7 +8949,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn report_poll_preserves_get_only_continuation_for_malformed_provider_result() {
+    async fn completed_malformed_report_result_requires_remediation_without_continuation() {
         let operation_name = "networks/123/operations/reports/runs/789";
         let malformed_result = "networks/123/reports/456?x=/results/987";
         let (base_url, requests, server) = serve_report_http_sequence(vec![(
@@ -8952,16 +8982,16 @@ mod tests {
         assert_eq!(response["ok"], false);
         assert_eq!(response["error"]["code"], "upstream_contract_error");
         assert_eq!(response["error"]["detail"]["terminal"], false);
-        assert_eq!(response["error"]["detail"]["continuation_available"], true);
-        assert!(response["error"]["detail"]["operation"].is_null());
+        assert_eq!(response["error"]["detail"]["continuation_available"], false);
         assert_eq!(
-            response["error"]["detail"]["continuation"]["arguments"]["expected_report_name"],
-            "networks/123/reports/456"
+            response["error"]["detail"]["poll_outcome"],
+            "remediation_required"
         );
         assert_eq!(
-            response["error"]["detail"]["continuation"]["safe_method"],
-            "GET"
+            response["error"]["detail"]["operation"]["name"],
+            operation_name
         );
+        assert!(response["error"]["detail"].get("continuation").is_none());
 
         server.join().expect("join malformed-result report server");
         let requests = requests.lock().expect("lock malformed-result requests");
