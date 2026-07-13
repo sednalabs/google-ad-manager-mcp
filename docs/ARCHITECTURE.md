@@ -202,6 +202,9 @@ rather than treating `run` as a start verb. Report operation and run identities
 must be locally bound to the report clause, and a label without a value cannot
 override a clear new start. Generic non-report operation identity does not
 cross this tool boundary.
+Shared search semantics keep negative query syntax fail-closed. Nonblocking
+starts therefore use an affirmative bounded tail such as `and return
+immediately`, not `without waiting`.
 Existing-operation continuation context replaces any ranked start with a non-callable
 condition record and, when the active filter would exclude it, exposes the
 GET-only poll tool as a callable safe alternative to prevent replay.

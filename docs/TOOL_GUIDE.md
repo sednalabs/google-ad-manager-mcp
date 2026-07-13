@@ -155,6 +155,10 @@ locally bound to the report clause, and a label without a value cannot override
 a clear new start. Generic non-report operation references cannot inject the
 report poll tool. Report starts are representative rank probes but are never
 no-match recovery candidates.
+Negative query syntax remains fail-closed under the shared inventory policy.
+For a nonblocking run, use the affirmative bounded form `start a report and
+return immediately`; `without waiting` is intentionally not an authority
+exception.
 When discovery identifies an existing
 `operation_name` continuation, the same tool is instead emitted as a
 non-callable condition record so it cannot prompt a duplicate start.
