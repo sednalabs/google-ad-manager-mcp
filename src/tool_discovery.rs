@@ -2149,6 +2149,7 @@ pub(crate) fn resolve_report_discovery(
 ) -> ReportDiscoveryResolution {
     let intent = report_discovery_intent(query);
     let report_poll_authorized = report_poll_discovery_is_authoritative(query);
+    let report_result_rows_authorized = has_clear_report_result_retrieval(query);
     let contextual_companions = companions
         .iter()
         .filter(|companion| !companion.callable_as_tool && companion.tool_already_selected)
@@ -2160,6 +2161,7 @@ pub(crate) fn resolve_report_discovery(
         let contextual_companion = contextual_companions.get(result.name.as_str());
         let is_report_run = result.name == "gam_report_run";
         let is_report_poll = result.name == "gam_report_operation_poll";
+        let is_report_result_rows = result.name == "gam_report_result_rows";
         let report_run_callable = is_report_run
             && read_only == Some(false)
             && intent == ReportDiscoveryIntent::ExplicitNewRun
@@ -2219,6 +2221,28 @@ pub(crate) fn resolve_report_discovery(
                 "effect": "polls_existing_operation_with_get",
                 "report_intent": intent.as_str(),
                 "reason": "Polling an existing report operation requires a bounded affirmative report-continuation request or a locally bound existing report operation or run reference. The discovery query did not establish that authority, so this direct match is not callable.",
+            }));
+        } else if is_report_result_rows && !report_result_rows_authorized {
+            condition_only.push(json!({
+                "type": "condition_only_match",
+                "name": result.name,
+                "rank": index + 1,
+                "group": result.group,
+                "description": result.description,
+                "registered_read_only": result.read_only,
+                "registered_risk_posture": result.risk_posture,
+                "relation": "condition",
+                "selection_semantics": "condition_only",
+                "callable_as_tool": false,
+                "schema_exposed": false,
+                "tool_already_selected": true,
+                "required_for_guided_sequence": false,
+                "server_call_enforced": false,
+                "before_tool": Value::Null,
+                "invocation_condition": "explicit_completed_report_result_retrieval_intent",
+                "effect": "fetches_existing_report_result_rows_with_get",
+                "report_intent": intent.as_str(),
+                "reason": "Fetching report result rows requires a bounded affirmative request for rows or a page from a completed report result. The discovery query did not establish that authority, so this direct match is not callable.",
             }));
         } else {
             retained.push(result);
@@ -3411,6 +3435,7 @@ mod tests {
             "start a report then poll report operation 123 and start it",
             "start a report then poll report operation 123 and launch it",
             "start a report then poll report operation 123 and execute it",
+            "select the report then run the saved report then fetch rows from a completed report result and start it",
         ] {
             assert_eq!(
                 report_discovery_intent(Some(query)),
