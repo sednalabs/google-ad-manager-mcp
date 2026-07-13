@@ -2,12 +2,13 @@
   "schema": "mcp_tool_schema_snapshot",
   "tools": [
     {
-      "description": "Search Google Ad Manager MCP tools by keyword, group, and read-only status for OpenAI tool_search or deferred-loading clients.",
+      "description": "Semantically search Google Ad Manager MCP tools with ranked matches, guided dependency edges, completeness metadata, and filter-validated empty-result recovery.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "group": {
             "default": null,
+            "description": "Optional exact tool group filter, such as catalog, reports, trafficking, or scratchpad.",
             "type": [
               "string",
               "null"
@@ -15,12 +16,14 @@
           },
           "include_schema": {
             "default": false,
+            "description": "Include full tool schemas and hosted-client metadata when the complete\ndirect-plus-companion selection contains no more than five tools.\nDefaults to false for compact agent discovery.",
             "type": "boolean"
           },
           "limit": {
             "default": null,
+            "description": "Maximum ranked inventory matches. Defaults to 20. Values above 100 are\ntoolkit-clamped and reported with result_limit_clamped.",
             "format": "uint",
-            "minimum": 0,
+            "minimum": 1,
             "type": [
               "integer",
               "null"
@@ -28,13 +31,15 @@
           },
           "query": {
             "default": null,
+            "description": "Natural-language workflow or tool query.",
             "type": [
               "string",
               "null"
             ]
           },
           "read_only": {
-            "default": null,
+            "default": true,
+            "description": "Filter by mutation behavior: omit, null, or true for only non-mutating\nexecution paths, including previews but excluding all current scratchpad\ntools; false for only write-like or local-state-mutating tools.",
             "type": [
               "boolean",
               "null"
@@ -564,19 +569,85 @@
       "name": "gam_networks_list"
     },
     {
+      "description": "Wait on an existing Google Ad Manager report operation without starting another report run, then optionally fetch the first result page.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "expected_report_name": {
+            "description": "Optional exact report resource name returned by gam_report_run. Supplying it keeps every poll bound to the original network and report.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "fetch_first_page": {
+            "default": true,
+            "description": "Also fetch the first page of result rows after completion. Defaults to true.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "initial_poll_interval_ms": {
+            "description": "Optional initial poll interval override in milliseconds. Must be between 5000 and 30000.",
+            "format": "uint64",
+            "maximum": 30000,
+            "minimum": 5000,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "operation_name": {
+            "description": "Exact report-run operation name returned by gam_report_run, for example\nnetworks/123/operations/reports/runs/456.",
+            "type": "string"
+          },
+          "poll_timeout_ms": {
+            "description": "Optional polling timeout override in milliseconds. Must be between 1 and 86400000.",
+            "format": "uint64",
+            "maximum": 86400000,
+            "minimum": 1,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "result_page_size": {
+            "description": "Optional first-page result row cap. Must be between 1 and 1000.",
+            "format": "uint32",
+            "maximum": 1000,
+            "minimum": 1,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "operation_name"
+        ],
+        "type": "object"
+      },
+      "name": "gam_report_operation_poll"
+    },
+    {
       "description": "Fetch rows from a completed Google Ad Manager report result resource.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "page_size": {
+            "description": "Optional result row cap. Must be between 1 and 1000.",
             "format": "uint32",
-            "minimum": 0,
+            "maximum": 1000,
+            "minimum": 1,
             "type": [
               "integer",
               "null"
             ]
           },
           "page_token": {
+            "description": "Optional next-page token. Must be no more than 4096 bytes.",
+            "maxLength": 4096,
             "type": [
               "string",
               "null"
@@ -600,6 +671,7 @@
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "fetch_first_page": {
+            "default": true,
             "description": "If waiting, also fetch the first page of result rows. Defaults to true.",
             "type": [
               "boolean",
@@ -607,9 +679,10 @@
             ]
           },
           "initial_poll_interval_ms": {
-            "description": "Optional initial poll interval override.",
+            "description": "Optional initial poll interval override in milliseconds. Must be between 5000 and 30000.",
             "format": "uint64",
-            "minimum": 0,
+            "maximum": 30000,
+            "minimum": 5000,
             "type": [
               "integer",
               "null"
@@ -620,9 +693,10 @@
             "type": "string"
           },
           "poll_timeout_ms": {
-            "description": "Optional polling timeout override.",
+            "description": "Optional polling timeout override in milliseconds. Must be between 1 and 86400000.",
             "format": "uint64",
-            "minimum": 0,
+            "maximum": 86400000,
+            "minimum": 1,
             "type": [
               "integer",
               "null"
@@ -633,15 +707,17 @@
             "type": "string"
           },
           "result_page_size": {
-            "description": "Optional first-page result row cap.",
+            "description": "Optional first-page result row cap. Must be between 1 and 1000.",
             "format": "uint32",
-            "minimum": 0,
+            "maximum": 1000,
+            "minimum": 1,
             "type": [
               "integer",
               "null"
             ]
           },
           "wait_for_completion": {
+            "default": true,
             "description": "Wait for the report operation to complete. Defaults to true.",
             "type": [
               "boolean",
@@ -1074,14 +1150,18 @@
             "type": "boolean"
           },
           "page_size": {
+            "description": "Optional result row cap. Must be between 1 and 1000.",
             "format": "uint32",
-            "minimum": 0,
+            "maximum": 1000,
+            "minimum": 1,
             "type": [
               "integer",
               "null"
             ]
           },
           "page_token": {
+            "description": "Optional next-page token. Must be no more than 4096 bytes.",
+            "maxLength": 4096,
             "type": [
               "string",
               "null"

@@ -408,6 +408,17 @@ pub(crate) fn guarded_success(
 }
 
 pub(crate) fn guard_envelope(envelope: Value) -> Result<CallToolResult, &'static str> {
+    guard_envelope_with_status(envelope, false)
+}
+
+pub(crate) fn guard_error_envelope(envelope: Value) -> Result<CallToolResult, &'static str> {
+    guard_envelope_with_status(envelope, true)
+}
+
+fn guard_envelope_with_status(
+    envelope: Value,
+    is_error: bool,
+) -> Result<CallToolResult, &'static str> {
     let envelope_bytes = serde_json::to_vec(&envelope)
         .map_err(|_| "tool result could not be serialized for its Contract V1 envelope guard")?;
     if envelope_bytes.len() > MAX_CONTRACT_ENVELOPE_BYTES {
@@ -416,7 +427,11 @@ pub(crate) fn guard_envelope(envelope: Value) -> Result<CallToolResult, &'static
         );
     }
 
-    let result = CallToolResult::structured(envelope);
+    let result = if is_error {
+        CallToolResult::structured_error(envelope)
+    } else {
+        CallToolResult::structured(envelope)
+    };
     let transport = serde_json::to_vec(&result)
         .map_err(|_| "tool result could not be serialized for its RMCP transport-size guard")?;
     if transport.len() > MAX_RMCP_TRANSPORT_BYTES {

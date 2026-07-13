@@ -124,9 +124,24 @@ google-ad-manager-mcp --print-tool-schema > spec/tool_schema_snapshot.v1.json
 
 For reports:
 
-1. `gam_network_catalog_list` with `collection="reports"`
-2. `gam_report_run`
-3. `gam_report_result_rows` when pagination is needed
+1. `gam_networks_list` to obtain the exact network code
+2. `gam_network_catalog_list` with `collection="reports"` to obtain the saved
+   report id
+3. `gam_report_run`
+4. `gam_report_operation_poll` when the run used `wait_for_completion=false`
+5. `gam_report_result_rows` when pagination is needed
+
+Report handles are bound to the requested network/report. The run POST has an
+empty body. Definitive 4xx rejection is an upstream API failure; once the POST
+may otherwise have been dispatched, transport, response, server, or handoff
+failure is non-replay-safe: do not automatically run the report again. The
+validated POST observation is reused before any poll GET, and deterministic
+result-size failures return bounded handles plus a non-executable smaller-page
+adjustment.
+Poll timeout is between 1 ms and 24 hours, the initial interval between 5 and 30
+seconds, result pages at 1,000 rows and 512 KiB, and polling applies its absolute
+deadline to every GET and sleep. Continue with the returned
+`expected_report_name`; a timed-out continuation raises the bounded timeout.
 
 For REST write planning:
 
@@ -134,6 +149,10 @@ For REST write planning:
 2. `gam_rest_write_plan`
 3. `gam_rest_write_apply` only after enabling write mode, using the manage
    scope, and passing the exact confirmation token from the plan
+
+The plan receipt's `apply_rediscovery` object gives deferred-loading clients the
+exact explicit `read_only=false` discovery call and receipt paths needed for
+step 3. It does not authorize the apply.
 
 For SOAP trafficking:
 
@@ -161,7 +180,9 @@ For descendant-safe yield-group ad-unit exclusions:
 The yield-group exclusion apply path re-reads the yield group before applying,
 preserves the existing yield-group targeting payload, adds only missing exact
 ad-unit exclusions, and re-reads the yield group after apply before it reports
-success.
+success. Its non-noop preview receipt carries the schema-complete request for
+apply, and the confirmation token binds every mutation and approval-context
+field in that request.
 
 For scratchpad analysis:
 
@@ -170,6 +191,9 @@ For scratchpad analysis:
    `gam_scratchpad_ingest_report_result_rows`
 3. `gam_scratchpad_query`
 4. `gam_scratchpad_export_evidence_bundle`
+
+For report-row ingestion, use `page_size` from 1 through 1,000 and keep
+`page_token` within 4,096 bytes.
 
 ## 5. If auth looks configured but access still fails
 

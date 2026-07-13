@@ -2,7 +2,7 @@
 
 use std::time::Instant;
 
-use mcp_toolkit::rmcp::model::CallToolResult;
+use mcp_toolkit::rmcp::model::{CallToolResult, ContentBlock};
 use mcp_toolkit_scratchpad::ScratchpadError;
 use serde_json::{Map, Value, json};
 
@@ -22,6 +22,16 @@ pub fn success_with_meta(data: Value, meta: Value, started: Instant) -> CallTool
     CallToolResult::structured(success_envelope_with_meta(data, meta, started))
 }
 
+pub(crate) fn success_with_text_summary(
+    data: Value,
+    text_summary: impl Into<String>,
+    started: Instant,
+) -> CallToolResult {
+    let mut result = CallToolResult::success(vec![ContentBlock::text(text_summary)]);
+    result.structured_content = Some(success_envelope_with_meta(data, json!({}), started));
+    result
+}
+
 pub(crate) fn success_envelope_with_meta(data: Value, meta: Value, started: Instant) -> Value {
     let mut meta_map = match meta {
         Value::Object(map) => map,
@@ -36,7 +46,7 @@ pub(crate) fn success_envelope_with_meta(data: Value, meta: Value, started: Inst
 }
 
 pub fn error(err: AdManagerError, started: Instant) -> CallToolResult {
-    CallToolResult::structured(error_envelope(&err, started))
+    CallToolResult::structured_error(error_envelope(&err, started))
 }
 
 pub(crate) fn error_envelope(err: &AdManagerError, started: Instant) -> Value {
@@ -60,7 +70,7 @@ pub(crate) fn result_contract_error(
     message: impl AsRef<str>,
     started: Instant,
 ) -> CallToolResult {
-    CallToolResult::structured(json!({
+    CallToolResult::structured_error(json!({
         "ok": false,
         "error": {
             "code": "result_contract_error",
@@ -78,15 +88,50 @@ pub(crate) fn result_contract_error(
     }))
 }
 
+pub(crate) fn result_contract_error_with_detail(
+    field: &'static str,
+    message: impl AsRef<str>,
+    detail: Value,
+    started: Instant,
+) -> CallToolResult {
+    CallToolResult::structured_error(json!({
+        "ok": false,
+        "error": {
+            "code": "result_contract_error",
+            "reason": "result_contract_failed",
+            "message": redact_secret_text(&format!(
+                "result contract failed for {field}: {}",
+                message.as_ref()
+            )),
+            "category": "safety",
+            "hint": "Preserve the returned handoff receipt and use its non-executable adjustment guidance; report an adapter defect if the minimum bounded request still fails.",
+            "detail": redact_secret_value(detail),
+        },
+        "meta": {
+            "elapsed_ms": elapsed_ms(started),
+        }
+    }))
+}
+
 pub fn error_with_detail(err: AdManagerError, detail: Value, started: Instant) -> CallToolResult {
-    CallToolResult::structured(json!({
+    let hint = err.hint();
+    error_with_detail_and_hint(err, detail, hint, started)
+}
+
+pub fn error_with_detail_and_hint(
+    err: AdManagerError,
+    detail: Value,
+    hint: &str,
+    started: Instant,
+) -> CallToolResult {
+    CallToolResult::structured_error(json!({
         "ok": false,
         "error": {
             "code": err.code(),
             "reason": err.reason(),
             "message": redact_secret_text(&err.to_string()),
             "category": err.category(),
-            "hint": err.hint(),
+            "hint": hint,
             "detail": redact_secret_value(detail),
         },
         "meta": {
@@ -96,7 +141,7 @@ pub fn error_with_detail(err: AdManagerError, detail: Value, started: Instant) -
 }
 
 pub fn scratchpad_error(err: ScratchpadError, started: Instant) -> CallToolResult {
-    CallToolResult::structured(json!({
+    CallToolResult::structured_error(json!({
         "ok": false,
         "error": {
             "code": err.code(),
@@ -440,7 +485,53 @@ fn looks_secret_bearing(token: &str, following: &[&str]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::redact_secret_text;
+    use super::{error, redact_secret_text, result_contract_error, success_with_text_summary};
+    use crate::AdManagerError;
+    use serde_json::json;
+    use std::time::Instant;
+
+    #[test]
+    fn text_summary_result_does_not_duplicate_structured_payload() {
+        let result = success_with_text_summary(
+            json!({"large":"value"}),
+            "Short machine-safe summary.",
+            Instant::now(),
+        );
+        let encoded = serde_json::to_value(&result).expect("result serializes");
+        assert_eq!(encoded["content"][0]["text"], "Short machine-safe summary.");
+        assert_eq!(encoded["structuredContent"]["ok"], true);
+        assert_eq!(encoded["structuredContent"]["data"]["large"], "value");
+        assert_ne!(
+            encoded["content"][0]["text"],
+            encoded["structuredContent"].to_string()
+        );
+    }
+
+    #[test]
+    fn error_helpers_set_the_rmcp_tool_error_signal() {
+        let input = error(
+            AdManagerError::invalid("field", "bad value"),
+            Instant::now(),
+        );
+        assert_eq!(input.is_error, Some(true));
+        assert_eq!(
+            input
+                .structured_content
+                .as_ref()
+                .expect("structured input error")["ok"],
+            false
+        );
+
+        let guard = result_contract_error("result", "too large", Instant::now());
+        assert_eq!(guard.is_error, Some(true));
+        assert_eq!(
+            guard
+                .structured_content
+                .as_ref()
+                .expect("structured guard error")["error"]["code"],
+            "result_contract_error"
+        );
+    }
 
     #[test]
     fn redacts_secret_bearing_tokens() {

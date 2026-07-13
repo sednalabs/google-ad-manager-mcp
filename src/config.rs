@@ -14,6 +14,7 @@ pub const GCLOUD_ADC_REQUIRED_SCOPE: &str = "https://www.googleapis.com/auth/clo
 const DEFAULT_API_BASE_URL: &str = "https://admanager.googleapis.com/v1";
 const DEFAULT_SOAP_BASE_URL: &str = "https://ads.google.com/apis/ads/publisher";
 const DEFAULT_WRITE_MODE: &str = "preview_only";
+pub(crate) const MAX_REPORT_POLL_TIMEOUT_MS: u64 = 24 * 60 * 60 * 1_000;
 const DEFAULT_SCRATCHPAD_SESSION_TTL_SECS: u64 = 900;
 const DEFAULT_SCRATCHPAD_MAX_SESSIONS: usize = 64;
 const DEFAULT_SCRATCHPAD_MAX_TABLES_PER_SESSION: usize = 32;
@@ -314,6 +315,14 @@ impl Settings {
                 "must start with https://",
             ));
         }
+        if cli.report_poll_timeout_ms == 0
+            || cli.report_poll_timeout_ms > MAX_REPORT_POLL_TIMEOUT_MS
+        {
+            return Err(AdManagerError::invalid(
+                "report_poll_timeout_ms",
+                format!("must be between 1 and {MAX_REPORT_POLL_TIMEOUT_MS}"),
+            ));
+        }
         if cli.scratchpad_session_ttl_secs == 0 {
             return Err(AdManagerError::invalid(
                 "scratchpad_session_ttl_secs",
@@ -367,9 +376,9 @@ impl Settings {
             api_base_url,
             soap_base_url,
             write_mode,
-            report_poll_timeout: Duration::from_millis(cli.report_poll_timeout_ms.max(1)),
+            report_poll_timeout: Duration::from_millis(cli.report_poll_timeout_ms),
             report_poll_initial_interval: Duration::from_millis(
-                cli.report_poll_initial_interval_ms.max(250),
+                cli.report_poll_initial_interval_ms.clamp(5_000, 30_000),
             ),
             scratchpad_session_ttl: Duration::from_secs(cli.scratchpad_session_ttl_secs),
             scratchpad_max_sessions: cli.scratchpad_max_sessions,
@@ -501,7 +510,13 @@ fn config_root() -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{DEFAULT_READONLY_SCOPE, GCLOUD_ADC_REQUIRED_SCOPE, Settings, parse_write_mode};
+    use std::time::Duration;
+
+    use super::{
+        Cli, DEFAULT_READONLY_SCOPE, GCLOUD_ADC_REQUIRED_SCOPE, MAX_REPORT_POLL_TIMEOUT_MS,
+        Settings, parse_write_mode,
+    };
+    use clap::Parser;
     use mcp_toolkit_core::guarded_action::GuardedActionRuntimeMode;
 
     #[test]
@@ -525,5 +540,35 @@ mod tests {
             GuardedActionRuntimeMode::Enabled
         );
         assert!(parse_write_mode("surprise").is_err());
+    }
+
+    #[test]
+    fn report_poll_timeout_is_validated_at_startup() {
+        for timeout_ms in [1, MAX_REPORT_POLL_TIMEOUT_MS] {
+            let timeout_ms_arg = timeout_ms.to_string();
+            let cli = Cli::parse_from([
+                "google-ad-manager-mcp",
+                "--report-poll-timeout-ms",
+                timeout_ms_arg.as_str(),
+            ]);
+            assert_eq!(
+                Settings::from_cli(cli)
+                    .expect("bounded report timeout")
+                    .report_poll_timeout,
+                Duration::from_millis(timeout_ms)
+            );
+        }
+
+        for timeout_ms in [0, MAX_REPORT_POLL_TIMEOUT_MS + 1] {
+            let timeout_ms_arg = timeout_ms.to_string();
+            let cli = Cli::parse_from([
+                "google-ad-manager-mcp",
+                "--report-poll-timeout-ms",
+                timeout_ms_arg.as_str(),
+            ]);
+            let error = Settings::from_cli(cli).expect_err("out-of-range report timeout");
+            assert!(error.to_string().contains("report_poll_timeout_ms"));
+            assert!(error.to_string().contains("between 1 and 86400000"));
+        }
     }
 }

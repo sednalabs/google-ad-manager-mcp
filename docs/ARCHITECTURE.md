@@ -39,6 +39,9 @@ surface, not an SDK mirror or generic upstream proxy.
   - typed omission accounting and bounded proof error fallbacks
 - `src/tool_surface.rs`
   - `ToolInventory` metadata for `find_tools`
+- `src/tool_discovery.rs`
+  - GAM vocabulary, workflow-companion DAGs, bounded recovery, and local-state
+    access-class guidance over toolkit-ranked results
 - `src/tools.rs`
   - MCP tool argument schemas, SOAP payload template rendering, and
     implementations
@@ -65,6 +68,38 @@ REST beta:
 - allowlisted REST write methods for ad units, placements, saved reports,
   labels, teams, contacts, custom fields, custom targeting keys, applications,
   sites, ad spots, and related batch state actions
+
+The report adapter treats long-running operation handles as bound capabilities,
+not free strings. `reports.run` sends a genuinely empty request body. A
+definitive 4xx rejection is an upstream API failure. Once the non-idempotent POST
+may otherwise have been dispatched, transport, body-read, response-bound,
+plausible server-status, JSON, or handoff failure is uncertain and not
+automatically replay-safe. A known requested report can supply an omitted
+`metadata.report`, while inconsistent present metadata is rejected; every poll
+must echo the requested operation name and the final `reportResult` must belong
+to that same report. The validated POST observation is the first poll
+observation, avoiding an unnecessary GET when it is already complete. Invalid
+`done`/`error`/`response` unions fail closed. Operation reads are capped at 64
+KiB and projected to the documented name/metadata/done/error/response fields.
+Result-page reads are
+capped at 512 KiB and page size 1,000, validate documented row, token, and count
+types, then pass model-visible and complete RMCP result guards. Direct row-fetch
+failures preserve the exact bounded result name and page size. Opaque page
+tokens remain in the caller's original request; receipts record only whether a
+token was supplied and its bounded byte length, and continuations explicitly
+require original request context. Only transport, 408, 429, and 5xx failures
+expose a GET continuation; invalid input, authentication, permanent 4xx,
+malformed JSON, and provider-contract failures require remediation without
+unchanged replay. Poll controls
+require a 5-to-30-second initial interval and at most 24 hours, with bounded
+backoff. An absolute deadline bounds every in-flight GET and sleep. Each
+continuation carries the optional expected report identity; malformed poll
+observations preserve the last valid observation and remain safely GET-resumable.
+Deterministic result-size failures retain bounded operation/report/result/page
+context, set `automatic_replay_safe=false`, and return a non-executable
+smaller-page adjustment. If page size 1 is
+still too large, the saved report dimensions or filters must be reduced; the
+scratchpad uses the same bounded fetch path and is not an overflow bypass.
 
 SOAP v202605 by default:
 
@@ -100,35 +135,152 @@ error.
 
 ## Tool design
 
-The initial first-class tool set is:
+The exact exported tool inventory is runtime-derived rather than maintained as
+a second handwritten list in this document:
 
-1. `gam_get_started`
-2. `gam_auth_status`
-3. `gam_auth_login_command`
-4. `gam_networks_list`
-5. `gam_network_catalog_list`
-6. `gam_report_run`
-7. `gam_report_result_rows`
-8. `gam_trafficking_tool_matrix`
-9. `gam_rest_write_plan`
-10. `gam_rest_write_apply`
-11. `gam_soap_payload_build`
-12. `gam_soap_trafficking_plan`
-13. `gam_soap_trafficking_apply`
-14. `gam_yield_group_exclusions_preview`
-15. `gam_yield_group_exclusions_apply`
-16. `gam_scratchpad_open_session`
-17. `gam_scratchpad_close_session`
-18. `gam_scratchpad_list_sessions`
-19. `gam_scratchpad_list_tables`
-20. `gam_scratchpad_drop_table`
-21. `gam_scratchpad_query`
-22. `gam_scratchpad_ingest_network_catalog`
-23. `gam_scratchpad_ingest_report_result_rows`
-24. `gam_scratchpad_ingest_soap_line_items`
-25. `gam_scratchpad_export_evidence_bundle`
+```bash
+google-ad-manager-mcp --print-tools
+```
 
-`find_tools` is also exposed for deferred-loading and `tool_search` clients.
+`AdManagerServer::tool_names()` reads the registered router, while
+`build_tool_inventory()` supplies the discovery metadata. The
+`inventory_matches_exported_tool_names` contract test requires those two
+surfaces to contain the same names. Use `--print-tool-schema` for the complete
+current schema surface and [the Tool Guide](TOOL_GUIDE.md) for the human-facing
+purpose and operating contract of each tool.
+
+At the architecture level, the surface is organized into these evolving tool
+families rather than a fixed name list:
+
+- discovery and first-run setup
+- network catalogue reads and bounded protection, dependency, and retirement
+  proofs
+- saved-report start, operation continuation, and completed-result retrieval
+- guarded REST and SOAP trafficking plans, applies, and focused workflows
+- bounded local scratchpad lifecycle, ingestion, query, and evidence export
+
+This family summary is intentionally non-exhaustive; the runtime commands above
+are authoritative for the current exported names and schemas.
+
+`find_tools` is also exposed for deferred-loading and `tool_search` clients. It
+uses the toolkit's additive ranked search path and compact serializer by
+default. The provider layer adds only domain workflow relationships: REST plan
+before apply; a report cold-start and asynchronous continuation chain from
+network discovery through report catalog, run, operation poll, and rows;
+optional SOAP payload builder before SOAP plan; SOAP plan before SOAP apply;
+yield-group preview before apply; and filter-validated bounded empty-result
+recovery. Destructive ad-unit archive/deactivate/retirement intent also adds
+network and catalogue identity, dependency-probe, and retirement-assessment
+predecessors before the REST plan.
+The provider composes the complete applicable dependency graph, rejects cycles,
+then computes callable transitive prerequisites in deterministic topological
+order and models non-callable conditions separately. Direct
+report-operation discovery keeps the original run only as a non-callable
+cold-start condition: it is present with the reason not to rerun an existing
+operation, but is absent from allowed tools and schemas. Direct SOAP plan
+discovery still adds its optional builder as callable guidance, and direct SOAP
+apply discovery adds builder then plan. Every reachable edge is emitted
+even when its predecessor is already a semantic result;
+`tool_already_selected` distinguishes that case from a missing predecessor.
+Only missing callable predecessor names are injected into allowed tools and schemas,
+with name deduplication separate from edge emission. Match counts remain about
+semantic inventory results; companion and recovery records are separate OpenAI
+extra results so guidance does not inflate search counts. Full schemas and
+hosted-client metadata are emitted only when `include_schema=true`, and only
+when the complete direct-plus-companion selection contains at most five tools.
+Report-run starts use a non-read-only toolkit risk posture because they create
+an upstream job. Discovery exposes a direct start only when `read_only=false`
+and the bounded toolkit query expresses explicit action-object new-run intent.
+The action must follow a bounded directive prefix. The action-to-object path
+accepts only recognized report modifiers and an empty or bounded
+newly-started-run continuation tail, while planning, explanatory, negative, or
+unrelated language fails closed. Bare, latest, current, and reverse
+`run of/for ... report` noun phrases resolve to existing-operation continuation
+rather than treating `run` as a start verb. Report operation and run identities
+must be locally bound to the report clause, and a label without a value cannot
+override a clear new start. Generic non-report operation identity does not
+cross this tool boundary.
+Shared search semantics keep negative query syntax fail-closed. Nonblocking
+starts therefore use an affirmative bounded tail such as `and return
+immediately`, not `without waiting`.
+Existing-operation continuation context replaces any ranked start with a non-callable
+condition record and, when the active filter would exclude it, exposes the
+GET-only poll tool as a callable safe alternative to prevent replay.
+Content-only clients receive a
+bounded actionable JSON projection with
+ordered ranked direct matches, descriptions and risk posture, allowed tools,
+callable/condition workflow edges and reasons, modern workflow fields, recovery,
+and schema names; complete ranked records and schemas remain in structured
+content.
+
+Recovery candidates are a typed static catalog separate from representative
+ranking probes. They cover every current tool group but deliberately omit the
+upstream-job-creating report-start class. Candidate examples
+are evaluated through the same strict list inventory and toolkit-normalized
+active exact `group`/`read_only` filters as the failed search, always at
+`limit=1`; only an expected rank-one match is serialized. The response keeps
+`retry.example_queries` as a string array, adds `active_filter`, and marks the
+examples as validated under it. Invalid groups can have no examples while
+`available_groups` still offers alternatives from the complete strict
+list-visible inventory under the active `read_only` filter. Dynamic group,
+query, and local-state tool lists are capped and report total, returned, and
+truncated counts. Recovery never
+relaxes an upstream-safety filter merely to force a match. A clear, exact
+scratchpad request can instead expose the separately scoped local-state option
+described below; fail-closed searches cannot.
+Omitted or explicitly null `read_only` is normalized to `true` at the provider
+boundary. Ambiguous, truncated, negative, or exclusion-bearing intent emits no
+provider canned guidance, and mutating candidates are eligible only under an
+explicit `read_only=false` filter. For stateful workflows, scratchpad recovery
+orders the executable session entry before ingestion. Report-run starts are not
+canned retry examples; existing-operation polling and completed-result retrieval
+remain executable discovery paths, and continuation context suppresses duplicate
+starts.
+An explicit scratchpad-group search under `read_only=true` remains empty because
+all current scratchpad calls can touch local session state. Its recovery carries
+a separate `local_state_alternatives` contract. A query with strong scratchpad
+intent also emits that local-state option as a standalone `filter_alternative`
+when weaker read-only matches exist, so ranking noise cannot hide it. Both forms
+scope an explicit
+`read_only=false` retry to MCP-local state, deny upstream GAM mutation, and
+enumerates destructive close/drop tools without weakening the active filter.
+Provider-owned access classes distinguish local-only calls, REST reads under
+the read-only scope, and the SOAP line-item read that requires manage scope.
+The content-only projection retains the exact bounded rediscovery call plus
+eligible/destructive counts and access-class risk context.
+
+The provider rejects `limit=0` before inventory search. The public default is
+20; larger values flow into the toolkit unchanged so its hard maximum of 100,
+`match_summary.result_limit`, and `result_limit_clamped` diagnostics remain
+authoritative.
+The public projection removes free-form query text and query-derived terms and
+returns only presence, recognition, and term counts. Unrecognized or truncated
+group text is also omitted. Oversized inputs retain bounded compact responses, report their
+input truncation reason, and mark recovery fail-closed. Current full-group
+contracts require guided dependency edges and allowed-tool names to remain
+intact within the toolkit's 32 KiB compact data budget. The provider emits a
+bounded actionable RMCP text projection rather than duplicating full
+structured discovery data, then
+guards the complete result at 64 KiB and its structured Contract V1 envelope at
+48 KiB.
+
+All Contract V1 failure helpers set MCP `isError=true` while retaining their
+stable `ok:false` structured envelope. Successes retain `isError=false`.
+
+Companion edges describe a guided sequence, not server-side invocation proof.
+Each record exposes `required_for_guided_sequence` and
+`server_call_enforced:false`. The legacy `required` field is preserved as an
+equal compatibility alias with
+`required_semantics:"guided_sequence_compatibility_alias"`; clients should use
+the new fields. No companion record claims that the builder, plan, or preview
+call occurred.
+
+Verification authority remains tool-specific. REST apply independently
+revalidates its request and token and retains runtime, scope, and confirmation
+gates; configured readback is attempted where available but is not a universal
+success gate. Generic SOAP apply retains request, token, runtime, scope, and
+confirmation checks and requires follow-up verification. Typed yield apply
+retains those gates and requires descendant-safe post-apply readback.
 
 The deliberately grouped tool is `gam_network_catalog_list`. It keeps the
 surface compact while still covering the curated network collections that
@@ -186,14 +338,18 @@ YieldGroupService ad-unit exclusions. They read the current yield group,
 preserve the existing yield-group targeting object, add or repair only requested
 `excludedAdUnits` entries with `includeDescendants=true`, and require post-apply
 readback before reporting an applied state. They deliberately do not make
-`updateYieldGroups` a generic SOAP operation.
+`updateYieldGroups` a generic SOAP operation. The preview receipt serializes the
+exact schema-complete request for apply, and its confirmation fingerprint binds
+all mutation and approval-context fields plus the current readback and generated
+update fingerprints.
 
 The deliberately grouped write tools are `gam_rest_write_plan` and
 `gam_rest_write_apply`. They cover the current REST beta write surface through
 typed allowlists rather than exposing arbitrary HTTP. Planning is a no-mutation
 preview; apply requires explicit runtime enablement, the manage OAuth scope, a
-matching confirmation token, operator context, and post-apply readback where the
-upstream response exposes a resource name.
+matching confirmation token, and operator context. When the upstream response
+exposes a resource name, configured readback is attempted but is not a universal
+success gate.
 
 The deliberately grouped SOAP tools are `gam_soap_trafficking_plan` and
 `gam_soap_trafficking_apply`. They cover classic trafficking and forecast
@@ -206,10 +362,13 @@ workflows through an operation enum:
 - preview URLs
 - forecasts
 
-SOAP plans are no-mutation previews. SOAP apply always requires the full Ad
-Manager manage scope because the legacy SOAP API does not support the newer
-read-only scope. Mutating SOAP apply also requires explicit write-mode
-enablement and operator context.
+SOAP plans are no-mutation previews. Discovery guides callers through optional
+builder, plan, then apply, but it does not enforce or prove those calls. SOAP
+apply independently validates the exact request and token, always requires the
+full Ad Manager manage scope because the legacy SOAP API does not support the
+newer read-only scope, retains runtime and confirmation gates, and requires
+follow-up verification rather than claiming universal readback. Mutating SOAP
+apply also requires explicit write-mode enablement and operator context.
 
 `gam_soap_payload_build` is a no-mutation helper that sits before those tools.
 It renders bounded, validated templates for common read, line-item action,
