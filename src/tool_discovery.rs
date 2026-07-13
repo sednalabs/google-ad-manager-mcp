@@ -604,8 +604,37 @@ fn report_discovery_intent(query: Option<&str>) -> ReportDiscoveryIntent {
 }
 
 fn report_poll_discovery_is_authoritative(query: Option<&str>) -> bool {
+    if has_report_result_retrieval_request(query) {
+        return has_clear_report_result_retrieval(query);
+    }
     report_discovery_intent(query) == ReportDiscoveryIntent::ExistingOperationContinuation
         || has_clear_report_result_retrieval(query)
+}
+
+fn has_report_result_retrieval_request(query: Option<&str>) -> bool {
+    let Some(query) = query else {
+        return false;
+    };
+    let normalized = normalize_report_discovery_query(query).text;
+    let terms = normalized
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .filter(|term| !term.is_empty())
+        .collect::<Vec<_>>();
+    let terms = strip_report_directive_prefix(&terms);
+    terms.first().is_some_and(|term| {
+        matches!(
+            *term,
+            "fetch" | "get" | "list" | "retrieve" | "show" | "view"
+        )
+    }) && terms
+        .iter()
+        .any(|term| matches!(*term, "report" | "reports"))
+        && terms
+            .iter()
+            .any(|term| matches!(*term, "result" | "results"))
+        && terms
+            .iter()
+            .any(|term| matches!(*term, "page" | "pages" | "row" | "rows"))
 }
 
 fn has_clear_report_result_retrieval(query: Option<&str>) -> bool {
@@ -782,12 +811,8 @@ fn has_explicit_existing_report_run_reference(
 }
 
 fn report_run_has_pronoun_action_object(terms: &[&str], index: usize) -> bool {
-    let previous = index
-        .checked_sub(1)
-        .and_then(|previous| terms.get(previous));
     let next = terms.get(index + 1);
-    (index == 0 || matches!(previous, Some(&"and" | &"then")))
-        && matches!(next, Some(&"it" | &"this" | &"that"))
+    matches!(next, Some(&"it" | &"this" | &"that"))
 }
 
 fn run_has_report_binding(terms: &[&str], run_index: usize) -> bool {
@@ -3453,6 +3478,7 @@ mod tests {
             "start a report then poll report operation 123 and execute it",
             "select the report then run the saved report then fetch rows from a completed report result and start it",
             "select the report then run it",
+            "select the report; run it",
             "fetch rows from the active report result",
         ] {
             assert_eq!(
