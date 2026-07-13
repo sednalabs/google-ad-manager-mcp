@@ -645,9 +645,13 @@ fn has_clear_report_result_retrieval(query: Option<&str>) -> bool {
     let has_page_or_rows = terms
         .iter()
         .any(|term| matches!(*term, "page" | "pages" | "row" | "rows"));
+    let has_completed_result = terms
+        .iter()
+        .any(|term| matches!(*term, "complete" | "completed"));
     has_report
         && has_result
         && has_page_or_rows
+        && has_completed_result
         && terms.iter().all(|term| {
             is_numeric_term(term)
                 || is_report_determiner(term)
@@ -738,6 +742,9 @@ fn has_explicit_existing_report_run_reference(
         if !matches!(*term, "run" | "runs") {
             return false;
         }
+        if report_run_has_pronoun_action_object(terms, index) {
+            return false;
+        }
         if reference_has_non_report_relation_target(terms, index) {
             return false;
         }
@@ -772,6 +779,15 @@ fn has_explicit_existing_report_run_reference(
         }
         true
     })
+}
+
+fn report_run_has_pronoun_action_object(terms: &[&str], index: usize) -> bool {
+    let previous = index
+        .checked_sub(1)
+        .and_then(|previous| terms.get(previous));
+    let next = terms.get(index + 1);
+    (index == 0 || matches!(previous, Some(&"and" | &"then")))
+        && matches!(next, Some(&"it" | &"this" | &"that"))
 }
 
 fn run_has_report_binding(terms: &[&str], run_index: usize) -> bool {
@@ -3436,6 +3452,8 @@ mod tests {
             "start a report then poll report operation 123 and launch it",
             "start a report then poll report operation 123 and execute it",
             "select the report then run the saved report then fetch rows from a completed report result and start it",
+            "select the report then run it",
+            "fetch rows from the active report result",
         ] {
             assert_eq!(
                 report_discovery_intent(Some(query)),
