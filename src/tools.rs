@@ -8286,6 +8286,7 @@ mod tests {
             "start a report then poll report operation 123 and start it",
             "start a report then poll report operation 123 and launch it",
             "start a report then poll report operation 123 and execute it",
+            "select the report then run the saved report then fetch rows from a completed report result and start it",
         ] {
             let ambiguous_action = server
                 .find_tools(Parameters(FindToolsArgs {
@@ -8319,6 +8320,19 @@ mod tests {
                 ambiguous_action["schemas"]
                     .get("gam_report_operation_poll")
                     .is_none()
+            );
+            assert!(
+                !ambiguous_action["openai_allowed_tools"]
+                    .as_array()
+                    .expect("ambiguous-action allowed tools")
+                    .contains(&json!("gam_report_result_rows")),
+                "report rows were callable for unrelated or mixed action: {query}"
+            );
+            assert!(
+                ambiguous_action["schemas"]
+                    .get("gam_report_result_rows")
+                    .is_none(),
+                "report rows schema was exposed for unrelated or mixed action: {query}"
             );
         }
 
