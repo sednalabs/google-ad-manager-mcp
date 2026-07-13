@@ -1466,39 +1466,40 @@ fn report_start_action_tail<'a>(
         if !is_report_start_action(term) {
             continue;
         }
-        if has_non_execution_report_language(terms, index, clause_text, &term_spans) {
-            continue;
-        }
         let object_terms = &terms[index + 1..];
-        if let Some(consumed) = campaign_delivery_audit_report_object_end(object_terms) {
-            let report_index = index + consumed;
-            if report_action_object_crosses_clause_boundary(
+        let candidate =
+            if let Some(consumed) = campaign_delivery_audit_report_object_end(object_terms) {
+                Some((index + consumed, &object_terms[consumed..]))
+            } else {
+                let mut found = None;
+                for (candidate_index, candidate) in object_terms.iter().enumerate() {
+                    if matches!(*candidate, "report" | "reports") {
+                        found = Some((
+                            index + candidate_index + 1,
+                            &object_terms[candidate_index + 1..],
+                        ));
+                        break;
+                    }
+                    if !is_report_object_modifier(candidate) {
+                        break;
+                    }
+                }
+                found
+            };
+        let Some((report_index, tail)) = candidate else {
+            continue;
+        };
+        if has_non_execution_report_language(terms, index, clause_text, &term_spans)
+            || report_action_object_crosses_clause_boundary(
                 clause_text,
                 &term_spans,
                 index,
                 report_index,
-            ) {
-                return ReportStartActionTail::Rejected;
-            }
-            return ReportStartActionTail::Candidate(&object_terms[consumed..]);
+            )
+        {
+            return ReportStartActionTail::Rejected;
         }
-        for (candidate_index, candidate) in object_terms.iter().enumerate() {
-            if matches!(*candidate, "report" | "reports") {
-                let report_index = index + candidate_index + 1;
-                if report_action_object_crosses_clause_boundary(
-                    clause_text,
-                    &term_spans,
-                    index,
-                    report_index,
-                ) {
-                    return ReportStartActionTail::Rejected;
-                }
-                return ReportStartActionTail::Candidate(&object_terms[candidate_index + 1..]);
-            }
-            if !is_report_object_modifier(candidate) {
-                break;
-            }
-        }
+        return ReportStartActionTail::Candidate(tail);
     }
     ReportStartActionTail::NoCandidate
 }
