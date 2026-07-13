@@ -8089,6 +8089,7 @@ mod tests {
             "start a new report then poll the current run",
             "current report operation",
             "use the latest report operation",
+            "check operation handle networks/123/operations/reports/runs/run_456-abc",
         ] {
             let noun_reference = server
                 .find_tools(Parameters(FindToolsArgs {
@@ -8156,12 +8157,18 @@ mod tests {
             "use operation 123 for the ad unit and check the report",
             "check the report and use operation 123 for the advertiser",
             "use network operation 123 and check the report",
+            "use network operation 123 for my saved report",
+            "use advertiser operation 123 for my saved report",
+            "check report operation 123 and report operation 456",
+            "check report operation 123 and 456",
+            "check networks/111/operations/reports/runs/456 and networks/222/operations/reports/runs/789",
             "inspect deployment run 123 and summarize a report",
             "summarize the report and use run 123 for the deployment",
             "use the deployment run for the line item and summarize the report",
             "use report run 123 for the deployment",
             "check the report and use run 123 for the advertiser",
             "check the report for network run 123",
+            "show report result rows for advertiser id 123",
             "start a report without waiting",
         ] {
             let ambiguous_action = server

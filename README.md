@@ -317,9 +317,12 @@ rather than explanatory or deliberative prose. Collective modal questions such a
 Direct poll matches and poll workflow companions are
 filtered by that same authority decision under both read-only and write-like
 discovery filters; bounded completed-result retrieval retains its optional poll
-predecessor. Every explicit operation or run identity must be locally bound to
-the report clause before it can authorize report continuation. Unbound
-identities and identities assigned through `for` or `of` to another domain
+predecessor only after the same identity-coherence check. A query may identify
+at most one report operation or run, and every explicit identity must be locally
+bound to the report clause before it can authorize report continuation. A
+runtime-valid canonical operation resource name counts as that one identity,
+including opaque alphanumeric, hyphenated, or underscored operation IDs.
+Unbound identities and identities assigned or premodified by another domain
 block report-continuation fallback, and an identity label without a value cannot
 override a clear new start. Generic non-report operation references cannot
 inject the report poll tool.

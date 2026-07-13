@@ -204,11 +204,14 @@ Explanatory or deliberative framing cannot be discarded at a conjunction, and
 collective modal questions remain deliberative rather than becoming directives.
 direct poll results or workflow companions are subject to the same authority
 decision under every discovery filter. Bounded completed-result retrieval may
-retain its optional poll predecessor. Every explicit operation or run identity
-must be locally bound to the report clause before it can authorize report
-continuation. Unbound identities and identities related through `for` or `of`
-to another domain block generic report-continuation fallback, and a label
-without a value cannot override a clear new start.
+retain its optional poll predecessor only after the same identity-coherence
+check. A query may identify at most one report operation or run, and every
+explicit identity must be locally bound to the report clause before it can
+authorize report continuation. A runtime-valid canonical operation resource
+name counts as that one identity, including opaque alphanumeric, hyphenated, or
+underscored operation IDs. Unbound identities and identities related to or
+premodified by another domain block generic report-continuation fallback, and a
+label without a value cannot override a clear new start.
 Generic non-report operation identity cannot inject the report poll tool.
 Negative query syntax remains fail-closed under the shared search policy;
 nonblocking starts use affirmative `return immediately` or `asynchronously`
