@@ -8291,6 +8291,7 @@ mod tests {
             "select the report; run it",
             "fetch rows from the active report result",
             "fetch rows from the latest report run result",
+            "select the report then fetch the latest report run result rows",
         ] {
             let ambiguous_action = server
                 .find_tools(Parameters(FindToolsArgs {
@@ -8346,6 +8347,7 @@ mod tests {
             "show first 100 rows from a completed report result",
             "view 100 rows from a completed report result",
             "view the first 100 of its rows from a completed report result",
+            "select the report then fetch rows from a completed report result",
         ] {
             let completed_result = server
                 .find_tools(Parameters(FindToolsArgs {

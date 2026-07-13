@@ -620,13 +620,10 @@ fn has_report_result_retrieval_request(query: Option<&str>) -> bool {
         .split(|character: char| !character.is_ascii_alphanumeric())
         .filter(|term| !term.is_empty())
         .collect::<Vec<_>>();
-    let terms = strip_report_directive_prefix(&terms);
-    terms.first().is_some_and(|term| {
-        matches!(
-            *term,
-            "fetch" | "get" | "list" | "retrieve" | "show" | "view"
-        )
-    }) && terms
+    let Some(terms) = report_result_retrieval_clause(&terms) else {
+        return false;
+    };
+    terms
         .iter()
         .any(|term| matches!(*term, "report" | "reports"))
         && terms
@@ -635,6 +632,25 @@ fn has_report_result_retrieval_request(query: Option<&str>) -> bool {
         && terms
             .iter()
             .any(|term| matches!(*term, "page" | "pages" | "row" | "rows"))
+}
+
+fn report_result_retrieval_clause<'a>(terms: &'a [&'a str]) -> Option<&'a [&'a str]> {
+    let terms = strip_report_directive_prefix(terms);
+    let retrieval_index = terms
+        .iter()
+        .position(|term| is_report_result_retrieval_action(term))?;
+    if retrieval_index == 0 {
+        return Some(terms);
+    }
+    let selection_clause = terms[..retrieval_index].strip_suffix(&["then"])?;
+    report_selection_clause_is_authoritative(selection_clause).then_some(&terms[retrieval_index..])
+}
+
+fn is_report_result_retrieval_action(term: &str) -> bool {
+    matches!(
+        term,
+        "fetch" | "get" | "list" | "retrieve" | "show" | "view"
+    )
 }
 
 fn has_clear_report_result_retrieval(query: Option<&str>) -> bool {
@@ -656,15 +672,9 @@ fn has_clear_report_result_retrieval(query: Option<&str>) -> bool {
     {
         return false;
     }
-    let terms = strip_report_directive_prefix(&terms);
-    if !terms.first().is_some_and(|term| {
-        matches!(
-            *term,
-            "fetch" | "get" | "list" | "retrieve" | "show" | "view"
-        )
-    }) {
+    let Some(terms) = report_result_retrieval_clause(&terms) else {
         return false;
-    }
+    };
     let has_report = terms
         .iter()
         .any(|term| matches!(*term, "report" | "reports"));
@@ -3079,6 +3089,22 @@ mod tests {
             assert_eq!(resolution.records[0]["report_intent"], "unspecified");
         }
 
+        let query = "select the report then fetch the latest report run result rows";
+        let mut results = vec![result("gam_report_operation_poll")];
+        let resolution = resolve_report_discovery(
+            &mut results,
+            &[],
+            Some(query),
+            Some("reports"),
+            true,
+            Some(false),
+        );
+        assert!(results.is_empty(), "nonterminal rows request exposed poll");
+        assert_eq!(resolution.records.len(), 1);
+        assert_eq!(resolution.records[0]["name"], "gam_report_operation_poll");
+        assert_eq!(resolution.records[0]["callable_as_tool"], false);
+        assert_eq!(resolution.records[0]["schema_exposed"], false);
+
         let query = "continue waiting for an existing report operation";
         let mut results = vec![result("gam_report_operation_poll")];
         let resolution = resolve_report_discovery(
@@ -3098,6 +3124,7 @@ mod tests {
             "show first 100 rows from a completed report result",
             "view 100 rows from a completed report result",
             "view the first 100 of its rows from a completed report result",
+            "select the report then fetch rows from a completed report result",
         ] {
             let mut results = vec![result("gam_report_operation_poll")];
             let resolution = resolve_report_discovery(
