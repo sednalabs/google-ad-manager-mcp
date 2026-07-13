@@ -146,7 +146,8 @@ starting a saved report creates an upstream job. An explicit
 its toolkit risk posture only when the bounded toolkit query also expresses
 explicit action-object new-run intent: start, run, launch, or execute must
 follow a bounded directive prefix and precede a report object with only
-recognized report modifiers between them. The remaining query must be empty or
+recognized report modifiers and no clause punctuation between them. The
+remaining query must be empty or
 a bounded continuation of that newly started run. Planning, explanatory,
 negative, or unrelated language fails closed. Bare, existing-state, and
 reverse `run of/for ... report` noun phrases are existing-operation references
@@ -174,7 +175,9 @@ as existing-operation requests. Conjunction-led imperative uses of `report`
 are not ownership anchors, including across bounded directive fillers.
 Coordinated noun relation targets are evaluated as a whole, and any non-report
 GAM domain in such a target fails closed even when a report is also named; a
-later imperative clause starts a new target boundary. Generic non-report
+later imperative clause, after any bounded directive prefix, starts a new
+target boundary, while noun and gerund continuation terms do not. Generic
+non-report
 operation references cannot
 inject the report poll tool. Bounded `get`/`retrieve` continuations and
 `first N ... rows` requests use the same clause and identity checks. A `to` or

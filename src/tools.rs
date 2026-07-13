@@ -8118,6 +8118,8 @@ mod tests {
             "check operation 123 for the current report and poll to completion",
             "check report operation 123 to completion and show inventory report rows",
             "check report operation 123 to completion and please show inventory report rows",
+            "check report operation 123 to completion and please now show inventory report rows",
+            "check report operation 123 to completion and run inventory report",
         ] {
             let noun_reference = server
                 .find_tools(Parameters(FindToolsArgs {
@@ -8228,6 +8230,12 @@ mod tests {
             "start a report and please report operation 123",
             "inspect inventory and can you please report operation 123",
             "start a report and now report operation 123",
+            "check operation 123 for the report and monitoring campaign",
+            "check operation 123 for the report and checking advertiser",
+            "launch the campaign; report now",
+            "launch the campaign, report now",
+            "launch the campaign. report now",
+            "launch the campaign: report now",
         ] {
             let ambiguous_action = server
                 .find_tools(Parameters(FindToolsArgs {

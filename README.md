@@ -307,7 +307,8 @@ discovery only when the bounded toolkit query places an explicit start, run,
 launch, or execute action before a report object and the caller sets
 `read_only=false`. The action must follow a bounded directive prefix. Only
 recognized report-object modifiers may occur between that action and object,
-and any tail must be empty or a bounded continuation of the newly started run;
+with no intervening clause punctuation, and any tail must be empty or a bounded
+continuation of the newly started run;
 planning, explanatory, negative, or unrelated language fails closed. Bare,
 existing-state, and reverse `run of/for ... report` noun phrases expose only
 the GET-based existing-operation continuation, and only when the complete query
@@ -336,7 +337,8 @@ uses of `report` are not ownership anchors, including when bounded directive
 fillers separate the conjunction from the verb. Coordinated noun relation
 targets are evaluated as a whole, so any non-report GAM domain in the target
 fails closed even when the target also names a report; a later imperative
-clause starts a new target boundary. Generic non-report
+clause, after any bounded directive prefix, starts a new target boundary, while
+noun and gerund continuation terms do not. Generic non-report
 operation references cannot inject the report poll tool. Bounded `get`/`retrieve` continuations and
 `first N ... rows` requests use the same clause and identity checks; `to` or
 `with` targets name another GAM domain only fail closed, while lifecycle phrases
