@@ -477,7 +477,7 @@ fn report_discovery_intent(query: Option<&str>) -> ReportDiscoveryIntent {
     if query_blocks_report_authority(&terms, &normalized) {
         return ReportDiscoveryIntent::Unspecified;
     }
-    if report_context && has_cross_domain_reference_target(&terms) {
+    if report_context && has_unbound_or_cross_domain_reference(&terms) {
         return ReportDiscoveryIntent::Unspecified;
     }
     let clear_new_run_action = has_clear_report_start_action(&terms, report_context, &normalized);
@@ -572,6 +572,7 @@ fn has_clear_report_result_retrieval(query: Option<&str>) -> bool {
                         | "of"
                         | "name"
                         | "id"
+                        | "me"
                         | "now"
                         | "please"
                 )
@@ -632,6 +633,9 @@ fn has_explicit_existing_report_run_reference(
         if reference_has_non_report_relation_target(terms, index) {
             return false;
         }
+        if !run_has_report_binding(terms, index) {
+            return false;
+        }
         let previous = index.checked_sub(1).map(|previous| terms[previous]);
         let next = terms.get(index + 1).copied();
         let labelled_identity = next == Some("id");
@@ -640,10 +644,10 @@ fn has_explicit_existing_report_run_reference(
         let explicit_identity = next.is_some_and(is_numeric_term)
             || labelled_identity_has_value
             || previous.is_some_and(is_existing_reference_modifier);
-        if explicit_identity && run_has_report_binding(terms, index) {
+        if explicit_identity {
             return true;
         }
-        if labelled_identity && !clear_new_run_action && run_has_report_binding(terms, index) {
+        if labelled_identity && !clear_new_run_action {
             return true;
         }
         if reference_has_reverse_report_binding(terms, index) {
@@ -652,33 +656,7 @@ fn has_explicit_existing_report_run_reference(
         if clear_new_run_action {
             return false;
         }
-        let Some(report_index) = terms[..index]
-            .iter()
-            .rposition(|candidate| matches!(*candidate, "report" | "reports"))
-        else {
-            return false;
-        };
-        let action_precedes_report = terms[..report_index]
-            .iter()
-            .any(|candidate| is_report_start_action(candidate));
-        if !action_precedes_report {
-            return true;
-        }
-        let action_index = terms[..report_index]
-            .iter()
-            .rposition(|candidate| is_report_start_action(candidate))
-            .expect("action presence checked above");
-        let reference_terms = &terms[action_index + 1..index];
-        reference_terms
-            .iter()
-            .rev()
-            .find(|candidate| {
-                matches!(
-                    **candidate,
-                    "new" | "existing" | "current" | "latest" | "recent" | "active"
-                )
-            })
-            .is_some_and(|candidate| is_existing_reference_modifier(candidate))
+        true
     })
 }
 
@@ -707,11 +685,9 @@ fn run_has_report_binding(terms: &[&str], run_index: usize) -> bool {
     let report_index = run_index + 1 + relative_report_index;
     let bridge = &terms[run_index + 1..report_index];
     bridge.iter().any(|term| matches!(*term, "for" | "of"))
-        && bridge.iter().all(|term| {
-            is_report_reference_article(term)
-                || matches!(*term, "for" | "of" | "id")
-                || is_numeric_term(term)
-        })
+        && bridge
+            .iter()
+            .all(|term| is_report_reverse_bridge_term(term))
 }
 
 fn operation_has_report_binding(terms: &[&str], operation_index: usize) -> bool {
@@ -739,24 +715,9 @@ fn operation_has_report_binding(terms: &[&str], operation_index: usize) -> bool 
     let report_index = operation_index + 1 + relative_report_index;
     let bridge = &terms[operation_index + 1..report_index];
     bridge.iter().any(|term| matches!(*term, "for" | "of"))
-        && bridge.iter().all(|term| {
-            matches!(
-                *term,
-                "name"
-                    | "handle"
-                    | "id"
-                    | "for"
-                    | "of"
-                    | "a"
-                    | "an"
-                    | "the"
-                    | "one"
-                    | "existing"
-                    | "current"
-                    | "latest"
-                    | "active"
-            ) || is_numeric_term(term)
-        })
+        && bridge
+            .iter()
+            .all(|term| is_report_reverse_bridge_term(term))
 }
 
 fn reference_has_non_report_relation_target(terms: &[&str], reference_index: usize) -> bool {
@@ -777,11 +738,35 @@ fn reference_has_non_report_relation_target(terms: &[&str], reference_index: usi
             .any(|term| matches!(*term, "report" | "reports"))
 }
 
-fn has_cross_domain_reference_target(terms: &[&str]) -> bool {
+fn has_unbound_or_cross_domain_reference(terms: &[&str]) -> bool {
     terms.iter().enumerate().any(|(index, term)| {
-        matches!(*term, "operation" | "operations" | "run" | "runs")
-            && reference_has_non_report_relation_target(terms, index)
+        if !matches!(*term, "operation" | "operations" | "run" | "runs") {
+            return false;
+        }
+        if reference_has_non_report_relation_target(terms, index) {
+            return true;
+        }
+        let previous = index.checked_sub(1).map(|previous| terms[previous]);
+        let next = terms.get(index + 1).copied();
+        let has_identity = next.is_some_and(is_numeric_term)
+            || matches!(next, Some("name" | "handle" | "id"))
+            || previous.is_some_and(is_existing_reference_modifier);
+        if !has_identity {
+            return false;
+        }
+        if matches!(*term, "operation" | "operations") {
+            !operation_has_report_binding(terms, index)
+        } else {
+            !run_has_report_binding(terms, index)
+        }
     })
+}
+
+fn is_report_reverse_bridge_term(term: &str) -> bool {
+    is_numeric_term(term)
+        || is_report_reference_article(term)
+        || is_existing_reference_modifier(term)
+        || matches!(term, "name" | "handle" | "id" | "for" | "of")
 }
 
 fn reference_has_reverse_report_binding(terms: &[&str], reference_index: usize) -> bool {
@@ -794,15 +779,14 @@ fn reference_has_reverse_report_binding(terms: &[&str], reference_index: usize) 
     let report_index = reference_index + 1 + relative_report_index;
     let bridge = &terms[reference_index + 1..report_index];
     bridge.iter().any(|term| matches!(*term, "for" | "of"))
-        && bridge.iter().all(|term| {
-            is_report_reference_article(term)
-                || matches!(*term, "for" | "of" | "id")
-                || is_numeric_term(term)
-        })
+        && bridge
+            .iter()
+            .all(|term| is_report_reverse_bridge_term(term))
 }
 
 fn is_report_operation_bridge_term(term: &str) -> bool {
     is_report_continuation_term(term)
+        || is_existing_reference_modifier(term)
         || matches!(
             term,
             "and"
@@ -810,10 +794,9 @@ fn is_report_operation_bridge_term(term: &str) -> bool {
                 | "the"
                 | "its"
                 | "this"
-                | "existing"
-                | "current"
-                | "latest"
-                | "active"
+                | "new"
+                | "s"
+                | "most"
                 | "show"
                 | "return"
                 | "returning"
@@ -1113,6 +1096,7 @@ fn report_reference_query_is_authoritative(terms: &[&str]) -> bool {
                     | "results"
                     | "show"
                     | "showing"
+                    | "me"
                     | "use"
                     | "select"
                     | "selected"
@@ -2223,18 +2207,25 @@ mod tests {
         assert!(resolution.records.is_empty());
         assert_eq!(results[0].name, "gam_report_operation_poll");
 
-        let query = "fetch rows from a completed report result";
-        let mut results = vec![result("gam_report_operation_poll")];
-        let resolution = resolve_report_discovery(
-            &mut results,
-            &[],
-            Some(query),
-            Some("reports"),
-            true,
-            Some(true),
-        );
-        assert!(resolution.records.is_empty());
-        assert_eq!(results[0].name, "gam_report_operation_poll");
+        for query in [
+            "fetch rows from a completed report result",
+            "show me rows from a completed report result",
+        ] {
+            let mut results = vec![result("gam_report_operation_poll")];
+            let resolution = resolve_report_discovery(
+                &mut results,
+                &[],
+                Some(query),
+                Some("reports"),
+                true,
+                Some(true),
+            );
+            assert!(
+                resolution.records.is_empty(),
+                "poll was contradicted: {query}"
+            );
+            assert_eq!(results[0].name, "gam_report_operation_poll");
+        }
     }
 
     #[test]
@@ -2320,9 +2311,12 @@ mod tests {
             "report runs",
             "start the latest report run",
             "latest run of the report",
+            "latest run of the current report",
             "current run for the saved report",
             "current run for this report",
             "show the latest run for my saved report",
+            "show me the current report run",
+            "operation 123 for my saved report",
             "show the current run of the report",
             "run of the report",
             "start a report, then poll the current run",
@@ -2493,11 +2487,13 @@ mod tests {
             "summarize the report and use operation 123 for the ad unit",
             "use operation 123 for the ad unit and check the report",
             "check the report and use operation 123 for the advertiser",
+            "use network operation 123 and check the report",
             "inspect deployment run 123 and summarize a report",
             "summarize the report and use run 123 for the deployment",
             "use the deployment run for the line item and summarize the report",
             "use report run 123 for the deployment",
             "check the report and use run 123 for the advertiser",
+            "check the report for network run 123",
             "start a report without waiting",
         ] {
             assert_eq!(

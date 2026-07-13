@@ -309,19 +309,20 @@ launch, or execute action before a report object and the caller sets
 recognized report-object modifiers may occur between that action and object,
 and any tail must be empty or a bounded continuation of the newly started run;
 planning, explanatory, negative, or unrelated language fails closed. Bare,
-latest, current, and reverse `run of/for ... report` noun phrases expose only
+existing-state, and reverse `run of/for ... report` noun phrases expose only
 the GET-based existing-operation continuation, and only when the complete query
-is a bounded report command or reference rather than explanatory or
-deliberative prose. Collective modal questions such as `will we ...` and
+is a bounded report command or reference, including bounded `show me` requests,
+rather than explanatory or deliberative prose. Collective modal questions such as `will we ...` and
 `would we ...` remain deliberative rather than being stripped into directives.
 Direct poll matches and poll workflow companions are
 filtered by that same authority decision under both read-only and write-like
 discovery filters; bounded completed-result retrieval retains its optional poll
-predecessor. An explicit report operation or run identity takes precedence only
-when it is locally bound to the report clause; an identity assigned through
-`for` or `of` to another domain blocks report-continuation fallback, and an
-identity label without a value cannot override a clear new start. Generic
-non-report operation references cannot inject the report poll tool.
+predecessor. Every explicit operation or run identity must be locally bound to
+the report clause before it can authorize report continuation. Unbound
+identities and identities assigned through `for` or `of` to another domain
+block report-continuation fallback, and an identity label without a value cannot
+override a clear new start. Generic non-report operation references cannot
+inject the report poll tool.
 Negative query syntax remains fail-closed under the shared inventory policy;
 request a nonblocking start affirmatively, for example `start a report and
 return immediately` or `start a report asynchronously`, rather than `without

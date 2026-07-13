@@ -148,16 +148,17 @@ explicit action-object new-run intent: start, run, launch, or execute must
 follow a bounded directive prefix and precede a report object with only
 recognized report modifiers between them. The remaining query must be empty or
 a bounded continuation of that newly started run. Planning, explanatory,
-negative, or unrelated language fails closed. Bare, latest, current, and
+negative, or unrelated language fails closed. Bare, existing-state, and
 reverse `run of/for ... report` noun phrases are existing-operation references
 and expose only GET-based polling when the complete query is a bounded report
-command or reference. Explanatory or deliberative framing is not discarded at
+command or reference, including bounded `show me` requests. Explanatory or deliberative framing is not discarded at
 `and` or `then`, and collective modal questions remain deliberative rather than
 becoming directives. Direct poll matches or workflow companions are filtered
 by the same authority decision under every discovery filter. Bounded
-completed-result retrieval retains its optional poll predecessor. Report
-operation and run identities must be locally bound to the report clause; an
-identity related through `for` or `of` to another domain blocks generic
+completed-result retrieval retains its optional poll predecessor. Every
+explicit operation or run identity must be locally bound to the report clause
+before it can authorize report continuation. Unbound identities and identities
+related through `for` or `of` to another domain block generic
 report-continuation fallback, and a label without a value cannot override a
 clear new start. Generic non-report operation references cannot inject the
 report poll tool. Report starts are representative rank probes but are never

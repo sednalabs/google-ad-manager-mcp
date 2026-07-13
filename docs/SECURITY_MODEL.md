@@ -196,16 +196,18 @@ non-read-only. Discovery authorizes that start only when an action verb precedes
 a report object under `read_only=false`, follows a bounded directive prefix,
 uses only recognized report modifiers between action and object, and has an
 empty or bounded newly-started-run continuation tail. Planning, explanatory,
-negative, or unrelated language fails closed. Bare, latest, current, and
-reverse `run of/for ... report` noun phrases fail closed to existing-operation
-polling only when the complete query is a bounded report command or reference.
+negative, or unrelated language fails closed. Bare, existing-state, and reverse
+`run of/for ... report` noun phrases fail closed to existing-operation polling
+only when the complete query is a bounded report command or reference,
+including bounded `show me` requests.
 Explanatory or deliberative framing cannot be discarded at a conjunction, and
 collective modal questions remain deliberative rather than becoming directives.
 direct poll results or workflow companions are subject to the same authority
 decision under every discovery filter. Bounded completed-result retrieval may
-retain its optional poll predecessor. Report operation and run identities must
-be locally bound to the report clause; an identity related through `for` or
-`of` to another domain blocks generic report-continuation fallback, and a label
+retain its optional poll predecessor. Every explicit operation or run identity
+must be locally bound to the report clause before it can authorize report
+continuation. Unbound identities and identities related through `for` or `of`
+to another domain block generic report-continuation fallback, and a label
 without a value cannot override a clear new start.
 Generic non-report operation identity cannot inject the report poll tool.
 Negative query syntax remains fail-closed under the shared search policy;
