@@ -1729,7 +1729,7 @@ pub(crate) fn terminal_report_failure_observation(
     }
     if let Some(expected_report_name) = expected_report_name {
         if report_operation_name_for_report(operation, expected_report_name).as_deref()
-            != Some(operation_name)
+            != Some(operation_name.as_str())
         {
             return None;
         }
