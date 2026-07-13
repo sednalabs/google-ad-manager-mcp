@@ -13,6 +13,8 @@ use mcp_toolkit_core::tool_inventory::{
 };
 use serde_json::{Value, json};
 
+use crate::client::validate_operation_name;
+
 const SCRATCHPAD_REST_READ_TOOLS: [&str; 2] = [
     "gam_scratchpad_ingest_network_catalog",
     "gam_scratchpad_ingest_report_result_rows",
@@ -21,6 +23,7 @@ const SCRATCHPAD_MANAGE_SCOPE_READ_TOOLS: [&str; 1] = ["gam_scratchpad_ingest_so
 const MAX_RECOVERY_GROUPS: usize = 16;
 const MAX_RECOVERY_EXAMPLE_QUERIES: usize = 8;
 const MAX_RECOVERY_LOCAL_STATE_TOOLS: usize = 16;
+const CANONICAL_REPORT_OPERATION_TERM: &str = "canonicalreportoperation";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct RepresentativeDiscoveryCandidate {
@@ -461,30 +464,70 @@ fn is_ad_unit_retirement_intent(query: Option<&str>) -> bool {
         })
 }
 
+fn normalize_report_discovery_query(query: &str) -> (String, usize) {
+    let mut canonical_operation_count = 0;
+    let normalized = query
+        .split_whitespace()
+        .map(|term| {
+            let candidate = term.trim_matches(|character: char| {
+                matches!(
+                    character,
+                    '\'' | '"'
+                        | '('
+                        | ')'
+                        | '['
+                        | ']'
+                        | '{'
+                        | '}'
+                        | ','
+                        | '.'
+                        | ';'
+                        | ':'
+                        | '?'
+                        | '!'
+                )
+            });
+            if validate_operation_name(candidate).is_ok() {
+                canonical_operation_count += 1;
+                CANONICAL_REPORT_OPERATION_TERM
+            } else {
+                term
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase()
+        .replace(['-', '_'], " ");
+    (normalized, canonical_operation_count)
+}
+
 fn report_discovery_intent(query: Option<&str>) -> ReportDiscoveryIntent {
     let Some(query) = query else {
         return ReportDiscoveryIntent::Unspecified;
     };
-    let normalized = query.to_ascii_lowercase().replace(['-', '_'], " ");
+    let (normalized, canonical_operation_count) = normalize_report_discovery_query(query);
     let terms = normalized
         .split(|character: char| !character.is_ascii_alphanumeric())
         .filter(|term| !term.is_empty())
         .collect::<Vec<_>>();
     let term_set = terms.iter().copied().collect::<BTreeSet<_>>();
-    let report_context = term_set.contains("report")
+    let report_context = canonical_operation_count > 0
+        || term_set.contains("report")
         || term_set.contains("reports")
         || normalized.contains("campaign delivery audit");
     if query_blocks_report_authority(&terms, &normalized) {
         return ReportDiscoveryIntent::Unspecified;
     }
-    if report_context && has_unbound_or_cross_domain_reference(&terms) {
+    if report_context
+        && !report_reference_identities_are_coherent(&terms, canonical_operation_count)
+    {
         return ReportDiscoveryIntent::Unspecified;
     }
     let clear_new_run_action = has_clear_report_start_action(&terms, report_context, &normalized);
     let explicit_existing_operation_reference = has_explicit_existing_report_operation_reference(
         &terms,
         report_context,
-        &normalized,
+        canonical_operation_count > 0,
         clear_new_run_action,
     );
     let report_run_noun_reference =
@@ -513,12 +556,14 @@ fn has_clear_report_result_retrieval(query: Option<&str>) -> bool {
     let Some(query) = query else {
         return false;
     };
-    let normalized = query.to_ascii_lowercase().replace(['-', '_'], " ");
+    let (normalized, canonical_operation_count) = normalize_report_discovery_query(query);
     let terms = normalized
         .split(|character: char| !character.is_ascii_alphanumeric())
         .filter(|term| !term.is_empty())
         .collect::<Vec<_>>();
-    if query_blocks_report_authority(&terms, &normalized) {
+    if query_blocks_report_authority(&terms, &normalized)
+        || !report_reference_identities_are_coherent(&terms, canonical_operation_count)
+    {
         return false;
     }
     let terms = strip_report_directive_prefix(&terms);
@@ -575,6 +620,7 @@ fn has_clear_report_result_retrieval(query: Option<&str>) -> bool {
                         | "me"
                         | "now"
                         | "please"
+                        | CANONICAL_REPORT_OPERATION_TERM
                 )
         })
 }
@@ -582,10 +628,10 @@ fn has_clear_report_result_retrieval(query: Option<&str>) -> bool {
 fn has_explicit_existing_report_operation_reference(
     terms: &[&str],
     report_context: bool,
-    normalized: &str,
+    has_canonical_operation: bool,
     clear_new_run_action: bool,
 ) -> bool {
-    if normalized.contains("/operations/reports/runs/") {
+    if has_canonical_operation {
         return true;
     }
     if !report_context {
@@ -738,6 +784,117 @@ fn reference_has_non_report_relation_target(terms: &[&str], reference_index: usi
             .any(|term| matches!(*term, "report" | "reports"))
 }
 
+fn report_reference_identities_are_coherent(
+    terms: &[&str],
+    canonical_operation_count: usize,
+) -> bool {
+    canonical_operation_count <= 1
+        && canonical_operation_count + explicit_operation_run_identity_count(terms) <= 1
+        && !has_unbound_or_cross_domain_reference(terms)
+        && !has_unbound_non_operation_identity(terms)
+}
+
+fn explicit_operation_run_identity_count(terms: &[&str]) -> usize {
+    terms
+        .iter()
+        .enumerate()
+        .filter(|(index, term)| {
+            matches!(**term, "operation" | "operations" | "run" | "runs")
+                && reference_has_explicit_identity(terms, *index)
+                && !reference_labels_canonical_operation(terms, *index)
+        })
+        .count()
+}
+
+fn reference_has_explicit_identity(terms: &[&str], reference_index: usize) -> bool {
+    let previous = reference_index
+        .checked_sub(1)
+        .map(|previous| terms[previous]);
+    let next = terms.get(reference_index + 1).copied();
+    let preceding_report_modifier = matches!(previous, Some("report" | "reports"))
+        && reference_index
+            .checked_sub(2)
+            .map(|modifier| terms[modifier])
+            .is_some_and(is_existing_reference_modifier);
+    next.is_some_and(is_numeric_term)
+        || matches!(next, Some("name" | "handle" | "id"))
+        || previous.is_some_and(is_existing_reference_modifier)
+        || preceding_report_modifier
+}
+
+fn reference_labels_canonical_operation(terms: &[&str], reference_index: usize) -> bool {
+    terms
+        .get(reference_index + 1)
+        .is_some_and(|term| matches!(*term, "name" | "handle" | "id"))
+        && terms.get(reference_index + 2) == Some(&CANONICAL_REPORT_OPERATION_TERM)
+}
+
+fn reference_has_non_report_premodifier(terms: &[&str], reference_index: usize) -> bool {
+    let Some(previous) = reference_index
+        .checked_sub(1)
+        .map(|previous| terms[previous])
+    else {
+        return false;
+    };
+    !(matches!(
+        previous,
+        "report"
+            | "reports"
+            | "s"
+            | "most"
+            | "and"
+            | "then"
+            | "use"
+            | "show"
+            | "return"
+            | "fetch"
+            | "start"
+            | "launch"
+            | "execute"
+            | "select"
+            | "choose"
+            | "please"
+            | "now"
+            | "me"
+            | "new"
+    ) || is_report_determiner(previous)
+        || is_existing_reference_modifier(previous)
+        || is_report_continuation_term(previous))
+}
+
+fn has_unbound_non_operation_identity(terms: &[&str]) -> bool {
+    terms.iter().enumerate().any(|(index, term)| {
+        if matches!(*term, "name" | "handle" | "id") {
+            return !index
+                .checked_sub(1)
+                .map(|previous| terms[previous])
+                .is_some_and(|previous| {
+                    matches!(previous, "operation" | "operations" | "run" | "runs")
+                });
+        }
+        if !is_numeric_term(term) {
+            return false;
+        }
+        let Some(previous) = index.checked_sub(1).map(|previous| terms[previous]) else {
+            return true;
+        };
+        if matches!(previous, "operation" | "operations" | "run" | "runs") {
+            return false;
+        }
+        if matches!(previous, "name" | "handle" | "id") {
+            return !index
+                .checked_sub(2)
+                .map(|reference| terms[reference])
+                .is_some_and(|reference| {
+                    matches!(reference, "operation" | "operations" | "run" | "runs")
+                });
+        }
+        let next = terms.get(index + 1).copied();
+        !matches!(previous, "first" | "page" | "pages" | "row" | "rows")
+            && !matches!(next, Some("page" | "pages" | "row" | "rows"))
+    })
+}
+
 fn has_unbound_or_cross_domain_reference(terms: &[&str]) -> bool {
     terms.iter().enumerate().any(|(index, term)| {
         if !matches!(*term, "operation" | "operations" | "run" | "runs") {
@@ -746,12 +903,15 @@ fn has_unbound_or_cross_domain_reference(terms: &[&str]) -> bool {
         if reference_has_non_report_relation_target(terms, index) {
             return true;
         }
-        let previous = index.checked_sub(1).map(|previous| terms[previous]);
-        let next = terms.get(index + 1).copied();
-        let has_identity = next.is_some_and(is_numeric_term)
-            || matches!(next, Some("name" | "handle" | "id"))
-            || previous.is_some_and(is_existing_reference_modifier);
+        let has_identity = reference_has_explicit_identity(terms, index)
+            || reference_labels_canonical_operation(terms, index);
         if !has_identity {
+            return false;
+        }
+        if reference_has_non_report_premodifier(terms, index) {
+            return true;
+        }
+        if reference_labels_canonical_operation(terms, index) {
             return false;
         }
         if matches!(*term, "operation" | "operations") {
@@ -1061,6 +1221,7 @@ fn report_reference_query_is_authoritative(terms: &[&str]) -> bool {
                 | "choose"
                 | "fetch"
                 | "return"
+                | CANONICAL_REPORT_OPERATION_TERM
         ))
     {
         return false;
@@ -1125,6 +1286,7 @@ fn report_reference_query_is_authoritative(terms: &[&str]) -> bool {
                     | "networks"
                     | "now"
                     | "please"
+                    | CANONICAL_REPORT_OPERATION_TERM
             )
     })
 }
@@ -2003,6 +2165,18 @@ mod tests {
             companion_tool_names(&authorized),
             vec!["gam_report_operation_poll"]
         );
+
+        let identity_laundering = workflow_companions(
+            &authorized_results,
+            Some("show report result rows for advertiser id 123"),
+        );
+        assert!(
+            identity_laundering.iter().all(|companion| {
+                companion.tool_name != "gam_report_operation_poll"
+                    && companion.before_tool != "gam_report_operation_poll"
+            }),
+            "an unrelated identity authorized a report-poll companion"
+        );
     }
 
     #[test]
@@ -2173,6 +2347,7 @@ mod tests {
             "should I poll the report operation",
             "tell me what happens if I poll the report operation",
             "will we poll report operation 123",
+            "show report result rows for advertiser id 123",
         ] {
             let mut results = vec![result("gam_report_operation_poll")];
             let resolution = resolve_report_discovery(
@@ -2365,6 +2540,7 @@ mod tests {
             "monitor operation_name for the report",
             "wait for the existing report operation",
             "networks/123/operations/reports/runs/789",
+            "networks/123/operations/reports/runs/run_456-abc",
             "start monitoring the report operation",
             "start checking the report status",
             "start polling the report operation",
@@ -2447,6 +2623,7 @@ mod tests {
         for query in [
             "start a report then monitor the existing operation",
             "run the report and check operation handle networks/123/operations/reports/runs/789",
+            "run the report and check operation handle networks/123/operations/reports/runs/run_456-abc",
         ] {
             assert_eq!(
                 report_discovery_intent(Some(query)),
@@ -2488,12 +2665,18 @@ mod tests {
             "use operation 123 for the ad unit and check the report",
             "check the report and use operation 123 for the advertiser",
             "use network operation 123 and check the report",
+            "use network operation 123 for my saved report",
+            "use advertiser operation 123 for my saved report",
+            "check report operation 123 and report operation 456",
+            "check report operation 123 and 456",
+            "check networks/111/operations/reports/runs/456 and networks/222/operations/reports/runs/789",
             "inspect deployment run 123 and summarize a report",
             "summarize the report and use run 123 for the deployment",
             "use the deployment run for the line item and summarize the report",
             "use report run 123 for the deployment",
             "check the report and use run 123 for the advertiser",
             "check the report for network run 123",
+            "show report result rows for advertiser id 123",
             "start a report without waiting",
         ] {
             assert_eq!(
