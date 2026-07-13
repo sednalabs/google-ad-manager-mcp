@@ -308,9 +308,10 @@ launch, or execute action before a report object and the caller sets
 `read_only=false`. The action must follow a bounded directive prefix. Only
 recognized report-object modifiers may occur between that action and object,
 with no intervening clause, grouping, or non-word punctuation, and any tail must
-be empty or a bounded
-continuation of the newly started run;
-planning, explanatory, negative, or unrelated language fails closed. Bare,
+be empty or a bounded continuation of the newly started run. Line and paragraph
+separators are not treated as ordinary spacing. The bounded
+directive or selection prefix is validated under the same structural rule.
+Planning, explanatory, negative, or unrelated language fails closed. Bare,
 existing-state, and reverse `run of/for ... report` noun phrases expose only
 the GET-based existing-operation continuation, and only when the complete query
 is a bounded report command or reference, including bounded `show me` requests,
@@ -334,9 +335,10 @@ block report-continuation fallback, and an identity label without a value cannot
 override a new-run action object, even when a later tail term makes the complete
 start request invalid. Invalid start tails therefore fail closed instead of
 being reinterpreted as existing-operation requests; a rejected punctuated
-action-object candidate also blocks generic continuation fallback.
-Conjunction-led imperative
-uses of `report` are not ownership anchors, including when bounded directive
+action-object candidate is terminal and blocks every existing-run or generic
+continuation fallback. Completed-result retrieval uses the same structural
+separator checks. Conjunction-led imperative uses of `report` are not ownership
+anchors, including when bounded directive
 fillers separate the conjunction from the verb. Coordinated noun relation
 targets are evaluated as a whole, so any non-report GAM domain in the target
 fails closed even when the target also names a report; a later imperative

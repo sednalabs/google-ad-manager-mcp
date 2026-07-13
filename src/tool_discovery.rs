@@ -562,11 +562,17 @@ fn report_discovery_intent(query: Option<&str>) -> ReportDiscoveryIntent {
         return ReportDiscoveryIntent::Unspecified;
     }
     let new_run_action = report_start_action_tail(&terms, report_context, &clause_text);
-    let (has_new_run_action_object, clear_new_run_action) = match new_run_action {
-        ReportStartActionTail::NoCandidate => (false, false),
-        ReportStartActionTail::Candidate(tail) => (true, report_start_tail_is_safe(tail)),
-        ReportStartActionTail::Rejected => (true, false),
-    };
+    let (has_new_run_action_object, clear_new_run_action, rejected_new_run_action) =
+        match new_run_action {
+            ReportStartActionTail::NoCandidate => (false, false, false),
+            ReportStartActionTail::Candidate(tail) => {
+                (true, report_start_tail_is_safe(tail), false)
+            }
+            ReportStartActionTail::Rejected => (true, false, true),
+        };
+    if rejected_new_run_action {
+        return ReportDiscoveryIntent::Unspecified;
+    }
     let explicit_existing_operation_reference = has_explicit_existing_report_operation_reference(
         &terms,
         report_context,
@@ -603,13 +609,15 @@ fn has_clear_report_result_retrieval(query: Option<&str>) -> bool {
         return false;
     };
     let normalized_query = normalize_report_discovery_query(query);
-    let normalized = normalized_query.text;
     let canonical_operation_count = normalized_query.canonical_operations.len();
+    let clause_text = normalized_query.clause_text;
+    let normalized = normalized_query.text;
     let terms = normalized
         .split(|character: char| !character.is_ascii_alphanumeric())
         .filter(|term| !term.is_empty())
         .collect::<Vec<_>>();
     if normalized_query.invalid_canonical_reference
+        || report_range_has_invalid_separator(&clause_text, 0, clause_text.len(), false)
         || query_blocks_report_authority(&terms, &normalized)
         || !report_reference_identities_are_coherent(&terms, canonical_operation_count)
     {
@@ -1458,7 +1466,7 @@ fn report_start_action_tail<'a>(
         if !is_report_start_action(term) {
             continue;
         }
-        if has_non_execution_report_language(terms, index, clause_text) {
+        if has_non_execution_report_language(terms, index, clause_text, &term_spans) {
             continue;
         }
         let object_terms = &terms[index + 1..];
@@ -1522,13 +1530,25 @@ fn report_action_object_crosses_clause_boundary(
     else {
         return true;
     };
-    normalized[*action_end..*report_start]
+    report_range_has_invalid_separator(normalized, *action_end, *report_start, false)
+}
+
+fn report_range_has_invalid_separator(
+    normalized: &str,
+    start: usize,
+    end: usize,
+    allow_comma: bool,
+) -> bool {
+    normalized[start..end]
         .char_indices()
         .any(|(offset, character)| {
-            if character.is_ascii_alphanumeric() || character.is_whitespace() {
+            if character.is_ascii_alphanumeric() || matches!(character, ' ' | '\t') {
                 return false;
             }
-            let absolute_index = *action_end + offset;
+            if allow_comma && character == ',' {
+                return false;
+            }
+            let absolute_index = start + offset;
             if matches!(character, '-' | '_' | '\'') {
                 let previous = normalized[..absolute_index].chars().next_back();
                 let next = normalized[absolute_index + character.len_utf8()..]
@@ -1551,13 +1571,41 @@ fn is_report_start_action(term: &str) -> bool {
 fn has_non_execution_report_language(
     terms: &[&str],
     action_index: usize,
-    normalized: &str,
+    clause_text: &str,
+    term_spans: &[(usize, usize)],
 ) -> bool {
-    query_blocks_report_authority(terms, normalized)
-        || !report_action_prefix_is_authoritative(&terms[..action_index])
+    query_blocks_report_authority(terms, clause_text)
+        || report_action_prefix_has_invalid_separator(clause_text, term_spans, action_index)
+        || !report_action_prefix_is_authoritative(
+            &terms[..action_index],
+            clause_text,
+            term_spans,
+            action_index,
+        )
 }
 
-fn report_action_prefix_is_authoritative(prefix: &[&str]) -> bool {
+fn report_action_prefix_has_invalid_separator(
+    clause_text: &str,
+    term_spans: &[(usize, usize)],
+    action_index: usize,
+) -> bool {
+    if action_index == 0 {
+        return false;
+    }
+    let (Some((prefix_start, _)), Some((action_start, _))) =
+        (term_spans.first(), term_spans.get(action_index))
+    else {
+        return true;
+    };
+    report_range_has_invalid_separator(clause_text, *prefix_start, *action_start, true)
+}
+
+fn report_action_prefix_is_authoritative(
+    prefix: &[&str],
+    clause_text: &str,
+    term_spans: &[(usize, usize)],
+    action_index: usize,
+) -> bool {
     let clause = strip_report_directive_prefix(prefix);
     if clause.is_empty() || matches!(clause, ["please"] | ["now"]) {
         return true;
@@ -1567,12 +1615,38 @@ fn report_action_prefix_is_authoritative(prefix: &[&str]) -> bool {
         ["for", "the", "current" | "latest" | "selected", "network"]
             | ["for", "current" | "latest" | "selected", "network"]
     ) {
-        return true;
+        let clause_start = action_index - clause.len();
+        return !report_action_object_crosses_clause_boundary(
+            clause_text,
+            term_spans,
+            clause_start,
+            action_index - 1,
+        );
     }
     let Some(selection_clause) = clause.strip_suffix(&["then"]) else {
         return false;
     };
-    report_selection_clause_is_authoritative(selection_clause)
+    if !report_selection_clause_is_authoritative(selection_clause) {
+        return false;
+    }
+    let Some(selection_index) = prefix
+        .iter()
+        .position(|term| matches!(*term, "select" | "choose"))
+    else {
+        return false;
+    };
+    let Some(report_index) = prefix
+        .iter()
+        .rposition(|term| matches!(*term, "report" | "reports"))
+    else {
+        return false;
+    };
+    !report_action_object_crosses_clause_boundary(
+        clause_text,
+        term_spans,
+        selection_index,
+        report_index,
+    )
 }
 
 fn strip_report_directive_prefix<'a>(mut terms: &'a [&'a str]) -> &'a [&'a str] {
@@ -2837,6 +2911,7 @@ mod tests {
             "will we poll report operation 123",
             "show report result rows for advertiser id 123",
             "show report result rows for advertiser 123, page 2",
+            "show the campaign\u{ff1b} report result rows",
         ] {
             let mut results = vec![result("gam_report_operation_poll")];
             let resolution = resolve_report_discovery(
@@ -3235,6 +3310,14 @@ mod tests {
             "launch the campaign\u{ff1b} report now",
             "launch the campaign\u{2014} report now",
             "launch the campaign; report run",
+            "launch the campaign\u{2029}report now",
+            "launch the campaign\nreport now",
+            "select the campaign; report then run the saved report",
+            "select the campaign, report then run the saved report",
+            "select the campaign\u{ff1b} report then run the saved report",
+            "launch the campaign; report current run",
+            "launch the campaign; report run of the report",
+            "show the campaign\u{ff1b} report result rows",
         ] {
             assert_eq!(
                 report_discovery_intent(Some(query)),

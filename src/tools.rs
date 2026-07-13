@@ -8241,6 +8241,14 @@ mod tests {
             "launch the campaign\u{ff1b} report now",
             "launch the campaign\u{2014} report now",
             "launch the campaign; report run",
+            "launch the campaign\u{2029}report now",
+            "launch the campaign\nreport now",
+            "select the campaign; report then run the saved report",
+            "select the campaign, report then run the saved report",
+            "select the campaign\u{ff1b} report then run the saved report",
+            "launch the campaign; report current run",
+            "launch the campaign; report run of the report",
+            "show the campaign\u{ff1b} report result rows",
         ] {
             let ambiguous_action = server
                 .find_tools(Parameters(FindToolsArgs {
