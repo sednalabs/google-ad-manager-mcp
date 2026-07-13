@@ -477,6 +477,9 @@ fn report_discovery_intent(query: Option<&str>) -> ReportDiscoveryIntent {
     if query_blocks_report_authority(&terms, &normalized) {
         return ReportDiscoveryIntent::Unspecified;
     }
+    if report_context && has_cross_domain_reference_target(&terms) {
+        return ReportDiscoveryIntent::Unspecified;
+    }
     let clear_new_run_action = has_clear_report_start_action(&terms, report_context, &normalized);
     let explicit_existing_operation_reference = has_explicit_existing_report_operation_reference(
         &terms,
@@ -626,6 +629,9 @@ fn has_explicit_existing_report_run_reference(
         if !matches!(*term, "run" | "runs") {
             return false;
         }
+        if reference_has_non_report_relation_target(terms, index) {
+            return false;
+        }
         let previous = index.checked_sub(1).map(|previous| terms[previous]);
         let next = terms.get(index + 1).copied();
         let labelled_identity = next == Some("id");
@@ -754,21 +760,28 @@ fn operation_has_report_binding(terms: &[&str], operation_index: usize) -> bool 
 }
 
 fn reference_has_non_report_relation_target(terms: &[&str], reference_index: usize) -> bool {
-    let Some(relation_index) = terms[reference_index + 1..]
-        .iter()
-        .position(|term| matches!(*term, "for" | "of"))
-        .map(|offset| reference_index + 1 + offset)
-    else {
-        return false;
-    };
-    let target = terms[relation_index + 1..]
+    let local_tail = terms[reference_index + 1..]
         .split(|term| matches!(*term, "and" | "then"))
         .next()
         .unwrap_or_default();
+    let Some(relation_index) = local_tail
+        .iter()
+        .position(|term| matches!(*term, "for" | "of"))
+    else {
+        return false;
+    };
+    let target = &local_tail[relation_index + 1..];
     !target.is_empty()
         && !target
             .iter()
             .any(|term| matches!(*term, "report" | "reports"))
+}
+
+fn has_cross_domain_reference_target(terms: &[&str]) -> bool {
+    terms.iter().enumerate().any(|(index, term)| {
+        matches!(*term, "operation" | "operations" | "run" | "runs")
+            && reference_has_non_report_relation_target(terms, index)
+    })
 }
 
 fn reference_has_reverse_report_binding(terms: &[&str], reference_index: usize) -> bool {
@@ -914,7 +927,7 @@ fn is_numeric_term(term: &str) -> bool {
 }
 
 fn is_report_reference_article(term: &str) -> bool {
-    matches!(term, "a" | "an" | "the" | "one" | "saved")
+    is_report_determiner(term) || term == "saved"
 }
 
 fn has_clear_report_start_action(terms: &[&str], report_context: bool, normalized: &str) -> bool {
@@ -985,10 +998,6 @@ fn strip_report_directive_prefix<'a>(terms: &'a [&'a str]) -> &'a [&'a str] {
         .or_else(|| terms.strip_prefix(&["could", "you"]))
         .or_else(|| terms.strip_prefix(&["would", "you"]))
         .or_else(|| terms.strip_prefix(&["will", "you"]))
-        .or_else(|| terms.strip_prefix(&["can", "we"]))
-        .or_else(|| terms.strip_prefix(&["could", "we"]))
-        .or_else(|| terms.strip_prefix(&["would", "we"]))
-        .or_else(|| terms.strip_prefix(&["will", "we"]))
     {
         return rest.strip_prefix(&["please"]).unwrap_or(rest);
     }
@@ -1361,6 +1370,7 @@ pub(crate) fn resolve_report_discovery(
     read_only: Option<bool>,
 ) -> ReportDiscoveryResolution {
     let intent = report_discovery_intent(query);
+    let report_poll_authorized = report_poll_discovery_is_authoritative(query);
     let contextual_companions = companions
         .iter()
         .filter(|companion| !companion.callable_as_tool && companion.tool_already_selected)
@@ -1410,7 +1420,7 @@ pub(crate) fn resolve_report_discovery(
                     "Starting a report creates an upstream job. The bounded discovery query did not express explicit new-run intent, so this match is not callable."
                 },
             }));
-        } else if is_report_poll && intent != ReportDiscoveryIntent::ExistingOperationContinuation {
+        } else if is_report_poll && !report_poll_authorized {
             condition_only.push(json!({
                 "type": "condition_only_match",
                 "name": result.name,
@@ -2178,6 +2188,7 @@ mod tests {
             "would polling the report operation help",
             "should I poll the report operation",
             "tell me what happens if I poll the report operation",
+            "will we poll report operation 123",
         ] {
             let mut results = vec![result("gam_report_operation_poll")];
             let resolution = resolve_report_discovery(
@@ -2200,6 +2211,19 @@ mod tests {
         }
 
         let query = "continue waiting for an existing report operation";
+        let mut results = vec![result("gam_report_operation_poll")];
+        let resolution = resolve_report_discovery(
+            &mut results,
+            &[],
+            Some(query),
+            Some("reports"),
+            true,
+            Some(true),
+        );
+        assert!(resolution.records.is_empty());
+        assert_eq!(results[0].name, "gam_report_operation_poll");
+
+        let query = "fetch rows from a completed report result";
         let mut results = vec![result("gam_report_operation_poll")];
         let resolution = resolve_report_discovery(
             &mut results,
@@ -2297,6 +2321,8 @@ mod tests {
             "start the latest report run",
             "latest run of the report",
             "current run for the saved report",
+            "current run for this report",
+            "show the latest run for my saved report",
             "show the current run of the report",
             "run of the report",
             "start a report, then poll the current run",
@@ -2455,6 +2481,9 @@ mod tests {
             "tell me what happens if I select the report and then run the saved report",
             "then run the saved report",
             "select the ad unit then run the saved report",
+            "will we run a saved report",
+            "would we select the report then run the saved report",
+            "will we poll report operation 123",
             "should I poll the report operation",
             "would polling the report operation help",
             "tell me what happens if I poll the report operation",
@@ -2463,10 +2492,12 @@ mod tests {
             "summarize the report and use operation 123 for the line item",
             "summarize the report and use operation 123 for the ad unit",
             "use operation 123 for the ad unit and check the report",
+            "check the report and use operation 123 for the advertiser",
             "inspect deployment run 123 and summarize a report",
             "summarize the report and use run 123 for the deployment",
             "use the deployment run for the line item and summarize the report",
             "use report run 123 for the deployment",
+            "check the report and use run 123 for the advertiser",
             "start a report without waiting",
         ] {
             assert_eq!(

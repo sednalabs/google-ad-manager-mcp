@@ -152,14 +152,16 @@ negative, or unrelated language fails closed. Bare, latest, current, and
 reverse `run of/for ... report` noun phrases are existing-operation references
 and expose only GET-based polling when the complete query is a bounded report
 command or reference. Explanatory or deliberative framing is not discarded at
-`and` or `then`, and direct poll matches or workflow companions are filtered by
-the same authority decision under every discovery filter. Bounded
+`and` or `then`, and collective modal questions remain deliberative rather than
+becoming directives. Direct poll matches or workflow companions are filtered
+by the same authority decision under every discovery filter. Bounded
 completed-result retrieval retains its optional poll predecessor. Report
 operation and run identities must be locally bound to the report clause; an
-identity related through `for` or `of` to another domain is rejected, and a
-label without a value cannot override a clear new start. Generic non-report
-operation references cannot inject the report poll tool. Report starts are
-representative rank probes but are never no-match recovery candidates.
+identity related through `for` or `of` to another domain blocks generic
+report-continuation fallback, and a label without a value cannot override a
+clear new start. Generic non-report operation references cannot inject the
+report poll tool. Report starts are representative rank probes but are never
+no-match recovery candidates.
 Negative query syntax remains fail-closed under the shared inventory policy.
 For a nonblocking run, use an affirmative bounded form such as `start a report
 and return immediately` or `start a report asynchronously`; `without waiting`
