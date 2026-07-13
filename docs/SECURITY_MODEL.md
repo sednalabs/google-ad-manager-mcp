@@ -190,7 +190,11 @@ the operating system temporary directory.
 
 ## Report safety
 
-Saved report execution is still read-only, but the result payload can be large.
+Reading saved-report definitions, operation state, and result pages is
+read-only. Starting a saved report creates an upstream job and is explicitly
+non-read-only. Discovery authorizes that start only when an action verb precedes
+a report object under `read_only=false`; bare, latest, and current report-run
+noun phrases fail closed to existing-operation polling.
 This server bounds that surface by:
 
 - requiring an explicit saved report identifier

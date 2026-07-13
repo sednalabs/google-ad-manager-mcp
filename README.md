@@ -303,8 +303,11 @@ guidance. Mutating examples are available only when the caller explicitly sets
 `read_only=false`. Stateful scratchpad recovery begins with session opening
 before ingestion. Starting a report creates an upstream job, so
 `gam_report_run` is registered truthfully as non-read-only and is callable from
-discovery only when the bounded toolkit query expresses explicit new-run intent
-and the caller sets `read_only=false`. It is not a canned retry example.
+discovery only when the bounded toolkit query places an explicit start, run,
+launch, or execute action before a report object and the caller sets
+`read_only=false`. Bare, latest, and current report-run noun phrases expose only
+the GET-based existing-operation continuation. Report start is not a canned
+retry example.
 
 Report runs send the provider-required empty POST body. Definitive 4xx run
 rejections are normal upstream API failures. Once the POST may otherwise have

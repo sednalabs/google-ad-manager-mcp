@@ -8071,6 +8071,39 @@ mod tests {
                 .all(|record| { record.get("explicit_executable_recovery").is_none() })
         );
 
+        for query in ["report run", "latest report run", "current report run"] {
+            let noun_reference = server
+                .find_tools(Parameters(FindToolsArgs {
+                    query: Some(query.to_string()),
+                    group: Some("reports".to_string()),
+                    read_only: Some(false),
+                    limit: Some(3),
+                    include_schema: true,
+                }))
+                .await
+                .expect("discover report-run noun reference")
+                .structured_content
+                .expect("report-run noun discovery envelope");
+            let noun_reference = &noun_reference["data"];
+            let allowed = noun_reference["openai_allowed_tools"]
+                .as_array()
+                .expect("noun-reference allowed tools");
+            assert!(
+                allowed.contains(&json!("gam_report_operation_poll")),
+                "GET-only poll was not callable: {query}"
+            );
+            assert!(
+                !allowed.contains(&json!("gam_report_run")),
+                "report start was callable without action-object intent: {query}"
+            );
+            assert!(
+                noun_reference["schemas"]
+                    .get("gam_report_operation_poll")
+                    .is_some()
+            );
+            assert!(noun_reference["schemas"].get("gam_report_run").is_none());
+        }
+
         let whitespace_group = server
             .find_tools(Parameters(FindToolsArgs {
                 query: Some("check the status of an existing report operation".to_string()),
