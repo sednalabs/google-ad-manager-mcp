@@ -189,6 +189,8 @@ inject the report poll tool. Bounded `get`/`retrieve` continuations and
 `with` target naming another GAM domain fails closed, while lifecycle phrases
 such as `to completion` remain valid. Report starts are representative rank probes but are never
 no-match recovery candidates.
+Mixed commands that poll an existing report and start another report fail
+closed; discovery requires those GET and POST intentions to be separate.
 Negative query syntax remains fail-closed under the shared inventory policy.
 For a nonblocking run, use an affirmative bounded form such as `start a report
 and return immediately` or `start a report asynchronously`; `without waiting`

@@ -348,6 +348,8 @@ operation references cannot inject the report poll tool. Bounded `get`/`retrieve
 `first N ... rows` requests use the same clause and identity checks; `to` or
 `with` targets name another GAM domain only fail closed, while lifecycle phrases
 such as `to completion` remain valid.
+One query cannot combine authority to poll an existing report with authority to
+start another report; mixed GET/POST report commands fail closed.
 Negative query syntax remains fail-closed under the shared inventory policy;
 request a nonblocking start affirmatively, for example `start a report and
 return immediately` or `start a report asynchronously`, rather than `without
