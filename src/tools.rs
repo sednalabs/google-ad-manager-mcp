@@ -8077,6 +8077,8 @@ mod tests {
             "current report run",
             "latest run of the report",
             "current run for the saved report",
+            "current run for this report",
+            "show the latest run for my saved report",
             "show the current run of the report",
             "start a report, then poll the current run",
             "start a report and check operation 123",
@@ -8138,6 +8140,9 @@ mod tests {
             "tell me what happens if I select the report and then run the saved report",
             "then run the saved report",
             "select the ad unit then run the saved report",
+            "will we run a saved report",
+            "would we select the report then run the saved report",
+            "will we poll report operation 123",
             "should I poll the report operation",
             "would polling the report operation help",
             "tell me what happens if I poll the report operation",
@@ -8146,10 +8151,12 @@ mod tests {
             "summarize the report and use operation 123 for the line item",
             "summarize the report and use operation 123 for the ad unit",
             "use operation 123 for the ad unit and check the report",
+            "check the report and use operation 123 for the advertiser",
             "inspect deployment run 123 and summarize a report",
             "summarize the report and use run 123 for the deployment",
             "use the deployment run for the line item and summarize the report",
             "use report run 123 for the deployment",
+            "check the report and use run 123 for the advertiser",
             "start a report without waiting",
         ] {
             let ambiguous_action = server
@@ -8187,10 +8194,47 @@ mod tests {
             );
         }
 
+        let completed_result = server
+            .find_tools(Parameters(FindToolsArgs {
+                query: Some("fetch rows from a completed report result".to_string()),
+                group: Some("reports".to_string()),
+                read_only: Some(true),
+                limit: Some(3),
+                include_schema: true,
+            }))
+            .await
+            .expect("discover completed report result")
+            .structured_content
+            .expect("completed-result discovery envelope");
+        let completed_result = &completed_result["data"];
+        assert!(
+            completed_result["openai_allowed_tools"]
+                .as_array()
+                .expect("completed-result allowed tools")
+                .contains(&json!("gam_report_operation_poll"))
+        );
+        assert!(
+            completed_result["schemas"]
+                .get("gam_report_operation_poll")
+                .is_some()
+        );
+        assert!(
+            completed_result["results"]
+                .as_array()
+                .expect("completed-result records")
+                .iter()
+                .all(|record| {
+                    !(record["type"] == "condition_only_match"
+                        && record["name"] == "gam_report_operation_poll")
+                }),
+            "completed-result poll authority was contradicted by a condition-only record"
+        );
+
         for query in [
             "would polling the report operation help",
             "should I poll the report operation",
             "tell me what happens if I poll the report operation",
+            "will we poll report operation 123",
         ] {
             let ambiguous_poll = server
                 .find_tools(Parameters(FindToolsArgs {

@@ -200,12 +200,13 @@ negative, or unrelated language fails closed. Bare, latest, current, and
 reverse `run of/for ... report` noun phrases fail closed to existing-operation
 polling only when the complete query is a bounded report command or reference.
 Explanatory or deliberative framing cannot be discarded at a conjunction, and
+collective modal questions remain deliberative rather than becoming directives.
 direct poll results or workflow companions are subject to the same authority
 decision under every discovery filter. Bounded completed-result retrieval may
 retain its optional poll predecessor. Report operation and run identities must
 be locally bound to the report clause; an identity related through `for` or
-`of` to another domain is rejected, and a label without a value cannot override
-a clear new start.
+`of` to another domain blocks generic report-continuation fallback, and a label
+without a value cannot override a clear new start.
 Generic non-report operation identity cannot inject the report poll tool.
 Negative query syntax remains fail-closed under the shared search policy;
 nonblocking starts use affirmative `return immediately` or `asynchronously`

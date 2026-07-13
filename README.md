@@ -312,15 +312,16 @@ planning, explanatory, negative, or unrelated language fails closed. Bare,
 latest, current, and reverse `run of/for ... report` noun phrases expose only
 the GET-based existing-operation continuation, and only when the complete query
 is a bounded report command or reference rather than explanatory or
-deliberative prose. Direct poll matches and poll workflow companions are
+deliberative prose. Collective modal questions such as `will we ...` and
+`would we ...` remain deliberative rather than being stripped into directives.
+Direct poll matches and poll workflow companions are
 filtered by that same authority decision under both read-only and write-like
 discovery filters; bounded completed-result retrieval retains its optional poll
-predecessor. An explicit
-report operation or run identity takes precedence only when it is locally bound
-to the report clause; an identity assigned through `for` or `of` to another
-domain is not a report identity, and an identity label without a value cannot
-override a clear new start. Generic non-report operation references cannot
-inject the report poll tool.
+predecessor. An explicit report operation or run identity takes precedence only
+when it is locally bound to the report clause; an identity assigned through
+`for` or `of` to another domain blocks report-continuation fallback, and an
+identity label without a value cannot override a clear new start. Generic
+non-report operation references cannot inject the report poll tool.
 Negative query syntax remains fail-closed under the shared inventory policy;
 request a nonblocking start affirmatively, for example `start a report and
 return immediately` or `start a report asynchronously`, rather than `without
