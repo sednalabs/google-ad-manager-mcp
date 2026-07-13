@@ -9929,7 +9929,7 @@ mod tests {
     #[test]
     fn direct_report_rows_unknown_failure_classes_fail_closed() {
         let error = AdManagerError::WriteActionDisabled {
-            operation: "future_report_result_side_effect",
+            message: "future report-result side effect".to_string(),
         };
         let detail = report_result_rows_failure_detail(
             &error,
