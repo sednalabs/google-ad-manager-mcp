@@ -20,7 +20,7 @@ use crate::ad_unit_retirement::{
     assess_ad_unit_retirement_with_readers, response_bytes,
 };
 use crate::client::{
-    AdManagerClient, CatalogCollection, DEFAULT_SOAP_API_VERSION,
+    AdManagerClient, CatalogCollection, CompletedReportRun, DEFAULT_SOAP_API_VERSION,
     MAX_REPORT_INITIAL_POLL_INTERVAL_MS, MAX_REPORT_RESULT_PAGE_SIZE, RestWriteOperation,
     RestWritePlan, RestWriteResource, SoapTraffickingApplyResult, SoapTraffickingOperation,
     SoapTraffickingPlan, YieldGroupUpdateSoapRequest, canonical_report_name,
