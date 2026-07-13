@@ -8135,9 +8135,21 @@ mod tests {
             "assess whether we should run a report",
             "check line-item operation 123 and plan a report",
             "show me how to select the report, then run the saved report",
+            "tell me what happens if I select the report and then run the saved report",
+            "then run the saved report",
+            "select the ad unit then run the saved report",
             "should I poll the report operation",
+            "would polling the report operation help",
+            "tell me what happens if I poll the report operation",
+            "tell me what happens if I use report operation 123",
+            "would using report operation 123 help",
             "summarize the report and use operation 123 for the line item",
+            "summarize the report and use operation 123 for the ad unit",
+            "use operation 123 for the ad unit and check the report",
             "inspect deployment run 123 and summarize a report",
+            "summarize the report and use run 123 for the deployment",
+            "use the deployment run for the line item and summarize the report",
+            "use report run 123 for the deployment",
             "start a report without waiting",
         ] {
             let ambiguous_action = server
@@ -8176,6 +8188,39 @@ mod tests {
         }
 
         for query in [
+            "would polling the report operation help",
+            "should I poll the report operation",
+            "tell me what happens if I poll the report operation",
+        ] {
+            let ambiguous_poll = server
+                .find_tools(Parameters(FindToolsArgs {
+                    query: Some(query.to_string()),
+                    group: Some("reports".to_string()),
+                    read_only: Some(true),
+                    limit: Some(3),
+                    include_schema: true,
+                }))
+                .await
+                .expect("discover ambiguous report poll")
+                .structured_content
+                .expect("ambiguous report-poll discovery envelope");
+            let ambiguous_poll = &ambiguous_poll["data"];
+            assert!(
+                !ambiguous_poll["openai_allowed_tools"]
+                    .as_array()
+                    .expect("ambiguous-poll allowed tools")
+                    .contains(&json!("gam_report_operation_poll")),
+                "report poll was callable without authority: {query}"
+            );
+            assert!(
+                ambiguous_poll["schemas"]
+                    .get("gam_report_operation_poll")
+                    .is_none(),
+                "report poll schema was exposed without authority: {query}"
+            );
+        }
+
+        for query in [
             "run the current-quarter delivery report",
             "run the latest report",
             "run this report",
@@ -8190,9 +8235,14 @@ mod tests {
             "start a report then wait until it is complete",
             "start a report and return immediately",
             "start a report, then fetch the first result page",
+            "start a report and fetch the first page of results",
+            "start a report asynchronously",
             "start a report and return the run id",
             "start a report and show the operation id",
             "start a campaign delivery audit with my saved report",
+            "can you start a report",
+            "I need you to run a saved report",
+            "please select the report then run the saved report",
         ] {
             let explicit_start = server
                 .find_tools(Parameters(FindToolsArgs {

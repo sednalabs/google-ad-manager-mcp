@@ -150,15 +150,19 @@ recognized report modifiers between them. The remaining query must be empty or
 a bounded continuation of that newly started run. Planning, explanatory,
 negative, or unrelated language fails closed. Bare, latest, current, and
 reverse `run of/for ... report` noun phrases are existing-operation references
-and expose only GET-based polling. Report operation and run identities must be
-locally bound to the report clause, and a label without a value cannot override
+and expose only GET-based polling when the complete query is a bounded report
+command or reference. Explanatory or deliberative framing is not discarded at
+`and` or `then`, and direct poll matches are filtered by the same authority
+decision under every discovery filter. Report operation and run identities must
+be locally bound to the report clause; an identity related through `for` or
+`of` to another domain is rejected, and a label without a value cannot override
 a clear new start. Generic non-report operation references cannot inject the
 report poll tool. Report starts are representative rank probes but are never
 no-match recovery candidates.
 Negative query syntax remains fail-closed under the shared inventory policy.
-For a nonblocking run, use the affirmative bounded form `start a report and
-return immediately`; `without waiting` is intentionally not an authority
-exception.
+For a nonblocking run, use an affirmative bounded form such as `start a report
+and return immediately` or `start a report asynchronously`; `without waiting`
+is intentionally not an authority exception.
 When discovery identifies an existing
 `operation_name` continuation, the same tool is instead emitted as a
 non-callable condition record so it cannot prompt a duplicate start.

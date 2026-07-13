@@ -198,12 +198,16 @@ uses only recognized report modifiers between action and object, and has an
 empty or bounded newly-started-run continuation tail. Planning, explanatory,
 negative, or unrelated language fails closed. Bare, latest, current, and
 reverse `run of/for ... report` noun phrases fail closed to existing-operation
-polling. Report operation and run identities must be locally bound to the
-report clause, and a label without a value cannot override a clear new start.
+polling only when the complete query is a bounded report command or reference.
+Explanatory or deliberative framing cannot be discarded at a conjunction, and
+direct poll results are subject to the same authority decision under every
+discovery filter. Report operation and run identities must be locally bound to
+the report clause; an identity related through `for` or `of` to another domain
+is rejected, and a label without a value cannot override a clear new start.
 Generic non-report operation identity cannot inject the report poll tool.
 Negative query syntax remains fail-closed under the shared search policy;
-nonblocking starts use affirmative `return immediately` language rather than a
-`without waiting` exception.
+nonblocking starts use affirmative `return immediately` or `asynchronously`
+language rather than a `without waiting` exception.
 This server bounds that surface by:
 
 - requiring an explicit saved report identifier

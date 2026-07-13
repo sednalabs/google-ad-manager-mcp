@@ -480,7 +480,9 @@ fn report_discovery_intent(query: Option<&str>) -> ReportDiscoveryIntent {
     );
     let report_run_noun_reference =
         has_explicit_existing_report_run_reference(&terms, report_context, clear_new_run_action);
-    if explicit_existing_operation_reference || report_run_noun_reference {
+    if (explicit_existing_operation_reference || report_run_noun_reference)
+        && report_reference_query_is_authoritative(&terms)
+    {
         return ReportDiscoveryIntent::ExistingOperationContinuation;
     }
 
@@ -558,11 +560,7 @@ fn has_explicit_existing_report_run_reference(
         if labelled_identity && !clear_new_run_action && run_has_report_binding(terms, index) {
             return true;
         }
-        let reverse_relation = terms[index + 1..]
-            .iter()
-            .find(|candidate| !is_report_reference_article(candidate))
-            .is_some_and(|candidate| matches!(*candidate, "of" | "for"));
-        if reverse_relation {
+        if reference_has_reverse_report_binding(terms, index) {
             return true;
         }
         if clear_new_run_action {
@@ -599,6 +597,9 @@ fn has_explicit_existing_report_run_reference(
 }
 
 fn run_has_report_binding(terms: &[&str], run_index: usize) -> bool {
+    if reference_has_non_report_relation_target(terms, run_index) {
+        return false;
+    }
     if run_index > 0 && matches!(terms[run_index - 1], "report" | "reports") {
         return true;
     }
@@ -628,7 +629,7 @@ fn run_has_report_binding(terms: &[&str], run_index: usize) -> bool {
 }
 
 fn operation_has_report_binding(terms: &[&str], operation_index: usize) -> bool {
-    if has_conflicting_operation_target(terms, operation_index) {
+    if reference_has_non_report_relation_target(terms, operation_index) {
         return false;
     }
     if operation_index > 0 && matches!(terms[operation_index - 1], "report" | "reports") {
@@ -672,15 +673,38 @@ fn operation_has_report_binding(terms: &[&str], operation_index: usize) -> bool 
         })
 }
 
-fn has_conflicting_operation_target(terms: &[&str], operation_index: usize) -> bool {
-    terms[operation_index + 1..]
+fn reference_has_non_report_relation_target(terms: &[&str], reference_index: usize) -> bool {
+    let Some(relation_index) = terms[reference_index + 1..]
         .iter()
-        .take_while(|term| !matches!(**term, "and" | "then"))
-        .any(|term| {
-            matches!(
-                *term,
-                "line" | "item" | "creative" | "order" | "placement" | "company"
-            )
+        .position(|term| matches!(*term, "for" | "of"))
+        .map(|offset| reference_index + 1 + offset)
+    else {
+        return false;
+    };
+    let target = terms[relation_index + 1..]
+        .split(|term| matches!(*term, "and" | "then"))
+        .next()
+        .unwrap_or_default();
+    !target.is_empty()
+        && !target
+            .iter()
+            .any(|term| matches!(*term, "report" | "reports"))
+}
+
+fn reference_has_reverse_report_binding(terms: &[&str], reference_index: usize) -> bool {
+    let Some(relative_report_index) = terms[reference_index + 1..]
+        .iter()
+        .position(|term| matches!(*term, "report" | "reports"))
+    else {
+        return false;
+    };
+    let report_index = reference_index + 1 + relative_report_index;
+    let bridge = &terms[reference_index + 1..report_index];
+    bridge.iter().any(|term| matches!(*term, "for" | "of"))
+        && bridge.iter().all(|term| {
+            is_report_reference_article(term)
+                || matches!(*term, "for" | "of" | "id")
+                || is_numeric_term(term)
         })
 }
 
@@ -712,6 +736,9 @@ fn is_existing_reference_modifier(term: &str) -> bool {
 }
 
 fn has_scoped_report_continuation(terms: &[&str]) -> bool {
+    if !report_reference_query_is_authoritative(terms) {
+        return false;
+    }
     terms.iter().enumerate().any(|(continuation_index, term)| {
         if !is_report_continuation_term(term) {
             return false;
@@ -851,32 +878,182 @@ fn has_non_execution_report_language(
 }
 
 fn report_action_prefix_is_authoritative(prefix: &[&str]) -> bool {
-    let clause = prefix
-        .iter()
-        .rposition(|term| *term == "then")
-        .map_or(prefix, |index| &prefix[index + 1..]);
-    let clause = clause
-        .strip_prefix(&["please"])
-        .or_else(|| clause.strip_prefix(&["now"]))
-        .unwrap_or(clause);
+    let clause = strip_report_directive_prefix(prefix);
     if clause.is_empty() || matches!(clause, ["please"] | ["now"]) {
         return true;
     }
     if matches!(
         clause,
-        ["can" | "could" | "would" | "will", "you" | "we"]
-            | ["can" | "could" | "would" | "will", "you" | "we", "please"]
-            | ["i" | "we", "want" | "need", "to"]
-            | ["i" | "we", "want" | "need", "you", "to"]
-            | ["i" | "we", "want" | "need", "you", "to", "please"]
+        ["for", "the", "current" | "latest" | "selected", "network"]
+            | ["for", "current" | "latest" | "selected", "network"]
     ) {
         return true;
     }
-    matches!(
-        clause,
-        ["for", "the", "current" | "latest" | "selected", "network"]
-            | ["for", "current" | "latest" | "selected", "network"]
-    )
+    let Some(selection_clause) = clause.strip_suffix(&["then"]) else {
+        return false;
+    };
+    report_selection_clause_is_authoritative(selection_clause)
+}
+
+fn strip_report_directive_prefix<'a>(terms: &'a [&'a str]) -> &'a [&'a str] {
+    let terms = terms
+        .strip_prefix(&["please"])
+        .or_else(|| terms.strip_prefix(&["now"]))
+        .unwrap_or(terms);
+    if let Some(rest) = terms
+        .strip_prefix(&["can", "you"])
+        .or_else(|| terms.strip_prefix(&["could", "you"]))
+        .or_else(|| terms.strip_prefix(&["would", "you"]))
+        .or_else(|| terms.strip_prefix(&["will", "you"]))
+        .or_else(|| terms.strip_prefix(&["can", "we"]))
+        .or_else(|| terms.strip_prefix(&["could", "we"]))
+        .or_else(|| terms.strip_prefix(&["would", "we"]))
+        .or_else(|| terms.strip_prefix(&["will", "we"]))
+    {
+        return rest.strip_prefix(&["please"]).unwrap_or(rest);
+    }
+    if let Some(rest) = terms
+        .strip_prefix(&["i", "want", "to"])
+        .or_else(|| terms.strip_prefix(&["i", "need", "to"]))
+        .or_else(|| terms.strip_prefix(&["we", "want", "to"]))
+        .or_else(|| terms.strip_prefix(&["we", "need", "to"]))
+        .or_else(|| terms.strip_prefix(&["i", "want", "you", "to"]))
+        .or_else(|| terms.strip_prefix(&["i", "need", "you", "to"]))
+        .or_else(|| terms.strip_prefix(&["we", "want", "you", "to"]))
+        .or_else(|| terms.strip_prefix(&["we", "need", "you", "to"]))
+    {
+        return rest.strip_prefix(&["please"]).unwrap_or(rest);
+    }
+    terms
+}
+
+fn report_selection_clause_is_authoritative(terms: &[&str]) -> bool {
+    let terms = strip_report_directive_prefix(terms);
+    let Some(object_terms) = terms
+        .strip_prefix(&["select"])
+        .or_else(|| terms.strip_prefix(&["choose"]))
+    else {
+        return false;
+    };
+    let mut found_report = false;
+    for term in object_terms {
+        if matches!(*term, "report" | "reports") {
+            if found_report {
+                return false;
+            }
+            found_report = true;
+        } else if !is_report_object_modifier(term) {
+            return false;
+        }
+    }
+    found_report
+}
+
+fn report_reference_query_is_authoritative(terms: &[&str]) -> bool {
+    let terms = strip_report_directive_prefix(terms);
+    let Some(first) = terms.first() else {
+        return false;
+    };
+    if !(is_report_object_modifier(first)
+        || is_existing_reference_modifier(first)
+        || matches!(
+            *first,
+            "most"
+                | "report"
+                | "reports"
+                | "operation"
+                | "operations"
+                | "run"
+                | "runs"
+                | "network"
+                | "networks"
+                | "start"
+                | "launch"
+                | "execute"
+                | "continue"
+                | "resume"
+                | "check"
+                | "poll"
+                | "polling"
+                | "monitor"
+                | "monitoring"
+                | "inspect"
+                | "inspecting"
+                | "view"
+                | "viewing"
+                | "wait"
+                | "waiting"
+                | "show"
+                | "use"
+                | "select"
+                | "choose"
+                | "fetch"
+                | "return"
+        ))
+    {
+        return false;
+    }
+    terms.iter().all(|term| {
+        is_numeric_term(term)
+            || is_report_object_modifier(term)
+            || is_existing_reference_modifier(term)
+            || is_report_continuation_term(term)
+            || matches!(
+                *term,
+                "s" | "most"
+                    | "report"
+                    | "reports"
+                    | "operation"
+                    | "operations"
+                    | "run"
+                    | "runs"
+                    | "name"
+                    | "handle"
+                    | "id"
+                    | "and"
+                    | "then"
+                    | "for"
+                    | "of"
+                    | "to"
+                    | "with"
+                    | "it"
+                    | "its"
+                    | "is"
+                    | "status"
+                    | "result"
+                    | "results"
+                    | "show"
+                    | "showing"
+                    | "use"
+                    | "select"
+                    | "selected"
+                    | "choose"
+                    | "start"
+                    | "launch"
+                    | "execute"
+                    | "fetch"
+                    | "fetching"
+                    | "return"
+                    | "returning"
+                    | "first"
+                    | "page"
+                    | "immediately"
+                    | "asynchronously"
+                    | "async"
+                    | "until"
+                    | "completion"
+                    | "complete"
+                    | "completed"
+                    | "done"
+                    | "finish"
+                    | "finishes"
+                    | "finishing"
+                    | "network"
+                    | "networks"
+                    | "now"
+                    | "please"
+            )
+    })
 }
 
 fn campaign_delivery_audit_report_object_end(terms: &[&str]) -> Option<usize> {
@@ -906,6 +1083,12 @@ fn report_start_tail_is_safe(terms: &[&str]) -> bool {
         return true;
     }
     if terms.iter().all(|term| matches!(*term, "now" | "please")) {
+        return true;
+    }
+    if terms
+        .iter()
+        .all(|term| matches!(*term, "asynchronously" | "async" | "now" | "please"))
+    {
         return true;
     }
     let starts_as_continuation = matches!(terms.first(), Some(&"and" | &"then" | &"until"));
@@ -952,6 +1135,7 @@ fn report_start_tail_is_safe(terms: &[&str]) -> bool {
                         | "page"
                         | "immediately"
                         | "for"
+                        | "of"
                         | "to"
                         | "completion"
                         | "complete"
@@ -1107,6 +1291,7 @@ pub(crate) fn resolve_report_discovery(
     for (index, result) in std::mem::take(results).into_iter().enumerate() {
         let contextual_companion = contextual_companions.get(result.name.as_str());
         let is_report_run = result.name == "gam_report_run";
+        let is_report_poll = result.name == "gam_report_operation_poll";
         let report_run_callable = is_report_run
             && read_only == Some(false)
             && intent == ReportDiscoveryIntent::ExplicitNewRun
@@ -1144,6 +1329,28 @@ pub(crate) fn resolve_report_discovery(
                 } else {
                     "Starting a report creates an upstream job. The bounded discovery query did not express explicit new-run intent, so this match is not callable."
                 },
+            }));
+        } else if is_report_poll && intent != ReportDiscoveryIntent::ExistingOperationContinuation {
+            condition_only.push(json!({
+                "type": "condition_only_match",
+                "name": result.name,
+                "rank": index + 1,
+                "group": result.group,
+                "description": result.description,
+                "registered_read_only": result.read_only,
+                "registered_risk_posture": result.risk_posture,
+                "relation": "condition",
+                "selection_semantics": "condition_only",
+                "callable_as_tool": false,
+                "schema_exposed": false,
+                "tool_already_selected": true,
+                "required_for_guided_sequence": false,
+                "server_call_enforced": false,
+                "before_tool": Value::Null,
+                "invocation_condition": "explicit_existing_report_operation_intent",
+                "effect": "polls_existing_operation_with_get",
+                "report_intent": intent.as_str(),
+                "reason": "Polling an existing report operation requires a bounded affirmative report-continuation request or a locally bound existing report operation or run reference. The discovery query did not establish that authority, so this direct match is not callable.",
             }));
         } else {
             retained.push(result);
@@ -1857,6 +2064,47 @@ mod tests {
     }
 
     #[test]
+    fn direct_report_poll_requires_authoritative_existing_operation_intent() {
+        for query in [
+            "would polling the report operation help",
+            "should I poll the report operation",
+            "tell me what happens if I poll the report operation",
+        ] {
+            let mut results = vec![result("gam_report_operation_poll")];
+            let resolution = resolve_report_discovery(
+                &mut results,
+                &[],
+                Some(query),
+                Some("reports"),
+                true,
+                Some(true),
+            );
+            assert!(
+                results.is_empty(),
+                "ambiguous poll remained callable: {query}"
+            );
+            assert_eq!(resolution.records.len(), 1);
+            assert_eq!(resolution.records[0]["name"], "gam_report_operation_poll");
+            assert_eq!(resolution.records[0]["callable_as_tool"], false);
+            assert_eq!(resolution.records[0]["schema_exposed"], false);
+            assert_eq!(resolution.records[0]["report_intent"], "unspecified");
+        }
+
+        let query = "continue waiting for an existing report operation";
+        let mut results = vec![result("gam_report_operation_poll")];
+        let resolution = resolve_report_discovery(
+            &mut results,
+            &[],
+            Some(query),
+            Some("reports"),
+            true,
+            Some(true),
+        );
+        assert!(resolution.records.is_empty());
+        assert_eq!(results[0].name, "gam_report_operation_poll");
+    }
+
+    #[test]
     fn existing_operation_intent_replaces_write_filtered_report_run_with_safe_poll() {
         let mut results = vec![result("gam_report_run")];
         let query = "continue waiting for an existing report operation";
@@ -2051,10 +2299,15 @@ mod tests {
             "start a report then wait until it is complete",
             "start a report and return immediately",
             "start a report, then fetch the first result page",
+            "start a report and fetch the first page of results",
+            "start a report asynchronously",
             "start a report and return the run id",
             "start a report and show the operation id",
             "start a campaign delivery audit with my saved report",
             "launch the saved report and check its status",
+            "can you start a report",
+            "I need you to run a saved report",
+            "please select the report then run the saved report",
         ] {
             assert_eq!(
                 report_discovery_intent(Some(query)),
@@ -2090,9 +2343,21 @@ mod tests {
             "assess whether we should run a report",
             "check line-item operation 123 and plan a report",
             "show me how to select the report, then run the saved report",
+            "tell me what happens if I select the report and then run the saved report",
+            "then run the saved report",
+            "select the ad unit then run the saved report",
             "should I poll the report operation",
+            "would polling the report operation help",
+            "tell me what happens if I poll the report operation",
+            "tell me what happens if I use report operation 123",
+            "would using report operation 123 help",
             "summarize the report and use operation 123 for the line item",
+            "summarize the report and use operation 123 for the ad unit",
+            "use operation 123 for the ad unit and check the report",
             "inspect deployment run 123 and summarize a report",
+            "summarize the report and use run 123 for the deployment",
+            "use the deployment run for the line item and summarize the report",
+            "use report run 123 for the deployment",
             "start a report without waiting",
         ] {
             assert_eq!(

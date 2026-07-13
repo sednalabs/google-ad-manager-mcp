@@ -310,14 +310,19 @@ recognized report-object modifiers may occur between that action and object,
 and any tail must be empty or a bounded continuation of the newly started run;
 planning, explanatory, negative, or unrelated language fails closed. Bare,
 latest, current, and reverse `run of/for ... report` noun phrases expose only
-the GET-based existing-operation continuation. An explicit report operation or
-run identity takes precedence only when it is locally bound to the report
-clause; an identity label without a value cannot override a clear new start.
-Generic non-report operation references cannot inject the report poll tool.
+the GET-based existing-operation continuation, and only when the complete query
+is a bounded report command or reference rather than explanatory or
+deliberative prose. Direct poll matches are filtered by that same authority
+decision under both read-only and write-like discovery filters. An explicit
+report operation or run identity takes precedence only when it is locally bound
+to the report clause; an identity assigned through `for` or `of` to another
+domain is not a report identity, and an identity label without a value cannot
+override a clear new start. Generic non-report operation references cannot
+inject the report poll tool.
 Negative query syntax remains fail-closed under the shared inventory policy;
 request a nonblocking start affirmatively, for example `start a report and
-return immediately`, rather than `without waiting`. Report start is not a
-canned retry example.
+return immediately` or `start a report asynchronously`, rather than `without
+waiting`. Report start is not a canned retry example.
 
 Report runs send the provider-required empty POST body. Definitive 4xx run
 rejections are normal upstream API failures. Once the POST may otherwise have
