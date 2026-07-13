@@ -469,22 +469,21 @@ fn report_discovery_intent(query: Option<&str>) -> ReportDiscoveryIntent {
         || term_set.contains("reports")
         || normalized.contains("campaign delivery audit");
     let clear_new_run_action = has_clear_report_start_action(&terms, report_context, &normalized);
-    let strong_continuation_action = terms.iter().any(|term| is_report_continuation_term(term));
-    let wait_action = term_set.contains("wait") || term_set.contains("waiting");
-    let explicit_existing_operation_reference =
-        has_explicit_existing_report_operation_reference(&terms, report_context, &normalized);
+    let explicit_existing_operation_reference = has_explicit_existing_report_operation_reference(
+        &terms,
+        report_context,
+        &normalized,
+        clear_new_run_action,
+    );
     let report_run_noun_reference =
-        has_explicit_existing_report_run_reference(&terms, report_context);
+        has_explicit_existing_report_run_reference(&terms, report_context, clear_new_run_action);
     if explicit_existing_operation_reference || report_run_noun_reference {
         return ReportDiscoveryIntent::ExistingOperationContinuation;
     }
 
     if clear_new_run_action {
         ReportDiscoveryIntent::ExplicitNewRun
-    } else if (normalized.contains("continue waiting") && report_context)
-        || (strong_continuation_action && report_context)
-        || (wait_action && report_context)
-    {
+    } else if has_scoped_report_continuation(&terms) {
         ReportDiscoveryIntent::ExistingOperationContinuation
     } else {
         ReportDiscoveryIntent::Unspecified
@@ -495,6 +494,7 @@ fn has_explicit_existing_report_operation_reference(
     terms: &[&str],
     report_context: bool,
     normalized: &str,
+    clear_new_run_action: bool,
 ) -> bool {
     if normalized.contains("/operations/reports/runs/") {
         return true;
@@ -506,15 +506,37 @@ fn has_explicit_existing_report_operation_reference(
         if !matches!(*term, "operation" | "operations") {
             return false;
         }
+        if !operation_has_report_binding(terms, index) {
+            return false;
+        }
         let previous = index.checked_sub(1).map(|previous| terms[previous]);
         let next = terms.get(index + 1).copied();
-        matches!(previous, Some("existing" | "current" | "latest" | "active"))
-            || matches!(next, Some("name" | "handle" | "id"))
-            || next.is_some_and(is_numeric_term)
+        let preceding_report_modifier = matches!(previous, Some("report" | "reports"))
+            && index
+                .checked_sub(2)
+                .map(|modifier| terms[modifier])
+                .is_some_and(is_existing_reference_modifier);
+        let explicit_existing_modifier =
+            previous.is_some_and(is_existing_reference_modifier) || preceding_report_modifier;
+        let direct_numeric_identity = next.is_some_and(is_numeric_term);
+        let labelled_identity = matches!(next, Some("name" | "handle" | "id"));
+        let labelled_identity_has_value = labelled_identity
+            && terms
+                .get(index + 2)
+                .copied()
+                .is_some_and(is_identity_value_term);
+        explicit_existing_modifier
+            || direct_numeric_identity
+            || labelled_identity_has_value
+            || (labelled_identity && !clear_new_run_action)
     })
 }
 
-fn has_explicit_existing_report_run_reference(terms: &[&str], report_context: bool) -> bool {
+fn has_explicit_existing_report_run_reference(
+    terms: &[&str],
+    report_context: bool,
+    clear_new_run_action: bool,
+) -> bool {
     if !report_context {
         return false;
     }
@@ -524,13 +546,19 @@ fn has_explicit_existing_report_run_reference(terms: &[&str], report_context: bo
         }
         let previous = index.checked_sub(1).map(|previous| terms[previous]);
         let next = terms.get(index + 1).copied();
-        let explicit_identity = matches!(next, Some("id"))
-            || next.is_some_and(is_numeric_term)
-            || matches!(
-                previous,
-                Some("existing" | "current" | "latest" | "recent" | "active")
-            );
+        let labelled_identity = next == Some("id");
+        let labelled_identity_has_value = labelled_identity
+            && terms
+                .get(index + 2)
+                .copied()
+                .is_some_and(is_identity_value_term);
+        let explicit_identity = next.is_some_and(is_numeric_term)
+            || labelled_identity_has_value
+            || previous.is_some_and(is_existing_reference_modifier);
         if explicit_identity {
+            return true;
+        }
+        if labelled_identity && !clear_new_run_action {
             return true;
         }
         let reverse_relation = terms[index + 1..]
@@ -539,6 +567,9 @@ fn has_explicit_existing_report_run_reference(terms: &[&str], report_context: bo
             .is_some_and(|candidate| matches!(*candidate, "of" | "for"));
         if reverse_relation {
             return true;
+        }
+        if clear_new_run_action {
+            return false;
         }
         let Some(report_index) = terms[..index]
             .iter()
@@ -566,13 +597,135 @@ fn has_explicit_existing_report_run_reference(terms: &[&str], report_context: bo
                     "new" | "existing" | "current" | "latest" | "recent" | "active"
                 )
             })
-            .is_some_and(|candidate| {
-                matches!(
-                    *candidate,
-                    "existing" | "current" | "latest" | "recent" | "active"
-                )
-            })
+            .is_some_and(|candidate| is_existing_reference_modifier(candidate))
     })
+}
+
+fn operation_has_report_binding(terms: &[&str], operation_index: usize) -> bool {
+    if operation_index > 0 && matches!(terms[operation_index - 1], "report" | "reports") {
+        return true;
+    }
+    if let Some(report_index) = terms[..operation_index]
+        .iter()
+        .rposition(|term| matches!(*term, "report" | "reports"))
+    {
+        if terms[report_index + 1..operation_index]
+            .iter()
+            .all(|term| is_report_operation_bridge_term(term))
+        {
+            return true;
+        }
+    }
+    let Some(relative_report_index) = terms[operation_index + 1..]
+        .iter()
+        .position(|term| matches!(*term, "report" | "reports"))
+    else {
+        return false;
+    };
+    let report_index = operation_index + 1 + relative_report_index;
+    let bridge = &terms[operation_index + 1..report_index];
+    bridge.iter().any(|term| matches!(*term, "for" | "of"))
+        && bridge.iter().all(|term| {
+            matches!(
+                *term,
+                "name"
+                    | "handle"
+                    | "id"
+                    | "for"
+                    | "of"
+                    | "a"
+                    | "an"
+                    | "the"
+                    | "one"
+                    | "existing"
+                    | "current"
+                    | "latest"
+                    | "active"
+            ) || is_numeric_term(term)
+        })
+}
+
+fn is_report_operation_bridge_term(term: &str) -> bool {
+    is_report_continuation_term(term)
+        || matches!(
+            term,
+            "and"
+                | "then"
+                | "the"
+                | "its"
+                | "this"
+                | "existing"
+                | "current"
+                | "latest"
+                | "active"
+                | "show"
+                | "return"
+                | "returning"
+                | "use"
+        )
+}
+
+fn is_existing_reference_modifier(term: &str) -> bool {
+    matches!(
+        term,
+        "existing" | "current" | "latest" | "recent" | "active"
+    )
+}
+
+fn is_identity_value_term(term: &str) -> bool {
+    is_numeric_term(term)
+}
+
+fn has_scoped_report_continuation(terms: &[&str]) -> bool {
+    terms.iter().enumerate().any(|(continuation_index, term)| {
+        if !is_report_continuation_term(term) {
+            return false;
+        }
+        terms.iter().enumerate().any(|(report_index, report_term)| {
+            if !matches!(*report_term, "report" | "reports") {
+                return false;
+            }
+            let (start, end) = if continuation_index < report_index {
+                (continuation_index, report_index)
+            } else {
+                (report_index, continuation_index)
+            };
+            terms[start..=end]
+                .iter()
+                .all(|bridge_term| is_report_continuation_bridge_term(bridge_term))
+        })
+    })
+}
+
+fn is_report_continuation_bridge_term(term: &str) -> bool {
+    is_report_continuation_term(term)
+        || is_report_object_modifier(term)
+        || is_numeric_term(term)
+        || matches!(
+            term,
+            "report"
+                | "reports"
+                | "operation"
+                | "operations"
+                | "run"
+                | "runs"
+                | "name"
+                | "handle"
+                | "id"
+                | "and"
+                | "then"
+                | "for"
+                | "of"
+                | "to"
+                | "it"
+                | "its"
+                | "status"
+                | "result"
+                | "results"
+                | "existing"
+                | "recent"
+                | "active"
+        )
 }
 
 fn is_numeric_term(term: &str) -> bool {
@@ -621,29 +774,64 @@ fn has_non_execution_report_language(
 ) -> bool {
     normalized.contains("do not")
         || normalized.contains("don't")
-        || terms
-            .iter()
-            .any(|term| matches!(*term, "not" | "never" | "without"))
+        || normalized.contains("dont")
+        || terms.iter().any(|term| matches!(*term, "not" | "never"))
+        || terms.iter().enumerate().any(|(index, term)| {
+            *term == "without" && !matches!(terms.get(index + 1), Some(&"wait" | &"waiting"))
+        })
         || terms.iter().any(|term| {
             matches!(
                 *term,
-                "plan" | "planning" | "preview" | "previewing" | "simulate" | "simulation"
+                "plan"
+                    | "planning"
+                    | "preview"
+                    | "previewing"
+                    | "simulate"
+                    | "simulation"
+                    | "safe"
+                    | "assess"
+                    | "assessment"
+                    | "whether"
+                    | "should"
+                    | "review"
+                    | "consider"
+                    | "considering"
+                    | "evaluate"
+                    | "evaluation"
+                    | "decide"
+                    | "decision"
             )
         })
-        || terms[..action_index].iter().any(|term| {
-            matches!(
-                *term,
-                "how"
-                    | "show"
-                    | "showing"
-                    | "explain"
-                    | "explaining"
-                    | "example"
-                    | "examples"
-                    | "tutorial"
-                    | "guide"
-            )
-        })
+        || !report_action_prefix_is_authoritative(&terms[..action_index])
+}
+
+fn report_action_prefix_is_authoritative(prefix: &[&str]) -> bool {
+    let clause = prefix
+        .iter()
+        .rposition(|term| *term == "then")
+        .map_or(prefix, |index| &prefix[index + 1..]);
+    let clause = clause
+        .strip_prefix(&["please"])
+        .or_else(|| clause.strip_prefix(&["now"]))
+        .unwrap_or(clause);
+    if clause.is_empty() || matches!(clause, ["please"] | ["now"]) {
+        return true;
+    }
+    if matches!(
+        clause,
+        ["can" | "could" | "would" | "will", "you" | "we"]
+            | ["can" | "could" | "would" | "will", "you" | "we", "please"]
+            | ["i" | "we", "want" | "need", "to"]
+            | ["i" | "we", "want" | "need", "you", "to"]
+            | ["i" | "we", "want" | "need", "you", "to", "please"]
+    ) {
+        return true;
+    }
+    matches!(
+        clause,
+        ["for", "the", "current" | "latest" | "selected", "network"]
+            | ["for", "current" | "latest" | "selected", "network"]
+    )
 }
 
 fn campaign_delivery_audit_report_object_end(terms: &[&str]) -> Option<usize> {
@@ -656,7 +844,10 @@ fn campaign_delivery_audit_report_object_end(terms: &[&str]) -> Option<usize> {
         return None;
     }
     index += 1;
-    if matches!(terms.get(index), Some(&"a" | &"an" | &"the" | &"one")) {
+    if terms
+        .get(index)
+        .is_some_and(|term| is_report_determiner(term))
+    {
         index += 1;
     }
     if terms.get(index) == Some(&"saved") {
@@ -672,10 +863,14 @@ fn report_start_tail_is_safe(terms: &[&str]) -> bool {
     if terms.iter().all(|term| matches!(*term, "now" | "please")) {
         return true;
     }
-    let starts_as_continuation = matches!(terms.first(), Some(&"and" | &"then" | &"until"));
-    let has_continuation_action = terms
-        .iter()
-        .any(|term| is_report_continuation_term(term) || matches!(*term, "show" | "showing"));
+    let starts_as_continuation = matches!(
+        terms.first(),
+        Some(&"and" | &"then" | &"until" | &"without")
+    );
+    let has_continuation_action = terms.iter().any(|term| {
+        is_report_continuation_term(term)
+            || matches!(*term, "show" | "showing" | "return" | "returning")
+    });
     starts_as_continuation
         && has_continuation_action
         && terms.iter().all(|term| {
@@ -685,9 +880,13 @@ fn report_start_tail_is_safe(terms: &[&str]) -> bool {
                     "and"
                         | "then"
                         | "until"
+                        | "without"
                         | "show"
                         | "showing"
+                        | "return"
+                        | "returning"
                         | "it"
+                        | "is"
                         | "its"
                         | "this"
                         | "the"
@@ -696,8 +895,13 @@ fn report_start_tail_is_safe(terms: &[&str]) -> bool {
                         | "results"
                         | "status"
                         | "operation"
+                        | "report"
+                        | "reports"
                         | "run"
                         | "runs"
+                        | "id"
+                        | "name"
+                        | "handle"
                         | "for"
                         | "to"
                         | "completion"
@@ -711,6 +915,13 @@ fn report_start_tail_is_safe(terms: &[&str]) -> bool {
                         | "please"
                 )
         })
+}
+
+fn is_report_determiner(term: &str) -> bool {
+    matches!(
+        term,
+        "a" | "an" | "the" | "one" | "my" | "our" | "your" | "this" | "that" | "another"
+    )
 }
 
 fn is_report_object_modifier(term: &str) -> bool {
@@ -1686,6 +1897,8 @@ mod tests {
             "start a report and check operation 123",
             "start a report and use run id 123",
             "start a new report then poll the current run",
+            "current report operation",
+            "use the latest report operation",
         ] {
             let mut results = vec![result("gam_report_run")];
             let companions = workflow_companions(&results, Some(query));
@@ -1748,6 +1961,8 @@ mod tests {
             "start a report and check operation 123",
             "start a report and use run id 123",
             "start a new report then poll the current run",
+            "current report operation",
+            "use the latest report operation",
         ] {
             assert_eq!(
                 report_discovery_intent(Some(query)),
@@ -1782,6 +1997,13 @@ mod tests {
             "start a report then poll the new run",
             "run the report then show its result",
             "run the report now",
+            "select the report, then run the saved report",
+            "start a report then poll the report operation",
+            "start a report then wait until it is complete",
+            "start a report without waiting",
+            "start a report and return the run id",
+            "start a report and show the operation id",
+            "start a campaign delivery audit with my saved report",
             "launch the saved report and check its status",
         ] {
             assert_eq!(
@@ -1813,6 +2035,10 @@ mod tests {
             "execute line-item operation 123",
             "check line-item operation 123",
             "continue waiting",
+            "is it safe to run a report",
+            "is it safe, then run a report",
+            "assess whether we should run a report",
+            "check line-item operation 123 and plan a report",
         ] {
             assert_eq!(
                 report_discovery_intent(Some(query)),

@@ -305,13 +305,15 @@ before ingestion. Starting a report creates an upstream job, so
 `gam_report_run` is registered truthfully as non-read-only and is callable from
 discovery only when the bounded toolkit query places an explicit start, run,
 launch, or execute action before a report object and the caller sets
-`read_only=false`. Only recognized report-object modifiers may occur between
-that action and object, and any tail must be empty or a bounded continuation of
-the newly started run; planning, explanatory, negative, or unrelated language
-fails closed. Bare, latest, current, and reverse `run of/for ... report` noun
-phrases expose only the GET-based existing-operation continuation. Any explicit
-report operation or run identity takes precedence over a start phrase, while a
-generic non-report operation reference cannot inject the report poll tool.
+`read_only=false`. The action must follow a bounded directive prefix. Only
+recognized report-object modifiers may occur between that action and object,
+and any tail must be empty or a bounded continuation of the newly started run;
+planning, explanatory, negative, or unrelated language fails closed. Bare,
+latest, current, and reverse `run of/for ... report` noun phrases expose only
+the GET-based existing-operation continuation. An explicit report operation or
+run identity takes precedence only when it is locally bound to the report
+clause; an identity label without a value cannot override a clear new start.
+Generic non-report operation references cannot inject the report poll tool.
 Report start is not a canned retry example.
 
 Report runs send the provider-required empty POST body. Definitive 4xx run

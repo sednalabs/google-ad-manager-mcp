@@ -8082,6 +8082,8 @@ mod tests {
             "start a report and check operation 123",
             "start a report and use run id 123",
             "start a new report then poll the current run",
+            "current report operation",
+            "use the latest report operation",
         ] {
             let noun_reference = server
                 .find_tools(Parameters(FindToolsArgs {
@@ -8128,6 +8130,10 @@ mod tests {
             "execute line-item operation 123",
             "check line-item operation 123",
             "continue waiting",
+            "is it safe to run a report",
+            "is it safe, then run a report",
+            "assess whether we should run a report",
+            "check line-item operation 123 and plan a report",
         ] {
             let ambiguous_action = server
                 .find_tools(Parameters(FindToolsArgs {
@@ -8174,6 +8180,13 @@ mod tests {
             "start a report then poll the new run",
             "run the report then show its result",
             "run the report now",
+            "select the report, then run the saved report",
+            "start a report then poll the report operation",
+            "start a report then wait until it is complete",
+            "start a report without waiting",
+            "start a report and return the run id",
+            "start a report and show the operation id",
+            "start a campaign delivery audit with my saved report",
         ] {
             let explicit_start = server
                 .find_tools(Parameters(FindToolsArgs {
