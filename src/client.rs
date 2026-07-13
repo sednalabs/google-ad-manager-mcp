@@ -1045,16 +1045,28 @@ impl AdManagerClient {
             ) {
                 Ok(value) => value,
                 Err(error) => {
-                    let completed_success_identity_failure =
+                    let completed_requested_operation =
                         operation.get("done").and_then(Value::as_bool) == Some(true)
-                            && operation.get("error").is_none()
-                            && operation.get("response").is_some_and(Value::is_object);
-                    let (error, observed_operation) = if completed_success_identity_failure {
+                            && report_operation_name_matches(&operation, &operation_name);
+                    let completed_success_identity_failure = completed_requested_operation
+                        && operation.get("error").is_none()
+                        && operation.get("response").is_some_and(Value::is_object);
+                    let (error, observed_operation) = if completed_requested_operation {
+                        let (field, message) = if completed_success_identity_failure {
+                            (
+                                "operation.completed_report_identity",
+                                "completed successful operation did not expose a safe, mutually consistent report identity in metadata.report or response.reportResult",
+                            )
+                        } else {
+                            (
+                                "operation.completed_state",
+                                "completed operation payload was malformed or contained contradictory terminal state",
+                            )
+                        };
                         (
                             AdManagerError::UpstreamContract {
-                                field: "operation.completed_report_identity",
-                                message: "completed successful operation did not expose a safe, mutually consistent report identity in metadata.report or response.reportResult"
-                                    .to_string(),
+                                field,
+                                message: message.to_string(),
                             },
                             Some(project_report_operation(&operation)),
                         )
@@ -1065,7 +1077,7 @@ impl AdManagerClient {
                         error,
                         operation: observed_operation,
                         expected_report_name: bound_report_name,
-                        terminal: false,
+                        terminal: completed_requested_operation,
                     });
                 }
             };
@@ -1701,13 +1713,11 @@ fn terminal_report_failure_observation(
 ) -> Option<(Value, String)> {
     if operation.get("done").and_then(Value::as_bool) != Some(true)
         || !operation.get("error").is_some_and(Value::is_object)
-        || operation.get("response").is_some()
+        || operation
+            .get("response")
+            .is_some_and(|response| !response.is_null())
+        || !report_operation_name_matches(operation, expected_operation_name)
     {
-        return None;
-    }
-    let operation_name = operation.get("name").and_then(Value::as_str)?;
-    let operation_name = validate_operation_name(operation_name).ok()?;
-    if operation_name != expected_operation_name {
         return None;
     }
     let message = operation
@@ -1724,6 +1734,14 @@ fn terminal_report_failure_observation(
             )
         });
     Some((project_report_operation(operation), message))
+}
+
+fn report_operation_name_matches(operation: &Value, expected_operation_name: &str) -> bool {
+    operation
+        .get("name")
+        .and_then(Value::as_str)
+        .and_then(|name| validate_operation_name(name).ok())
+        .is_some_and(|name| name == expected_operation_name)
 }
 
 fn bounded_response_limit_error(
@@ -3204,7 +3222,7 @@ mod tests {
                     ..
                 }
             ));
-            assert!(!failure.terminal);
+            assert!(failure.terminal);
             assert_eq!(
                 failure
                     .operation

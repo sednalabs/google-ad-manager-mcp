@@ -3310,7 +3310,7 @@ fn report_poll_requires_remediation(error: &AdManagerError) -> bool {
         || matches!(
             error,
             AdManagerError::UpstreamContract {
-                field: "operation.completed_report_identity",
+                field: "operation.completed_report_identity" | "operation.completed_state",
                 ..
             }
         )
@@ -3344,10 +3344,10 @@ async fn poll_report_operation_tool_result(
                     "Authentication is not ready, so no report poll was sent. Correct the credential or access configuration before issuing the GET-only poll again."
                 }
                 AdManagerError::UpstreamContract {
-                    field: "operation.completed_report_identity",
+                    field: "operation.completed_report_identity" | "operation.completed_state",
                     ..
                 } => {
-                    "The completed operation did not expose a report identity that can be safely reused. Inspect the operation and saved report before issuing another request."
+                    "The completed operation did not expose a safe terminal contract and report identity. Inspect the operation and saved report before issuing another request."
                 }
                 _ => {
                     "The provider definitively rejected this poll request. Correct access, operation identity, or request state before issuing another GET; the operation's terminal state was not observed."
@@ -3359,26 +3359,27 @@ async fn poll_report_operation_tool_result(
                 }
                 _ => Some(duration_millis_u64(options.timeout)),
             };
-            let detail = if failure.terminal {
+            let detail = if remediation_required {
+                json!({
+                    "operation_name": options.operation_name,
+                    "expected_report_name": failure.expected_report_name.as_deref(),
+                    "started_new_run": options.started_new_run,
+                    "terminal": failure.terminal,
+                    "operation_terminal_state_confirmed": failure.terminal,
+                    "poll_outcome": "remediation_required",
+                    "continuation_available": false,
+                    "operation": failure.operation,
+                    "operator_action": remediation_action
+                })
+            } else if failure.terminal {
                 json!({
                     "operation_name": options.operation_name,
                     "expected_report_name": failure.expected_report_name.as_deref(),
                     "started_new_run": options.started_new_run,
                     "terminal": true,
+                    "operation_terminal_state_confirmed": true,
                     "continuation_available": false,
                     "operation": failure.operation
-                })
-            } else if remediation_required {
-                json!({
-                    "operation_name": options.operation_name,
-                    "expected_report_name": failure.expected_report_name.as_deref(),
-                    "started_new_run": options.started_new_run,
-                    "terminal": false,
-                    "operation_terminal_state_confirmed": false,
-                    "poll_outcome": "remediation_required",
-                    "continuation_available": false,
-                    "operation": failure.operation,
-                    "operator_action": remediation_action
                 })
             } else if let Some(continuation_timeout_ms) = continuation_timeout_ms {
                 json!({
@@ -8739,7 +8740,7 @@ mod tests {
     #[tokio::test]
     async fn report_poll_rejects_cross_target_operation_and_result_bindings() {
         let requested_operation = "networks/123/operations/reports/runs/789";
-        for (body, continuation_available) in [
+        for (body, continuation_available, terminal_state_confirmed) in [
             (
                 json!({
                 "name":"networks/123/operations/reports/runs/790",
@@ -8747,6 +8748,17 @@ mod tests {
                 "done":false
                 }),
                 true,
+                false,
+            ),
+            (
+                json!({
+                "name":"networks/123/operations/reports/runs/790",
+                "metadata":{"report":"networks/123/reports/456"},
+                "done":true,
+                "response":{"reportResult":"networks/123/reports/456/results/987"}
+                }),
+                true,
+                false,
             ),
             (
                 json!({
@@ -8755,6 +8767,7 @@ mod tests {
                 "done":false
                 }),
                 true,
+                false,
             ),
             (
                 json!({
@@ -8764,6 +8777,7 @@ mod tests {
                 "response":{"reportResult":"networks/123/reports/999/results/987"}
                 }),
                 false,
+                true,
             ),
             (
                 json!({
@@ -8772,6 +8786,7 @@ mod tests {
                 "done":"false"
                 }),
                 true,
+                false,
             ),
             (
                 json!({
@@ -8781,6 +8796,7 @@ mod tests {
                 "response":{"reportResult":42}
                 }),
                 false,
+                true,
             ),
         ] {
             let (base_url, requests, server) = serve_report_http_sequence(vec![(200, body)]);
@@ -8805,7 +8821,10 @@ mod tests {
                 .expect("structured cross-target result");
             assert_eq!(response["ok"], false);
             assert_eq!(response["error"]["code"], "upstream_contract_error");
-            assert_eq!(response["error"]["detail"]["terminal"], false);
+            assert_eq!(
+                response["error"]["detail"]["terminal"],
+                terminal_state_confirmed
+            );
             assert_eq!(
                 response["error"]["detail"]["continuation_available"],
                 continuation_available
@@ -8816,6 +8835,10 @@ mod tests {
                     "networks/123/reports/456"
                 );
             } else {
+                assert_eq!(
+                    response["error"]["detail"]["operation_terminal_state_confirmed"],
+                    true
+                );
                 assert_eq!(
                     response["error"]["detail"]["poll_outcome"],
                     "remediation_required"
@@ -8981,7 +9004,11 @@ mod tests {
             .expect("structured malformed-result response");
         assert_eq!(response["ok"], false);
         assert_eq!(response["error"]["code"], "upstream_contract_error");
-        assert_eq!(response["error"]["detail"]["terminal"], false);
+        assert_eq!(response["error"]["detail"]["terminal"], true);
+        assert_eq!(
+            response["error"]["detail"]["operation_terminal_state_confirmed"],
+            true
+        );
         assert_eq!(response["error"]["detail"]["continuation_available"], false);
         assert_eq!(
             response["error"]["detail"]["poll_outcome"],
@@ -9103,12 +9130,13 @@ mod tests {
     #[tokio::test]
     async fn metadata_free_or_invalid_terminal_report_failure_remains_terminal() {
         let operation_name = "networks/123/operations/reports/runs/789";
-        for metadata in [
-            None,
-            Some(Value::Null),
-            Some(json!({"report": null})),
-            Some(json!({"report": "not-a-report"})),
-            Some(json!({"report": "networks/999/reports/456"})),
+        for (metadata, explicit_null_response) in [
+            (None, false),
+            (None, true),
+            (Some(Value::Null), false),
+            (Some(json!({"report": null})), false),
+            (Some(json!({"report": "not-a-report"})), false),
+            (Some(json!({"report": "networks/999/reports/456"})), false),
         ] {
             let mut operation = json!({
                 "name": operation_name,
@@ -9120,6 +9148,9 @@ mod tests {
             });
             if let Some(metadata) = metadata {
                 operation["metadata"] = metadata;
+            }
+            if explicit_null_response {
+                operation["response"] = Value::Null;
             }
             let (base_url, requests, server) = serve_report_http_sequence(vec![(200, operation)]);
             let client = AdManagerClient::for_test_api_base_url(base_url);
@@ -9142,6 +9173,10 @@ mod tests {
                 .expect("identity-free terminal response");
             assert_eq!(response["error"]["code"], "report_run_failed");
             assert_eq!(response["error"]["detail"]["terminal"], true);
+            assert_eq!(
+                response["error"]["detail"]["operation_terminal_state_confirmed"],
+                true
+            );
             assert_eq!(response["error"]["detail"]["continuation_available"], false);
             assert_eq!(
                 response["error"]["detail"]["operation"]["name"],
@@ -9193,7 +9228,11 @@ mod tests {
                 .structured_content
                 .expect("invalid completed-success identity response");
             assert_eq!(response["error"]["code"], "upstream_contract_error");
-            assert_eq!(response["error"]["detail"]["terminal"], false);
+            assert_eq!(response["error"]["detail"]["terminal"], true);
+            assert_eq!(
+                response["error"]["detail"]["operation_terminal_state_confirmed"],
+                true
+            );
             assert_eq!(
                 response["error"]["detail"]["poll_outcome"],
                 "remediation_required"
@@ -9208,6 +9247,64 @@ mod tests {
                 .join()
                 .expect("join invalid completed-success server");
             assert_eq!(requests.lock().expect("lock completed requests").len(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn contradictory_completed_report_union_requires_terminal_remediation() {
+        let operation_name = "networks/123/operations/reports/runs/789";
+        for (error, response) in [
+            (
+                json!({"code": 13, "message": "terminal failure"}),
+                json!({"reportResult": "networks/123/reports/456/results/987"}),
+            ),
+            (
+                Value::Null,
+                json!({"reportResult": "networks/123/reports/456/results/987"}),
+            ),
+        ] {
+            let (base_url, requests, server) = serve_report_http_sequence(vec![(
+                200,
+                json!({
+                    "name": operation_name,
+                    "metadata": {"report": "networks/123/reports/456"},
+                    "done": true,
+                    "error": error,
+                    "response": response
+                }),
+            )]);
+            let client = AdManagerClient::for_test_api_base_url(base_url);
+            let server_under_test = AdManagerServer::new(crate::Settings::default())
+                .expect("build contradictory completed-operation server")
+                .with_test_client(client);
+            let result = server_under_test
+                .gam_report_operation_poll(Parameters(ReportOperationPollArgs {
+                    operation_name: operation_name.to_string(),
+                    expected_report_name: Some("networks/123/reports/456".to_string()),
+                    fetch_first_page: Some(false),
+                    result_page_size: None,
+                    poll_timeout_ms: Some(1_000),
+                    initial_poll_interval_ms: Some(5_000),
+                }))
+                .await
+                .expect("classify contradictory completed operation");
+            let response = result
+                .structured_content
+                .expect("contradictory completed-operation response");
+            assert_eq!(response["error"]["code"], "upstream_contract_error");
+            assert_eq!(response["error"]["detail"]["terminal"], true);
+            assert_eq!(
+                response["error"]["detail"]["operation_terminal_state_confirmed"],
+                true
+            );
+            assert_eq!(
+                response["error"]["detail"]["poll_outcome"],
+                "remediation_required"
+            );
+            assert_eq!(response["error"]["detail"]["continuation_available"], false);
+            assert!(response["error"]["detail"].get("continuation").is_none());
+            server.join().expect("join contradictory-operation server");
+            assert_eq!(requests.lock().expect("lock requests").len(), 1);
         }
     }
 
