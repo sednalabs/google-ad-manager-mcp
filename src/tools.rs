@@ -8090,6 +8090,9 @@ mod tests {
             "current report operation",
             "use the latest report operation",
             "check operation handle networks/123/operations/reports/runs/run_456-abc",
+            "check operation handle `networks/123/operations/reports/runs/789`",
+            "check operation_name=networks/123/operations/reports/runs/789",
+            "check networks/123/operations/reports/runs/789 and poll networks/123/operations/reports/runs/789",
         ] {
             let noun_reference = server
                 .find_tools(Parameters(FindToolsArgs {
@@ -8159,6 +8162,7 @@ mod tests {
             "use network operation 123 and check the report",
             "use network operation 123 for my saved report",
             "use advertiser operation 123 for my saved report",
+            "use advertiser's current operation 123 for my saved report",
             "check report operation 123 and report operation 456",
             "check report operation 123 and 456",
             "check networks/111/operations/reports/runs/456 and networks/222/operations/reports/runs/789",
@@ -8169,6 +8173,8 @@ mod tests {
             "check the report and use run 123 for the advertiser",
             "check the report for network run 123",
             "show report result rows for advertiser id 123",
+            "show report result rows for advertiser 123, page 2",
+            "check operation_name=networks/123/operations/reports/runs/789?x=1",
             "start a report without waiting",
         ] {
             let ambiguous_action = server
@@ -8209,6 +8215,7 @@ mod tests {
         for query in [
             "fetch rows from a completed report result",
             "show me rows from a completed report result",
+            "show first 100 rows from a completed report result",
         ] {
             let completed_result = server
                 .find_tools(Parameters(FindToolsArgs {

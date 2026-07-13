@@ -464,48 +464,79 @@ fn is_ad_unit_retirement_intent(query: Option<&str>) -> bool {
         })
 }
 
-fn normalize_report_discovery_query(query: &str) -> (String, usize) {
-    let mut canonical_operation_count = 0;
-    let normalized = query
-        .split_whitespace()
-        .map(|term| {
-            let candidate = term.trim_matches(|character: char| {
-                matches!(
-                    character,
-                    '\'' | '"'
-                        | '('
-                        | ')'
-                        | '['
-                        | ']'
-                        | '{'
-                        | '}'
-                        | ','
-                        | '.'
-                        | ';'
-                        | ':'
-                        | '?'
-                        | '!'
-                )
-            });
-            if validate_operation_name(candidate).is_ok() {
-                canonical_operation_count += 1;
-                CANONICAL_REPORT_OPERATION_TERM
-            } else {
-                term
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_ascii_lowercase()
-        .replace(['-', '_'], " ");
-    (normalized, canonical_operation_count)
+struct NormalizedReportDiscoveryQuery {
+    text: String,
+    canonical_operations: BTreeSet<String>,
+    invalid_canonical_reference: bool,
+}
+
+fn normalize_report_discovery_query(query: &str) -> NormalizedReportDiscoveryQuery {
+    let bytes = query.as_bytes();
+    let mut canonical_operations = BTreeSet::new();
+    let mut valid_spans = Vec::new();
+    let mut search_start = 0;
+    while let Some(relative_start) = query[search_start..].find("networks/") {
+        let start = search_start + relative_start;
+        let mut end = start;
+        while end < bytes.len()
+            && (bytes[end].is_ascii_alphanumeric() || matches!(bytes[end], b'/' | b'-' | b'_'))
+        {
+            end += 1;
+        }
+        let before_is_boundary = start == 0
+            || bytes[start - 1].is_ascii_whitespace()
+            || matches!(
+                bytes[start - 1],
+                b'=' | b'`' | b'\'' | b'"' | b'(' | b'[' | b'{' | b',' | b':'
+            );
+        let after_is_boundary = end == bytes.len()
+            || bytes[end].is_ascii_whitespace()
+            || matches!(
+                bytes[end],
+                b'`' | b'\'' | b'"' | b')' | b']' | b'}' | b',' | b'.' | b';' | b':' | b'!'
+            )
+            || (bytes[end] == b'?'
+                && (end + 1 == bytes.len() || bytes[end + 1].is_ascii_whitespace()));
+        let candidate = &query[start..end];
+        if before_is_boundary && after_is_boundary && validate_operation_name(candidate).is_ok() {
+            canonical_operations.insert(candidate.to_string());
+            valid_spans.push((start, end));
+            search_start = end;
+        } else {
+            search_start = start + "networks/".len();
+        }
+    }
+
+    let lowercase_query = query.to_ascii_lowercase();
+    let canonical_marker_count = lowercase_query
+        .match_indices("/operations/reports/runs/")
+        .count();
+    let invalid_canonical_reference = canonical_marker_count != valid_spans.len();
+    let mut redacted = String::with_capacity(query.len());
+    let mut cursor = 0;
+    for (start, end) in valid_spans {
+        redacted.push_str(&query[cursor..start]);
+        redacted.push(' ');
+        redacted.push_str(CANONICAL_REPORT_OPERATION_TERM);
+        redacted.push(' ');
+        cursor = end;
+    }
+    redacted.push_str(&query[cursor..]);
+
+    NormalizedReportDiscoveryQuery {
+        text: redacted.to_ascii_lowercase().replace(['-', '_'], " "),
+        canonical_operations,
+        invalid_canonical_reference,
+    }
 }
 
 fn report_discovery_intent(query: Option<&str>) -> ReportDiscoveryIntent {
     let Some(query) = query else {
         return ReportDiscoveryIntent::Unspecified;
     };
-    let (normalized, canonical_operation_count) = normalize_report_discovery_query(query);
+    let normalized_query = normalize_report_discovery_query(query);
+    let normalized = normalized_query.text;
+    let canonical_operation_count = normalized_query.canonical_operations.len();
     let terms = normalized
         .split(|character: char| !character.is_ascii_alphanumeric())
         .filter(|term| !term.is_empty())
@@ -515,7 +546,9 @@ fn report_discovery_intent(query: Option<&str>) -> ReportDiscoveryIntent {
         || term_set.contains("report")
         || term_set.contains("reports")
         || normalized.contains("campaign delivery audit");
-    if query_blocks_report_authority(&terms, &normalized) {
+    if normalized_query.invalid_canonical_reference
+        || query_blocks_report_authority(&terms, &normalized)
+    {
         return ReportDiscoveryIntent::Unspecified;
     }
     if report_context
@@ -556,12 +589,15 @@ fn has_clear_report_result_retrieval(query: Option<&str>) -> bool {
     let Some(query) = query else {
         return false;
     };
-    let (normalized, canonical_operation_count) = normalize_report_discovery_query(query);
+    let normalized_query = normalize_report_discovery_query(query);
+    let normalized = normalized_query.text;
+    let canonical_operation_count = normalized_query.canonical_operations.len();
     let terms = normalized
         .split(|character: char| !character.is_ascii_alphanumeric())
         .filter(|term| !term.is_empty())
         .collect::<Vec<_>>();
-    if query_blocks_report_authority(&terms, &normalized)
+    if normalized_query.invalid_canonical_reference
+        || query_blocks_report_authority(&terms, &normalized)
         || !report_reference_identities_are_coherent(&terms, canonical_operation_count)
     {
         return false;
@@ -789,21 +825,51 @@ fn report_reference_identities_are_coherent(
     canonical_operation_count: usize,
 ) -> bool {
     canonical_operation_count <= 1
-        && canonical_operation_count + explicit_operation_run_identity_count(terms) <= 1
+        && canonical_operation_count + explicit_operation_run_identities(terms).len() <= 1
         && !has_unbound_or_cross_domain_reference(terms)
         && !has_unbound_non_operation_identity(terms)
 }
 
-fn explicit_operation_run_identity_count(terms: &[&str]) -> usize {
+fn explicit_operation_run_identities(terms: &[&str]) -> BTreeSet<String> {
     terms
         .iter()
         .enumerate()
-        .filter(|(index, term)| {
-            matches!(**term, "operation" | "operations" | "run" | "runs")
-                && reference_has_explicit_identity(terms, *index)
-                && !reference_labels_canonical_operation(terms, *index)
+        .filter_map(|(index, term)| {
+            if !matches!(*term, "operation" | "operations" | "run" | "runs")
+                || !reference_has_explicit_identity(terms, index)
+                || reference_labels_canonical_operation(terms, index)
+            {
+                return None;
+            }
+            let next = terms.get(index + 1).copied();
+            if let Some(value) = next.filter(|term| is_numeric_term(term)) {
+                return Some(format!("value:{value}"));
+            }
+            if matches!(next, Some("name" | "handle" | "id")) {
+                if let Some(value) = terms.get(index + 2).copied().filter(|term| {
+                    is_numeric_term(term) || *term == CANONICAL_REPORT_OPERATION_TERM
+                }) {
+                    return Some(format!("value:{value}"));
+                }
+                return Some(format!("label:{index}"));
+            }
+            let previous = index.checked_sub(1).map(|previous| terms[previous]);
+            let modifier = previous
+                .filter(|term| is_existing_reference_modifier(term))
+                .or_else(|| {
+                    if matches!(previous, Some("report" | "reports")) {
+                        index
+                            .checked_sub(2)
+                            .map(|modifier| terms[modifier])
+                            .filter(|term| is_existing_reference_modifier(term))
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or("existing");
+            Some(format!("modifier:{modifier}:{term}"))
         })
-        .count()
+        .collect()
 }
 
 fn reference_has_explicit_identity(terms: &[&str], reference_index: usize) -> bool {
@@ -830,36 +896,39 @@ fn reference_labels_canonical_operation(terms: &[&str], reference_index: usize) 
 }
 
 fn reference_has_non_report_premodifier(terms: &[&str], reference_index: usize) -> bool {
-    let Some(previous) = reference_index
-        .checked_sub(1)
-        .map(|previous| terms[previous])
-    else {
-        return false;
-    };
-    !(matches!(
-        previous,
-        "report"
-            | "reports"
-            | "s"
-            | "most"
-            | "and"
-            | "then"
-            | "use"
-            | "show"
-            | "return"
-            | "fetch"
-            | "start"
-            | "launch"
-            | "execute"
-            | "select"
-            | "choose"
-            | "please"
-            | "now"
-            | "me"
-            | "new"
-    ) || is_report_determiner(previous)
-        || is_existing_reference_modifier(previous)
-        || is_report_continuation_term(previous))
+    for previous in terms[..reference_index].iter().rev().copied() {
+        if matches!(previous, "report" | "reports") {
+            return false;
+        }
+        if matches!(
+            previous,
+            "and"
+                | "then"
+                | "use"
+                | "show"
+                | "return"
+                | "fetch"
+                | "start"
+                | "launch"
+                | "execute"
+                | "select"
+                | "choose"
+                | "please"
+                | "now"
+                | "me"
+        ) || is_report_continuation_term(previous)
+        {
+            return false;
+        }
+        if matches!(previous, "s" | "most" | "new")
+            || is_report_determiner(previous)
+            || is_existing_reference_modifier(previous)
+        {
+            continue;
+        }
+        return true;
+    }
+    false
 }
 
 fn has_unbound_non_operation_identity(terms: &[&str]) -> bool {
@@ -890,8 +959,13 @@ fn has_unbound_non_operation_identity(terms: &[&str]) -> bool {
                 });
         }
         let next = terms.get(index + 1).copied();
-        !matches!(previous, "first" | "page" | "pages" | "row" | "rows")
-            && !matches!(next, Some("page" | "pages" | "row" | "rows"))
+        let is_pagination_count = matches!(previous, "page" | "pages" | "row" | "rows")
+            || (matches!(next, Some("page" | "pages" | "row" | "rows"))
+                && matches!(
+                    previous,
+                    "first" | "show" | "fetch" | "get" | "list" | "retrieve" | "return" | "me"
+                ));
+        !is_pagination_count
     })
 }
 
@@ -2177,6 +2251,17 @@ mod tests {
             }),
             "an unrelated identity authorized a report-poll companion"
         );
+        let pagination_laundering = workflow_companions(
+            &authorized_results,
+            Some("show report result rows for advertiser 123, page 2"),
+        );
+        assert!(
+            pagination_laundering.iter().all(|companion| {
+                companion.tool_name != "gam_report_operation_poll"
+                    && companion.before_tool != "gam_report_operation_poll"
+            }),
+            "pagination syntax laundered an unrelated identity into a poll companion"
+        );
     }
 
     #[test]
@@ -2348,6 +2433,7 @@ mod tests {
             "tell me what happens if I poll the report operation",
             "will we poll report operation 123",
             "show report result rows for advertiser id 123",
+            "show report result rows for advertiser 123, page 2",
         ] {
             let mut results = vec![result("gam_report_operation_poll")];
             let resolution = resolve_report_discovery(
@@ -2385,6 +2471,7 @@ mod tests {
         for query in [
             "fetch rows from a completed report result",
             "show me rows from a completed report result",
+            "show first 100 rows from a completed report result",
         ] {
             let mut results = vec![result("gam_report_operation_poll")];
             let resolution = resolve_report_discovery(
@@ -2541,6 +2628,9 @@ mod tests {
             "wait for the existing report operation",
             "networks/123/operations/reports/runs/789",
             "networks/123/operations/reports/runs/run_456-abc",
+            "check operation handle `networks/123/operations/reports/runs/789`",
+            "check operation_name=networks/123/operations/reports/runs/789",
+            "check networks/123/operations/reports/runs/789 and poll networks/123/operations/reports/runs/789",
             "start monitoring the report operation",
             "start checking the report status",
             "start polling the report operation",
@@ -2667,6 +2757,7 @@ mod tests {
             "use network operation 123 and check the report",
             "use network operation 123 for my saved report",
             "use advertiser operation 123 for my saved report",
+            "use advertiser's current operation 123 for my saved report",
             "check report operation 123 and report operation 456",
             "check report operation 123 and 456",
             "check networks/111/operations/reports/runs/456 and networks/222/operations/reports/runs/789",
@@ -2677,6 +2768,8 @@ mod tests {
             "check the report and use run 123 for the advertiser",
             "check the report for network run 123",
             "show report result rows for advertiser id 123",
+            "show report result rows for advertiser 123, page 2",
+            "check operation_name=networks/123/operations/reports/runs/789?x=1",
             "start a report without waiting",
         ] {
             assert_eq!(
