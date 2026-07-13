@@ -1882,9 +1882,9 @@ fn report_start_tail_safety(
     }
     if terms.iter().enumerate().any(|(tail_index, term)| {
         let index = tail_start_index + tail_index;
-        (*term == "run" && !report_tail_run_is_noun(all_terms, index, clause_text, &term_spans))
-            || (is_report_start_action(term)
-                && report_start_object_end(&terms[tail_index + 1..]).is_some())
+        is_report_start_action(term)
+            && (*term != "run"
+                || !report_tail_run_is_noun(all_terms, index, clause_text, &term_spans))
     }) {
         return ReportStartTailSafety::Rejected;
     }
@@ -3408,6 +3408,9 @@ mod tests {
             "start a report then poll it and run its report",
             "start a report then poll the report, run it",
             "start a report then poll report operation 123 and run it",
+            "start a report then poll report operation 123 and start it",
+            "start a report then poll report operation 123 and launch it",
+            "start a report then poll report operation 123 and execute it",
         ] {
             assert_eq!(
                 report_discovery_intent(Some(query)),
