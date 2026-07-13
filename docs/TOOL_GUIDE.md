@@ -163,7 +163,9 @@ canonical operation resource name counts as that one identity, including opaque
 alphanumeric, hyphenated, or underscored operation IDs. Inline, quoted,
 backticked, and `operation_name=...` forms use the runtime validator; repeating
 the same canonical handle remains one identity, while distinct handles fail
-closed. Unbound identities and
+closed. Canonical handles retain local clause ownership, so quoting or
+assignment syntax cannot turn an advertiser, campaign, or other non-report
+reference into report authority. Unbound identities and
 identities related to or premodified by another domain block generic
 report-continuation fallback, and a label without a value cannot override a
 clear new start. Generic non-report operation references cannot inject the

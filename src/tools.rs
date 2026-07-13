@@ -8012,26 +8012,35 @@ mod tests {
     async fn report_discovery_requires_explicit_start_and_preserves_safe_continuation() {
         let server = AdManagerServer::new(crate::Settings::default()).expect("discovery server");
 
-        let explicit_start = server
-            .find_tools(Parameters(FindToolsArgs {
-                query: Some("start a campaign delivery audit with a saved report".to_string()),
-                group: Some("reports".to_string()),
-                read_only: Some(false),
-                limit: Some(1),
-                include_schema: true,
-            }))
-            .await
-            .expect("discover explicit report start")
-            .structured_content
-            .expect("explicit start discovery envelope");
-        let explicit_start = &explicit_start["data"];
-        let allowed = explicit_start["openai_allowed_tools"]
-            .as_array()
-            .expect("allowed report-start tools");
-        assert!(allowed.contains(&json!("gam_report_run")));
-        assert!(allowed.contains(&json!("gam_networks_list")));
-        assert!(allowed.contains(&json!("gam_network_catalog_list")));
-        assert!(explicit_start["schemas"].get("gam_report_run").is_some());
+        for query in [
+            "start a campaign delivery audit with a saved report",
+            "start a report and return its operation handle",
+            "start a report and fetch the first 100 rows",
+        ] {
+            let explicit_start = server
+                .find_tools(Parameters(FindToolsArgs {
+                    query: Some(query.to_string()),
+                    group: Some("reports".to_string()),
+                    read_only: Some(false),
+                    limit: Some(1),
+                    include_schema: true,
+                }))
+                .await
+                .expect("discover explicit report start")
+                .structured_content
+                .expect("explicit start discovery envelope");
+            let explicit_start = &explicit_start["data"];
+            let allowed = explicit_start["openai_allowed_tools"]
+                .as_array()
+                .expect("allowed report-start tools");
+            assert!(
+                allowed.contains(&json!("gam_report_run")),
+                "report start was not callable: {query}"
+            );
+            assert!(allowed.contains(&json!("gam_networks_list")));
+            assert!(allowed.contains(&json!("gam_network_catalog_list")));
+            assert!(explicit_start["schemas"].get("gam_report_run").is_some());
+        }
 
         let continuation = server
             .find_tools(Parameters(FindToolsArgs {
@@ -8089,6 +8098,10 @@ mod tests {
             "start a new report then poll the current run",
             "current report operation",
             "use the latest report operation",
+            "check the report and return its operation id",
+            "get the status of report operation 123",
+            "retrieve existing report operation 123",
+            "poll report operation 123 and fetch the first 100 rows",
             "check operation handle networks/123/operations/reports/runs/run_456-abc",
             "check operation handle `networks/123/operations/reports/runs/789`",
             "check operation_name=networks/123/operations/reports/runs/789",
@@ -8163,6 +8176,9 @@ mod tests {
             "use network operation 123 for my saved report",
             "use advertiser operation 123 for my saved report",
             "use advertiser's current operation 123 for my saved report",
+            "advertiser's operation: networks/123/operations/reports/runs/789",
+            "campaign=networks/123/operations/reports/runs/789",
+            "check report operation networks/123/operations/reports/runs/789 and advertiser operation networks/123/operations/reports/runs/789",
             "check report operation 123 and report operation 456",
             "check report operation 123 and 456",
             "check networks/111/operations/reports/runs/456 and networks/222/operations/reports/runs/789",
@@ -8175,6 +8191,7 @@ mod tests {
             "show report result rows for advertiser id 123",
             "show report result rows for advertiser 123, page 2",
             "check operation_name=networks/123/operations/reports/runs/789?x=1",
+            "check https://example.invalid/networks/123/operations/reports/runs/789",
             "start a report without waiting",
         ] {
             let ambiguous_action = server
