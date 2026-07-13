@@ -8071,7 +8071,16 @@ mod tests {
                 .all(|record| { record.get("explicit_executable_recovery").is_none() })
         );
 
-        for query in ["report run", "latest report run", "current report run"] {
+        for query in [
+            "report run",
+            "latest report run",
+            "current report run",
+            "latest run of the report",
+            "current run for the saved report",
+            "show the current run of the report",
+            "start a report, then poll the current run",
+            "start a report and check operation 123",
+        ] {
             let noun_reference = server
                 .find_tools(Parameters(FindToolsArgs {
                     query: Some(query.to_string()),
@@ -8102,6 +8111,61 @@ mod tests {
                     .is_some()
             );
             assert!(noun_reference["schemas"].get("gam_report_run").is_none());
+        }
+
+        for query in [
+            "start planning the saved report",
+            "execute a query against the report",
+            "start server for the report",
+        ] {
+            let ambiguous_action = server
+                .find_tools(Parameters(FindToolsArgs {
+                    query: Some(query.to_string()),
+                    group: Some("reports".to_string()),
+                    read_only: Some(false),
+                    limit: Some(3),
+                    include_schema: true,
+                }))
+                .await
+                .expect("discover ambiguous report action")
+                .structured_content
+                .expect("ambiguous report-action discovery envelope");
+            let ambiguous_action = &ambiguous_action["data"];
+            assert!(
+                !ambiguous_action["openai_allowed_tools"]
+                    .as_array()
+                    .expect("ambiguous-action allowed tools")
+                    .contains(&json!("gam_report_run")),
+                "report start was callable for unrelated action: {query}"
+            );
+            assert!(ambiguous_action["schemas"].get("gam_report_run").is_none());
+        }
+
+        for query in [
+            "run the current-quarter delivery report",
+            "run the latest report",
+        ] {
+            let explicit_start = server
+                .find_tools(Parameters(FindToolsArgs {
+                    query: Some(query.to_string()),
+                    group: Some("reports".to_string()),
+                    read_only: Some(false),
+                    limit: Some(3),
+                    include_schema: true,
+                }))
+                .await
+                .expect("discover explicit report start")
+                .structured_content
+                .expect("explicit report-start discovery envelope");
+            let explicit_start = &explicit_start["data"];
+            assert!(
+                explicit_start["openai_allowed_tools"]
+                    .as_array()
+                    .expect("explicit-start allowed tools")
+                    .contains(&json!("gam_report_run")),
+                "explicit report start was not callable: {query}"
+            );
+            assert!(explicit_start["schemas"].get("gam_report_run").is_some());
         }
 
         let whitespace_group = server

@@ -305,9 +305,12 @@ before ingestion. Starting a report creates an upstream job, so
 `gam_report_run` is registered truthfully as non-read-only and is callable from
 discovery only when the bounded toolkit query places an explicit start, run,
 launch, or execute action before a report object and the caller sets
-`read_only=false`. Bare, latest, and current report-run noun phrases expose only
-the GET-based existing-operation continuation. Report start is not a canned
-retry example.
+`read_only=false`. Only recognized report-object modifiers may occur between
+that action and object; unrelated verbs or objects fail closed. Bare, latest,
+current, and reverse `run of/for ... report` noun phrases expose only the
+GET-based existing-operation continuation. Any explicit existing operation or
+run reference takes precedence over a start phrase. Report start is not a
+canned retry example.
 
 Report runs send the provider-required empty POST body. Definitive 4xx run
 rejections are normal upstream API failures. Once the POST may otherwise have

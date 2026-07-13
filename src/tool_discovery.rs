@@ -476,20 +476,39 @@ fn report_discovery_intent(query: Option<&str>) -> ReportDiscoveryIntent {
     let strong_continuation_action = terms.iter().any(|term| is_report_continuation_term(term));
     let wait_action = term_set.contains("wait") || term_set.contains("waiting");
     let canonical_operation_handle = normalized.contains("/operations/reports/runs/");
+    let operation_id_reference = terms.windows(2).any(|window| {
+        matches!(window[0], "operation" | "operations")
+            && (window[1] == "id"
+                || window[1]
+                    .chars()
+                    .all(|character| character.is_ascii_digit()))
+    });
+    let existing_operation_modifier = operation_context
+        && term_set
+            .iter()
+            .any(|term| matches!(*term, "existing" | "current" | "latest" | "active"));
     let explicit_existing_operation_reference = canonical_operation_handle
         || normalized.contains("existing report operation")
         || normalized.contains("existing operation")
+        || normalized.contains("current operation")
+        || normalized.contains("latest operation")
         || normalized.contains("operation name")
-        || normalized.contains("operation handle");
+        || normalized.contains("operation handle")
+        || normalized.contains("operation id")
+        || operation_id_reference
+        || existing_operation_modifier;
     let report_run_noun_reference = has_report_run_noun_reference(&terms);
-    if explicit_existing_operation_reference {
+    let reverse_report_run_reference = has_reverse_report_run_reference(&terms);
+    if explicit_existing_operation_reference
+        || report_run_noun_reference
+        || reverse_report_run_reference
+    {
         return ReportDiscoveryIntent::ExistingOperationContinuation;
     }
 
     if clear_new_run_action {
         ReportDiscoveryIntent::ExplicitNewRun
-    } else if report_run_noun_reference
-        || normalized.contains("continue waiting")
+    } else if normalized.contains("continue waiting")
         || (strong_continuation_action && (report_context || operation_context))
         || (wait_action && (report_context || operation_context))
     {
@@ -507,48 +526,97 @@ fn has_clear_report_start_action(terms: &[&str], report_context: bool) -> bool {
         if !matches!(*term, "start" | "run" | "launch" | "execute") {
             return false;
         }
-        if terms[..index]
-            .iter()
-            .any(|term| is_report_continuation_term(term))
-        {
+        if terms[..index].iter().any(|term| {
+            is_report_continuation_term(term)
+                || matches!(*term, "existing" | "current" | "latest" | "recent")
+        }) {
             return false;
         }
-        let mut significant_terms = 0_u8;
         for candidate in &terms[index + 1..] {
-            if matches!(*candidate, "a" | "an" | "the" | "one" | "new" | "saved") {
-                continue;
-            }
-            significant_terms = significant_terms.saturating_add(1);
-            if significant_terms > 8
-                || is_report_continuation_term(candidate)
-                || matches!(
-                    *candidate,
-                    "latest"
-                        | "current"
-                        | "operation"
-                        | "operations"
-                        | "handle"
-                        | "status"
-                        | "result"
-                        | "results"
-                )
-            {
-                return false;
-            }
             if matches!(*candidate, "report" | "reports") {
                 return true;
+            }
+            if !is_report_object_modifier(candidate) {
+                return false;
             }
         }
         false
     })
 }
 
+fn is_report_object_modifier(term: &str) -> bool {
+    matches!(
+        term,
+        "a" | "an"
+            | "the"
+            | "one"
+            | "new"
+            | "saved"
+            | "latest"
+            | "current"
+            | "daily"
+            | "weekly"
+            | "monthly"
+            | "quarter"
+            | "quarterly"
+            | "annual"
+            | "campaign"
+            | "delivery"
+            | "audit"
+            | "performance"
+            | "inventory"
+            | "revenue"
+            | "sales"
+            | "advertiser"
+            | "google"
+            | "ad"
+            | "manager"
+            | "with"
+    )
+}
+
 fn has_report_run_noun_reference(terms: &[&str]) -> bool {
     terms.iter().enumerate().any(|(index, term)| {
-        matches!(*term, "run" | "runs")
-            && terms[..index]
-                .iter()
-                .any(|candidate| matches!(*candidate, "report" | "reports"))
+        if !matches!(*term, "run" | "runs") {
+            return false;
+        }
+        let Some(report_index) = terms[..index]
+            .iter()
+            .rposition(|candidate| matches!(*candidate, "report" | "reports"))
+        else {
+            return false;
+        };
+        let action_precedes_report = terms[..report_index]
+            .iter()
+            .any(|candidate| matches!(*candidate, "start" | "run" | "launch" | "execute"));
+        let existing_reference_modifier = terms[..index].iter().any(|candidate| {
+            is_report_continuation_term(candidate)
+                || matches!(*candidate, "existing" | "current" | "latest" | "recent")
+        });
+        !action_precedes_report || existing_reference_modifier
+    })
+}
+
+fn has_reverse_report_run_reference(terms: &[&str]) -> bool {
+    terms.iter().enumerate().any(|(index, term)| {
+        if *term != "run" {
+            return false;
+        }
+        let report_follows = terms[index + 1..]
+            .iter()
+            .any(|candidate| matches!(*candidate, "report" | "reports"));
+        if !report_follows {
+            return false;
+        }
+        let referenced_before_run = terms[..index].iter().any(|candidate| {
+            is_report_continuation_term(candidate)
+                || matches!(*candidate, "existing" | "current" | "latest" | "recent")
+        });
+        let relational_noun = terms[index + 1..]
+            .iter()
+            .find(|candidate| !matches!(**candidate, "a" | "an" | "the" | "one" | "saved"))
+            .is_some_and(|candidate| matches!(*candidate, "of" | "for"));
+        referenced_before_run || relational_noun
     })
 }
 
@@ -1481,6 +1549,12 @@ mod tests {
             "show the current report run",
             "report runs",
             "start the latest report run",
+            "latest run of the report",
+            "current run for the saved report",
+            "show the current run of the report",
+            "run of the report",
+            "start a report, then poll the current run",
+            "start a report and check operation 123",
         ] {
             let mut results = vec![result("gam_report_run")];
             let companions = workflow_companions(&results, Some(query));
@@ -1535,6 +1609,12 @@ mod tests {
             "show the current report run",
             "report runs",
             "start the latest report run",
+            "latest run of the report",
+            "current run for the saved report",
+            "show the current run of the report",
+            "run of the report",
+            "start a report, then poll the current run",
+            "start a report and check operation 123",
         ] {
             assert_eq!(
                 report_discovery_intent(Some(query)),
@@ -1553,6 +1633,8 @@ mod tests {
         for query in [
             "start a report",
             "run the report",
+            "run the current-quarter delivery report",
+            "run the latest report",
             "launch a saved report",
             "execute the report",
             "start a saved report then monitor its status",
@@ -1576,6 +1658,17 @@ mod tests {
                 report_discovery_intent(Some(query)),
                 ReportDiscoveryIntent::ExistingOperationContinuation,
                 "explicit existing-operation reference was ignored: {query}"
+            );
+        }
+        for query in [
+            "start planning the saved report",
+            "execute a query against the report",
+            "start server for the report",
+        ] {
+            assert_eq!(
+                report_discovery_intent(Some(query)),
+                ReportDiscoveryIntent::Unspecified,
+                "unrelated action was treated as a report start: {query}"
             );
         }
     }

@@ -193,8 +193,11 @@ the operating system temporary directory.
 Reading saved-report definitions, operation state, and result pages is
 read-only. Starting a saved report creates an upstream job and is explicitly
 non-read-only. Discovery authorizes that start only when an action verb precedes
-a report object under `read_only=false`; bare, latest, and current report-run
-noun phrases fail closed to existing-operation polling.
+a report object under `read_only=false` with only recognized report modifiers
+between them. Unrelated intervening language fails closed. Bare, latest,
+current, and reverse `run of/for ... report` noun phrases fail closed to
+existing-operation polling, and an explicit existing operation or run
+reference takes precedence over a start phrase.
 This server bounds that surface by:
 
 - requiring an explicit saved report identifier
