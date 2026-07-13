@@ -489,14 +489,15 @@ fn normalize_report_discovery_query(query: &str) -> NormalizedReportDiscoveryQue
                 bytes[start - 1],
                 b'=' | b'`' | b'\'' | b'"' | b'(' | b'[' | b'{' | b',' | b':'
             );
+        let punctuation_is_terminal = end < bytes.len()
+            && matches!(bytes[end], b',' | b'.' | b';' | b':' | b'!' | b'?')
+            && (end + 1 == bytes.len()
+                || bytes[end + 1].is_ascii_whitespace()
+                || matches!(bytes[end + 1], b'`' | b'\'' | b'"' | b')' | b']' | b'}'));
         let after_is_boundary = end == bytes.len()
             || bytes[end].is_ascii_whitespace()
-            || matches!(
-                bytes[end],
-                b'`' | b'\'' | b'"' | b')' | b']' | b'}' | b',' | b'.' | b';' | b':' | b'!'
-            )
-            || (bytes[end] == b'?'
-                && (end + 1 == bytes.len() || bytes[end + 1].is_ascii_whitespace()));
+            || matches!(bytes[end], b'`' | b'\'' | b'"' | b')' | b']' | b'}')
+            || punctuation_is_terminal;
         let candidate = &query[start..end];
         if before_is_boundary && after_is_boundary && validate_operation_name(candidate).is_ok() {
             canonical_operations.insert(candidate.to_string());
@@ -809,15 +810,39 @@ fn reference_has_non_report_relation_target(terms: &[&str], reference_index: usi
         .unwrap_or_default();
     let Some(relation_index) = local_tail
         .iter()
-        .position(|term| matches!(*term, "for" | "of"))
+        .position(|term| matches!(*term, "for" | "of" | "with" | "to"))
     else {
         return false;
     };
+    let relation = local_tail[relation_index];
     let target = &local_tail[relation_index + 1..];
-    !target.is_empty()
-        && !target
+    if target.is_empty()
+        || target
             .iter()
             .any(|term| matches!(*term, "report" | "reports"))
+    {
+        return false;
+    }
+    if matches!(relation, "for" | "of") {
+        return true;
+    }
+    target.iter().any(|term| {
+        matches!(
+            *term,
+            "advertiser"
+                | "campaign"
+                | "network"
+                | "networks"
+                | "ad"
+                | "unit"
+                | "line"
+                | "item"
+                | "order"
+                | "creative"
+                | "deployment"
+                | "server"
+        )
+    })
 }
 
 fn report_reference_identities_are_coherent(
@@ -920,11 +945,33 @@ fn reference_has_non_report_premodifier(terms: &[&str], reference_index: usize) 
                 | "please"
                 | "now"
                 | "me"
+                | "i"
+                | "we"
+                | "you"
+                | "want"
+                | "need"
+                | "can"
+                | "could"
+                | "would"
+                | "will"
+                | "s"
+                | "its"
+                | "most"
+                | "new"
+                | "for"
+                | "of"
+                | "to"
+                | "with"
+                | "status"
+                | "result"
+                | "results"
+                | "row"
+                | "rows"
+                | "page"
+                | "pages"
+                | "first"
+                | CANONICAL_REPORT_OPERATION_TERM
         ) || is_report_continuation_term(previous)
-        {
-            return false;
-        }
-        if matches!(previous, "s" | "its" | "most" | "new")
             || is_report_determiner(previous)
             || is_existing_reference_modifier(previous)
         {
@@ -980,11 +1027,17 @@ fn has_unbound_canonical_reference(terms: &[&str]) -> bool {
                     | "please"
                     | "now"
                     | "me"
+                    | "i"
+                    | "we"
+                    | "you"
+                    | "want"
+                    | "need"
+                    | "can"
+                    | "could"
+                    | "would"
+                    | "will"
             ) || is_report_continuation_term(previous)
-            {
-                return false;
-            }
-            if matches!(previous, "s" | "its" | "most" | "new")
+                || matches!(previous, "s" | "its" | "most" | "new")
                 || is_report_determiner(previous)
                 || is_existing_reference_modifier(previous)
                 || matches!(
@@ -1000,6 +1053,7 @@ fn has_unbound_canonical_reference(terms: &[&str]) -> bool {
                         | "page"
                         | "pages"
                         | "first"
+                        | CANONICAL_REPORT_OPERATION_TERM
                 )
             {
                 cursor = previous_index;
@@ -1038,15 +1092,67 @@ fn has_unbound_non_operation_identity(terms: &[&str]) -> bool {
                     matches!(reference, "operation" | "operations" | "run" | "runs")
                 });
         }
-        let next = terms.get(index + 1).copied();
-        let is_pagination_count = matches!(previous, "page" | "pages" | "row" | "rows")
-            || (matches!(next, Some("page" | "pages" | "row" | "rows"))
-                && matches!(
-                    previous,
-                    "first" | "show" | "fetch" | "get" | "list" | "retrieve" | "return" | "me"
-                ));
-        !is_pagination_count
+        !numeric_is_bounded_pagination_count(terms, index)
     })
+}
+
+fn numeric_is_bounded_pagination_count(terms: &[&str], index: usize) -> bool {
+    let Some(previous) = index.checked_sub(1).map(|previous| terms[previous]) else {
+        return false;
+    };
+    if matches!(previous, "page" | "pages" | "row" | "rows") {
+        return true;
+    }
+    if !matches!(
+        previous,
+        "first" | "show" | "fetch" | "get" | "list" | "retrieve" | "return" | "me"
+    ) {
+        return false;
+    }
+    let mut found_unit = false;
+    for term in terms[index + 1..].iter().take(4).copied() {
+        if matches!(term, "page" | "pages" | "row" | "rows") {
+            found_unit = true;
+            break;
+        }
+        if !matches!(term, "the" | "report" | "reports" | "result" | "results") {
+            return false;
+        }
+    }
+    if !found_unit {
+        return false;
+    }
+    for prefix in terms[..index].iter().rev().copied() {
+        if matches!(prefix, "and" | "then") {
+            return true;
+        }
+        if matches!(prefix, "report" | "reports") {
+            return true;
+        }
+        if matches!(
+            prefix,
+            "show"
+                | "fetch"
+                | "get"
+                | "list"
+                | "retrieve"
+                | "return"
+                | "me"
+                | "first"
+                | "the"
+                | "its"
+                | "result"
+                | "results"
+                | "row"
+                | "rows"
+                | "page"
+                | "pages"
+        ) {
+            continue;
+        }
+        return false;
+    }
+    true
 }
 
 fn has_unbound_or_cross_domain_reference(terms: &[&str]) -> bool {
@@ -1112,6 +1218,12 @@ fn is_report_operation_bridge_term(term: &str) -> bool {
                 | "s"
                 | "most"
                 | "show"
+                | "fetch"
+                | "fetching"
+                | "get"
+                | "getting"
+                | "retrieve"
+                | "retrieving"
                 | "return"
                 | "returning"
                 | "use"
@@ -2697,6 +2809,9 @@ mod tests {
             "get the status of report operation 123",
             "retrieve existing report operation 123",
             "poll report operation 123 and fetch the first 100 rows",
+            "check the report and retrieve its operation id",
+            "poll report operation 123 and get the first 100 report result rows",
+            "poll report operation 123 to completion",
         ] {
             let mut results = vec![result("gam_report_run")];
             let companions = workflow_companions(&results, Some(query));
@@ -2810,6 +2925,8 @@ mod tests {
             "start a report and show the operation id",
             "start a report and return its operation handle",
             "start a report and fetch the first 100 rows",
+            "start a report and get its operation id",
+            "start a report and retrieve its first 100 result rows",
             "start a campaign delivery audit with my saved report",
             "launch the saved report and check its status",
             "can you start a report",
@@ -2872,6 +2989,11 @@ mod tests {
             "use advertiser's current operation 123 for my saved report",
             "advertiser's operation: networks/123/operations/reports/runs/789",
             "campaign=networks/123/operations/reports/runs/789",
+            "advertiser_get_current_operation=networks/123/operations/reports/runs/789",
+            "check report operation networks/123/operations/reports/runs/789 and advertiser get operation networks/123/operations/reports/runs/789",
+            "check operation_name=networks/123/operations/reports/runs/789 with advertiser",
+            "check report operation 123 with campaign",
+            "check report operation 123 to advertiser",
             "check report operation networks/123/operations/reports/runs/789 and advertiser operation networks/123/operations/reports/runs/789",
             "check report operation 123 and report operation 456",
             "check report operation 123 and 456",
@@ -2885,6 +3007,8 @@ mod tests {
             "show report result rows for advertiser id 123",
             "show report result rows for advertiser 123, page 2",
             "check operation_name=networks/123/operations/reports/runs/789?x=1",
+            "check operation_name=networks/123/operations/reports/runs/789.report",
+            "check networks/123/operations/reports/runs/789 and networks/123/operations/reports/runs/789.report",
             "check https://example.invalid/networks/123/operations/reports/runs/789",
             "start a report without waiting",
         ] {
