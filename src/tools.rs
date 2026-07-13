@@ -2038,6 +2038,17 @@ impl AdManagerServer {
             Ok(value) => value,
             Err(err) => return Ok(contract::error(err, started)),
         };
+        if expected_report_name.as_deref().is_some_and(|report_name| {
+            operation_name.split('/').nth(1) != report_name.split('/').nth(1)
+        }) {
+            return Ok(contract::error(
+                AdManagerError::invalid(
+                    "expected_report_name",
+                    "must use the same network as operation_name",
+                ),
+                started,
+            ));
+        }
         let (timeout, initial_interval) = match report_poll_controls(
             args.poll_timeout_ms,
             args.initial_poll_interval_ms,
@@ -8604,6 +8615,41 @@ mod tests {
         assert_eq!(requests.len(), 1);
         assert!(requests[0].starts_with(&format!("GET /v1/{operation_name} ")));
         assert!(requests.iter().all(|request| !request.starts_with("POST ")));
+    }
+
+    #[tokio::test]
+    async fn report_poll_rejects_cross_network_expected_report_before_provider_access() {
+        let operation_name = "networks/123/operations/reports/runs/789";
+        let (base_url, requests, server) = serve_report_http_sequence(Vec::new());
+        let client = AdManagerClient::for_test_api_base_url(base_url);
+        let server_under_test = AdManagerServer::new(crate::Settings::default())
+            .expect("build cross-network report poll server")
+            .with_test_client(client);
+        let result = server_under_test
+            .gam_report_operation_poll(Parameters(ReportOperationPollArgs {
+                operation_name: operation_name.to_string(),
+                expected_report_name: Some("networks/999/reports/456".to_string()),
+                fetch_first_page: Some(false),
+                result_page_size: None,
+                poll_timeout_ms: Some(1_000),
+                initial_poll_interval_ms: Some(5_000),
+            }))
+            .await
+            .expect("reject cross-network report binding");
+        let response = result
+            .structured_content
+            .expect("cross-network validation response");
+        assert_eq!(response["error"]["code"], "invalid_input");
+        assert!(response["error"].get("detail").is_none());
+        assert!(!response.to_string().contains("continuation"));
+
+        server.join().expect("join unused report poll server");
+        assert!(
+            requests
+                .lock()
+                .expect("lock unused report poll requests")
+                .is_empty()
+        );
     }
 
     #[tokio::test]
