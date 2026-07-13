@@ -565,14 +565,13 @@ fn report_discovery_intent(query: Option<&str>) -> ReportDiscoveryIntent {
     let (has_new_run_action_object, clear_new_run_action, rejected_new_run_action) =
         match new_run_action {
             ReportStartActionTail::NoCandidate => (false, false, false),
-            ReportStartActionTail::Candidate {
-                tail,
-                tail_start_index,
-            } => match report_start_tail_safety(tail, tail_start_index, &clause_text) {
-                ReportStartTailSafety::Safe => (true, true, false),
-                ReportStartTailSafety::Unsupported => (true, false, false),
-                ReportStartTailSafety::Rejected => (true, false, true),
-            },
+            ReportStartActionTail::Candidate { tail_start_index } => {
+                match report_start_tail_safety(&terms, tail_start_index, &clause_text) {
+                    ReportStartTailSafety::Safe => (true, true, false),
+                    ReportStartTailSafety::Unsupported => (true, false, false),
+                    ReportStartTailSafety::Rejected => (true, false, true),
+                }
+            }
             ReportStartActionTail::Rejected => (true, false, true),
         };
     if rejected_new_run_action {
@@ -1452,12 +1451,9 @@ fn is_report_reference_article(term: &str) -> bool {
     is_report_determiner(term) || term == "saved"
 }
 
-enum ReportStartActionTail<'a> {
+enum ReportStartActionTail {
     NoCandidate,
-    Candidate {
-        tail: &'a [&'a str],
-        tail_start_index: usize,
-    },
+    Candidate { tail_start_index: usize },
     Rejected,
 }
 
@@ -1467,11 +1463,11 @@ enum ReportStartTailSafety {
     Rejected,
 }
 
-fn report_start_action_tail<'a>(
-    terms: &'a [&'a str],
+fn report_start_action_tail(
+    terms: &[&str],
     report_context: bool,
     clause_text: &str,
-) -> ReportStartActionTail<'a> {
+) -> ReportStartActionTail {
     if !report_context {
         return ReportStartActionTail::NoCandidate;
     }
@@ -1486,7 +1482,6 @@ fn report_start_action_tail<'a>(
         };
         let report_index = index + consumed;
         let tail_start_index = report_index + 1;
-        let tail = &object_terms[consumed..];
         if has_non_execution_report_language(terms, index, clause_text, &term_spans)
             || report_action_object_crosses_clause_boundary(
                 clause_text,
@@ -1497,10 +1492,7 @@ fn report_start_action_tail<'a>(
         {
             return ReportStartActionTail::Rejected;
         }
-        return ReportStartActionTail::Candidate {
-            tail,
-            tail_start_index,
-        };
+        return ReportStartActionTail::Candidate { tail_start_index };
     }
     ReportStartActionTail::NoCandidate
 }
@@ -1865,10 +1857,13 @@ fn campaign_delivery_audit_report_object_end(terms: &[&str]) -> Option<usize> {
 }
 
 fn report_start_tail_safety(
-    terms: &[&str],
+    all_terms: &[&str],
     tail_start_index: usize,
     clause_text: &str,
 ) -> ReportStartTailSafety {
+    let Some(terms) = all_terms.get(tail_start_index..) else {
+        return ReportStartTailSafety::Rejected;
+    };
     if terms.is_empty() {
         return ReportStartTailSafety::Safe;
     }
@@ -1885,11 +1880,11 @@ fn report_start_tail_safety(
     if report_range_has_invalid_separator(clause_text, *report_end, *tail_end, true) {
         return ReportStartTailSafety::Rejected;
     }
-    if terms.iter().enumerate().any(|(index, term)| {
-        (*term == "run"
-            && !report_tail_run_is_noun(terms, index, tail_start_index, clause_text, &term_spans))
+    if terms.iter().enumerate().any(|(tail_index, term)| {
+        let index = tail_start_index + tail_index;
+        (*term == "run" && !report_tail_run_is_noun(all_terms, index, clause_text, &term_spans))
             || (is_report_start_action(term)
-                && report_start_object_end(&terms[index + 1..]).is_some())
+                && report_start_object_end(&terms[tail_index + 1..]).is_some())
     }) {
         return ReportStartTailSafety::Rejected;
     }
@@ -1986,7 +1981,6 @@ fn report_start_tail_safety(
 fn report_tail_run_is_noun(
     terms: &[&str],
     index: usize,
-    tail_start_index: usize,
     clause_text: &str,
     term_spans: &[(usize, usize)],
 ) -> bool {
@@ -1994,30 +1988,18 @@ fn report_tail_run_is_noun(
         .checked_sub(1)
         .and_then(|previous| terms.get(previous));
     let next = terms.get(index + 1);
-    let global_index = tail_start_index + index;
-    let previous_is_adjacent_noun =
-        previous.is_some_and(|term| {
-            is_report_determiner(term)
-                || matches!(
-                    *term,
-                    "its" | "new" | "current" | "latest" | "recent" | "existing" | "report"
-                )
-        }) && global_index.checked_sub(1).is_some_and(|previous_index| {
-            report_terms_have_only_word_separator(
-                clause_text,
-                term_spans,
-                previous_index,
-                global_index,
+    let previous_is_adjacent_noun = previous.is_some_and(|term| {
+        is_report_determiner(term)
+            || matches!(
+                *term,
+                "its" | "new" | "current" | "latest" | "recent" | "existing" | "report"
             )
-        });
+    }) && index.checked_sub(1).is_some_and(|previous_index| {
+        report_terms_have_only_word_separator(clause_text, term_spans, previous_index, index)
+    });
     let next_is_adjacent_noun = next
         .is_some_and(|term| matches!(*term, "id" | "name" | "handle" | "of"))
-        && report_terms_have_only_word_separator(
-            clause_text,
-            term_spans,
-            global_index,
-            global_index + 1,
-        );
+        && report_terms_have_only_word_separator(clause_text, term_spans, index, index + 1);
     previous_is_adjacent_noun || next_is_adjacent_noun
 }
 
