@@ -867,11 +867,17 @@ impl AdManagerServer {
         let started = Instant::now();
         let FindToolsArgs {
             query,
-            group,
+            mut group,
             read_only,
             limit,
             include_schema,
         } = args;
+        if group
+            .as_deref()
+            .is_some_and(|group| group.trim().is_empty())
+        {
+            group = None;
+        }
         let group_filter_supplied = group.is_some();
         if limit == Some(0) {
             return Ok(contract::error(
@@ -3303,6 +3309,13 @@ fn report_poll_requires_remediation(error: &AdManagerError) -> bool {
     matches!(error, AdManagerError::AuthBootstrap(_))
         || matches!(
             error,
+            AdManagerError::UpstreamContract {
+                field: "operation.completed_report_identity",
+                ..
+            }
+        )
+        || matches!(
+            error,
             AdManagerError::UpstreamApi { status, .. }
                 if (400..500).contains(status) && !matches!(*status, 408 | 429)
         )
@@ -3326,10 +3339,19 @@ async fn poll_report_operation_tool_result(
         Ok(value) => value,
         Err(failure) => {
             let remediation_required = report_poll_requires_remediation(&failure.error);
-            let remediation_action = if matches!(&failure.error, AdManagerError::AuthBootstrap(_)) {
-                "Authentication is not ready, so no report poll was sent. Correct the credential or access configuration before issuing the GET-only poll again."
-            } else {
-                "The provider definitively rejected this poll request. Correct access, operation identity, or request state before issuing another GET; the operation's terminal state was not observed."
+            let remediation_action = match &failure.error {
+                AdManagerError::AuthBootstrap(_) => {
+                    "Authentication is not ready, so no report poll was sent. Correct the credential or access configuration before issuing the GET-only poll again."
+                }
+                AdManagerError::UpstreamContract {
+                    field: "operation.completed_report_identity",
+                    ..
+                } => {
+                    "The completed operation did not expose a report identity that can be safely reused. Inspect the operation and saved report before issuing another request."
+                }
+                _ => {
+                    "The provider definitively rejected this poll request. Correct access, operation identity, or request state before issuing another GET; the operation's terminal state was not observed."
+                }
             };
             let continuation_timeout_ms = match &failure.error {
                 AdManagerError::ReportRunTimeout { .. } => {
@@ -3412,24 +3434,14 @@ async fn poll_report_operation_tool_result(
                 return contract::error_with_detail(err, page_handoff.receipt(), started);
             }
             Err(err) => {
-                return contract::error_with_detail(
-                    err,
-                    json!({
-                        "operation_name": options.operation_name,
-                        "started_new_run": options.started_new_run,
-                        "report_result": completed.report_result,
-                        "continuation": {
-                            "tool": "gam_report_result_rows",
-                            "arguments": {
-                                "result_name": completed.report_result,
-                                "page_size": options.result_page_size,
-                                "page_token": null
-                            },
-                            "starts_new_run": false
-                        }
-                    }),
-                    started,
+                let detail = report_result_fetch_failure_detail(
+                    &err,
+                    options.operation_name,
+                    options.started_new_run,
+                    options.result_page_size,
+                    &completed,
                 );
+                return contract::error_with_detail(err, detail, started);
             }
         }
     } else {
@@ -3468,6 +3480,55 @@ async fn poll_report_operation_tool_result(
         handoff,
         started,
     )
+}
+
+fn report_result_fetch_requires_remediation(error: &AdManagerError) -> bool {
+    matches!(error, AdManagerError::AuthBootstrap(_))
+        || matches!(
+            error,
+            AdManagerError::UpstreamApi { status, .. }
+                if (400..500).contains(status) && !matches!(*status, 408 | 429)
+        )
+}
+
+fn report_result_fetch_failure_detail(
+    error: &AdManagerError,
+    operation_name: &str,
+    started_new_run: bool,
+    page_size: Option<u32>,
+    completed: &CompletedReportRun,
+) -> Value {
+    if report_result_fetch_requires_remediation(error) {
+        json!({
+            "operation_name": operation_name,
+            "started_new_run": started_new_run,
+            "report_name": completed.report_name,
+            "report_result": completed.report_result,
+            "fetch_outcome": "remediation_required",
+            "continuation_available": false,
+            "automatic_replay_safe": false,
+            "operator_action": "Correct authentication, access, or the result resource identity before fetching rows again. Preserve the report_result handle for inspection; do not automatically replay the unchanged request."
+        })
+    } else {
+        json!({
+            "operation_name": operation_name,
+            "started_new_run": started_new_run,
+            "report_name": completed.report_name,
+            "report_result": completed.report_result,
+            "fetch_outcome": "retryable_failure",
+            "continuation_available": true,
+            "automatic_replay_safe": true,
+            "continuation": {
+                "tool": "gam_report_result_rows",
+                "arguments": {
+                    "result_name": completed.report_result,
+                    "page_size": page_size,
+                    "page_token": null
+                },
+                "starts_new_run": false
+            }
+        })
+    }
 }
 
 fn report_poll_controls(
@@ -7924,6 +7985,29 @@ mod tests {
                 .all(|record| { record.get("explicit_executable_recovery").is_none() })
         );
 
+        let whitespace_group = server
+            .find_tools(Parameters(FindToolsArgs {
+                query: Some("check the status of an existing report operation".to_string()),
+                group: Some("  \t ".to_string()),
+                read_only: Some(false),
+                limit: Some(1),
+                include_schema: true,
+            }))
+            .await
+            .expect("treat whitespace group as omitted")
+            .structured_content
+            .expect("whitespace-group discovery envelope");
+        assert!(
+            whitespace_group["data"]["openai_allowed_tools"]
+                .as_array()
+                .expect("whitespace-group allowed tools")
+                .contains(&json!("gam_report_operation_poll"))
+        );
+        assert_eq!(
+            whitespace_group["data"]["request_summary"]["group_supplied"],
+            false
+        );
+
         let default_read_only = server
             .find_tools(Parameters(FindToolsArgs {
                 query: Some("start a campaign delivery audit with a saved report".to_string()),
@@ -8338,7 +8422,7 @@ mod tests {
     #[tokio::test]
     async fn report_run_transport_status_after_dispatch_is_not_replay_safe() {
         let (base_url, requests, server) =
-            serve_report_http_sequence(vec![(503, json!({"error":"temporarily unavailable"}))]);
+            serve_report_http_sequence(vec![(408, json!({"error":"request timeout"}))]);
         let client = AdManagerClient::for_test_api_base_url(base_url);
         let server_under_test = AdManagerServer::new(crate::Settings::default())
             .expect("build uncertain report-run server")
@@ -8449,6 +8533,100 @@ mod tests {
         assert_eq!(requests.len(), 1);
         assert!(requests[0].starts_with(&format!("GET /v1/{operation_name} ")));
         assert!(requests.iter().all(|request| !request.starts_with("POST ")));
+    }
+
+    #[tokio::test]
+    async fn completed_poll_derives_missing_report_binding_from_result_name() {
+        let operation_name = "networks/123/operations/reports/runs/789";
+        let report_result = "networks/123/reports/456/results/987";
+        let (base_url, requests, server) = serve_report_http_sequence(vec![(
+            200,
+            json!({
+                "name": operation_name,
+                "done": true,
+                "response": {"reportResult": report_result}
+            }),
+        )]);
+        let client = AdManagerClient::for_test_api_base_url(base_url);
+        let server_under_test = AdManagerServer::new(crate::Settings::default())
+            .expect("build derived-binding report server")
+            .with_test_client(client);
+        let result = server_under_test
+            .gam_report_operation_poll(Parameters(ReportOperationPollArgs {
+                operation_name: operation_name.to_string(),
+                expected_report_name: None,
+                fetch_first_page: Some(false),
+                result_page_size: None,
+                poll_timeout_ms: Some(1_000),
+                initial_poll_interval_ms: Some(5_000),
+            }))
+            .await
+            .expect("poll completed operation with derivable report binding");
+        let response = result.structured_content.expect("derived-binding response");
+        assert_eq!(response["ok"], true);
+        assert_eq!(response["data"]["report_name"], "networks/123/reports/456");
+        assert_eq!(response["data"]["report_result"], report_result);
+        assert_eq!(
+            response["data"]["operation"]["metadata"]["report"],
+            "networks/123/reports/456"
+        );
+        server.join().expect("join derived-binding report server");
+        assert_eq!(requests.lock().expect("lock derived requests").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn completed_poll_without_safe_report_identity_requires_remediation() {
+        let operation_name = "networks/123/operations/reports/runs/789";
+        let (base_url, requests, server) = serve_report_http_sequence(vec![(
+            200,
+            json!({
+                "name": operation_name,
+                "done": true,
+                "response": {}
+            }),
+        )]);
+        let client = AdManagerClient::for_test_api_base_url(base_url);
+        let server_under_test = AdManagerServer::new(crate::Settings::default())
+            .expect("build missing-binding report server")
+            .with_test_client(client);
+        let result = server_under_test
+            .gam_report_operation_poll(Parameters(ReportOperationPollArgs {
+                operation_name: operation_name.to_string(),
+                expected_report_name: None,
+                fetch_first_page: Some(false),
+                result_page_size: None,
+                poll_timeout_ms: Some(1_000),
+                initial_poll_interval_ms: Some(5_000),
+            }))
+            .await
+            .expect("classify completed operation without safe report identity");
+        let response = result
+            .structured_content
+            .expect("missing-binding remediation response");
+        assert_eq!(response["error"]["code"], "upstream_contract_error");
+        assert_eq!(
+            response["error"]["detail"]["poll_outcome"],
+            "remediation_required"
+        );
+        assert_eq!(response["error"]["detail"]["continuation_available"], false);
+        assert_eq!(
+            response["error"]["detail"]["operation"]["name"],
+            operation_name
+        );
+        assert!(response["error"]["detail"].get("continuation").is_none());
+        assert!(
+            response["error"]["hint"]
+                .as_str()
+                .is_some_and(|hint| hint.contains("do not repeat the unchanged poll"))
+        );
+        server.join().expect("join missing-binding report server");
+        assert_eq!(
+            requests
+                .lock()
+                .expect("lock missing-binding requests")
+                .len(),
+            1
+        );
     }
 
     #[tokio::test]
@@ -9054,6 +9232,12 @@ mod tests {
         );
         assert_eq!(response["error"]["detail"]["report_result"], report_result);
         assert_eq!(
+            response["error"]["detail"]["fetch_outcome"],
+            "retryable_failure"
+        );
+        assert_eq!(response["error"]["detail"]["continuation_available"], true);
+        assert_eq!(response["error"]["detail"]["automatic_replay_safe"], true);
+        assert_eq!(
             response["error"]["detail"]["continuation"]["tool"],
             "gam_report_result_rows"
         );
@@ -9068,6 +9252,82 @@ mod tests {
 
         server.join().expect("join report rows server");
         let requests = requests.lock().expect("lock report rows requests");
+        assert_eq!(requests.len(), 2);
+        assert!(requests.iter().all(|request| request.starts_with("GET ")));
+    }
+
+    #[test]
+    fn report_first_page_auth_failure_preserves_handle_without_a_continuation() {
+        let completed = CompletedReportRun {
+            operation: json!({"name":"networks/123/operations/reports/runs/789"}),
+            report_name: "networks/123/reports/456".to_string(),
+            report_result: "networks/123/reports/456/results/987".to_string(),
+        };
+        let detail = report_result_fetch_failure_detail(
+            &AdManagerError::AuthBootstrap("private credential detail".to_string()),
+            "networks/123/operations/reports/runs/789",
+            false,
+            Some(10),
+            &completed,
+        );
+        assert_eq!(detail["report_result"], completed.report_result);
+        assert_eq!(detail["fetch_outcome"], "remediation_required");
+        assert_eq!(detail["continuation_available"], false);
+        assert_eq!(detail["automatic_replay_safe"], false);
+        assert!(detail.get("continuation").is_none());
+        assert!(!detail.to_string().contains("private credential detail"));
+    }
+
+    #[tokio::test]
+    async fn report_first_page_definitive_4xx_requires_remediation() {
+        let operation_name = "networks/123/operations/reports/runs/789";
+        let report_result = "networks/123/reports/456/results/987";
+        let (base_url, requests, server) = serve_report_http_sequence(vec![
+            (
+                200,
+                json!({
+                    "name":operation_name,
+                    "metadata":{"report":"networks/123/reports/456"},
+                    "done":true,
+                    "response":{"reportResult":report_result}
+                }),
+            ),
+            (403, json!({"error":"rows forbidden"})),
+        ]);
+        let client = AdManagerClient::for_test_api_base_url(base_url);
+        let server_under_test = AdManagerServer::new(crate::Settings::default())
+            .expect("build forbidden report rows server")
+            .with_test_client(client);
+        let result = server_under_test
+            .gam_report_operation_poll(Parameters(ReportOperationPollArgs {
+                operation_name: operation_name.to_string(),
+                expected_report_name: Some("networks/123/reports/456".to_string()),
+                fetch_first_page: None,
+                result_page_size: Some(10),
+                poll_timeout_ms: Some(1_000),
+                initial_poll_interval_ms: Some(5_000),
+            }))
+            .await
+            .expect("classify definitive first-page rejection");
+        let response = result
+            .structured_content
+            .expect("structured forbidden first-page error");
+        assert_eq!(response["error"]["code"], "upstream_api_error");
+        assert_eq!(response["error"]["detail"]["report_result"], report_result);
+        assert_eq!(
+            response["error"]["detail"]["fetch_outcome"],
+            "remediation_required"
+        );
+        assert_eq!(response["error"]["detail"]["continuation_available"], false);
+        assert_eq!(response["error"]["detail"]["automatic_replay_safe"], false);
+        assert!(response["error"]["detail"].get("continuation").is_none());
+        assert!(
+            response["error"]["hint"]
+                .as_str()
+                .is_some_and(|hint| hint.contains("gam_auth_status"))
+        );
+        server.join().expect("join forbidden report rows server");
+        let requests = requests.lock().expect("lock forbidden rows requests");
         assert_eq!(requests.len(), 2);
         assert!(requests.iter().all(|request| request.starts_with("GET ")));
     }

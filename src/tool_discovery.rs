@@ -463,33 +463,18 @@ fn report_discovery_intent(query: Option<&str>) -> ReportDiscoveryIntent {
     let terms = normalized
         .split(|character: char| !character.is_ascii_alphanumeric())
         .filter(|term| !term.is_empty())
-        .collect::<BTreeSet<_>>();
-    let report_context = terms.contains("report")
-        || terms.contains("reports")
+        .collect::<Vec<_>>();
+    let term_set = terms.iter().copied().collect::<BTreeSet<_>>();
+    let report_context = term_set.contains("report")
+        || term_set.contains("reports")
         || normalized.contains("campaign delivery audit");
-    let operation_context = terms.contains("operation")
-        || terms.contains("operations")
-        || terms.contains("handle")
+    let operation_context = term_set.contains("operation")
+        || term_set.contains("operations")
+        || term_set.contains("handle")
         || normalized.contains("operation name");
-    let new_run_action = terms
-        .iter()
-        .any(|term| matches!(*term, "start" | "launch" | "execute"))
-        || (terms.contains("run") && !normalized.contains("report run status"));
-    let strong_continuation_action = terms.iter().any(|term| {
-        matches!(
-            *term,
-            "continue"
-                | "continuation"
-                | "resume"
-                | "status"
-                | "check"
-                | "poll"
-                | "monitor"
-                | "inspect"
-                | "view"
-        )
-    });
-    let wait_action = terms.contains("wait") || terms.contains("waiting");
+    let clear_new_run_action = has_clear_report_start_action(&terms, report_context);
+    let strong_continuation_action = terms.iter().any(|term| is_report_continuation_term(term));
+    let wait_action = term_set.contains("wait") || term_set.contains("waiting");
     let canonical_operation_handle = normalized.contains("/operations/reports/runs/");
     let explicit_existing_operation_reference = canonical_operation_handle
         || normalized.contains("existing report operation")
@@ -500,7 +485,7 @@ fn report_discovery_intent(query: Option<&str>) -> ReportDiscoveryIntent {
         return ReportDiscoveryIntent::ExistingOperationContinuation;
     }
 
-    if report_context && new_run_action {
+    if clear_new_run_action {
         ReportDiscoveryIntent::ExplicitNewRun
     } else if normalized.contains("continue waiting")
         || (strong_continuation_action && (report_context || operation_context))
@@ -510,6 +495,56 @@ fn report_discovery_intent(query: Option<&str>) -> ReportDiscoveryIntent {
     } else {
         ReportDiscoveryIntent::Unspecified
     }
+}
+
+fn has_clear_report_start_action(terms: &[&str], report_context: bool) -> bool {
+    if !report_context {
+        return false;
+    }
+    terms.iter().enumerate().any(|(index, term)| {
+        if !matches!(*term, "start" | "run" | "launch" | "execute") {
+            return false;
+        }
+        let next_significant = terms[index + 1..]
+            .iter()
+            .copied()
+            .find(|term| !matches!(*term, "a" | "an" | "the" | "one" | "new" | "saved"));
+        if next_significant.is_some_and(|term| {
+            is_report_continuation_term(term) || matches!(term, "latest" | "operation")
+        }) {
+            return false;
+        }
+        if *term == "run"
+            && terms[..index]
+                .iter()
+                .any(|term| is_report_continuation_term(term))
+        {
+            return false;
+        }
+        true
+    })
+}
+
+fn is_report_continuation_term(term: &str) -> bool {
+    matches!(
+        term,
+        "continue"
+            | "continuation"
+            | "resume"
+            | "status"
+            | "check"
+            | "checking"
+            | "poll"
+            | "polling"
+            | "monitor"
+            | "monitoring"
+            | "inspect"
+            | "inspecting"
+            | "view"
+            | "viewing"
+            | "wait"
+            | "waiting"
+    )
 }
 
 pub(crate) fn companion_tool_names(companions: &[WorkflowCompanion]) -> Vec<&'static str> {
@@ -1420,6 +1455,12 @@ mod tests {
             "monitor operation_name for the report",
             "wait for the existing operation",
             "networks/123/operations/reports/runs/789",
+            "start monitoring the report operation",
+            "start checking the report status",
+            "start polling the report operation",
+            "check run status for the report",
+            "monitor the report's latest run",
+            "inspect the latest report run",
         ] {
             assert_eq!(
                 report_discovery_intent(Some(query)),
@@ -1440,6 +1481,8 @@ mod tests {
             "run the campaign delivery report and check its status",
             "launch a report and inspect it until completion",
             "execute the report then monitor the result",
+            "start a report then poll it until completion",
+            "launch the saved report and check its status",
         ] {
             assert_eq!(
                 report_discovery_intent(Some(query)),

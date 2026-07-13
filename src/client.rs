@@ -1032,9 +1032,29 @@ impl AdManagerClient {
             ) {
                 Ok(value) => value,
                 Err(error) => {
+                    let completed_without_report_binding =
+                        operation.get("done").and_then(Value::as_bool) == Some(true)
+                            && bound_report_name.is_none()
+                            && operation
+                                .get("metadata")
+                                .and_then(Value::as_object)
+                                .and_then(|metadata| metadata.get("report"))
+                                .is_none();
+                    let (error, observed_operation) = if completed_without_report_binding {
+                        (
+                            AdManagerError::UpstreamContract {
+                                field: "operation.completed_report_identity",
+                                message: "completed operation did not expose a safe report identity in metadata.report or response.reportResult"
+                                    .to_string(),
+                            },
+                            Some(project_report_operation(&operation)),
+                        )
+                    } else {
+                        (error, last_operation)
+                    };
                     return Err(ReportPollFailure {
                         error,
-                        operation: last_operation,
+                        operation: observed_operation,
                         expected_report_name: bound_report_name,
                         terminal: false,
                     });
@@ -1502,7 +1522,7 @@ impl AdManagerClient {
             .content_length()
             .is_some_and(|length| length > max_response_bytes as u64)
         {
-            if status.is_client_error() {
+            if report_run_rejection_is_definitive(status) {
                 return Err(AdManagerError::UpstreamApi {
                     status: status.as_u16(),
                     message: format!(
@@ -1518,7 +1538,7 @@ impl AdManagerClient {
         loop {
             let chunk = match response.chunk().await {
                 Ok(value) => value,
-                Err(error) if status.is_client_error() => {
+                Err(error) if report_run_rejection_is_definitive(status) => {
                     return Err(AdManagerError::UpstreamApi {
                         status: status.as_u16(),
                         message: clip_message(format!(
@@ -1532,7 +1552,7 @@ impl AdManagerClient {
                 break;
             };
             if bytes.len().saturating_add(chunk.len()) > max_response_bytes {
-                if status.is_client_error() {
+                if report_run_rejection_is_definitive(status) {
                     return Err(AdManagerError::UpstreamApi {
                         status: status.as_u16(),
                         message: format!(
@@ -1553,7 +1573,7 @@ impl AdManagerClient {
             } else {
                 clip_message(message)
             };
-            if status.is_client_error() {
+            if report_run_rejection_is_definitive(status) {
                 return Err(AdManagerError::UpstreamApi {
                     status: status.as_u16(),
                     message,
@@ -1693,6 +1713,10 @@ fn bounded_response_limit_error(
             message,
         }
     }
+}
+
+fn report_run_rejection_is_definitive(status: reqwest::StatusCode) -> bool {
+    status.is_client_error() && status != reqwest::StatusCode::REQUEST_TIMEOUT
 }
 
 fn ad_unit_hierarchy_list_query(
@@ -2466,6 +2490,28 @@ fn validate_report_operation_binding(
         });
     }
 
+    let report_result = operation
+        .get("response")
+        .and_then(|response| response.get("reportResult"))
+        .and_then(Value::as_str)
+        .map(|report_result| {
+            validate_report_result_name(report_result).map_err(|_| {
+                AdManagerError::UpstreamContract {
+                    field: "operation.response.reportResult",
+                    message:
+                        "must match networks/<networkCode>/reports/<reportId>/results/<resultId>"
+                            .to_string(),
+                }
+            })
+        })
+        .transpose()?;
+    let report_name_from_result = report_result.as_deref().map(|report_result| {
+        report_result
+            .split_once("/results/")
+            .expect("validated report result has a results segment")
+            .0
+            .to_string()
+    });
     let report_binding = operation
         .get("metadata")
         .and_then(Value::as_object)
@@ -2485,9 +2531,10 @@ fn validate_report_operation_binding(
         }
         None => expected_report_name
             .map(str::to_string)
+            .or(report_name_from_result)
             .ok_or_else(|| AdManagerError::UpstreamContract {
                 field: "operation.metadata.report",
-                message: "report operation response omitted its report binding and no expected report was supplied"
+                message: "report operation response omitted its report binding, no expected report was supplied, and response.reportResult could not provide it"
                     .to_string(),
             })?,
     };
@@ -2512,18 +2559,7 @@ fn validate_report_operation_binding(
             message: "report binding did not match the report requested by this run".to_string(),
         });
     }
-    if let Some(report_result) = operation
-        .get("response")
-        .and_then(|response| response.get("reportResult"))
-        .and_then(Value::as_str)
-    {
-        let report_result = validate_report_result_name(report_result).map_err(|_| {
-            AdManagerError::UpstreamContract {
-                field: "operation.response.reportResult",
-                message: "must match networks/<networkCode>/reports/<reportId>/results/<resultId>"
-                    .to_string(),
-            }
-        })?;
+    if let Some(report_result) = report_result {
         if !report_result.starts_with(&format!("{report_name}/results/")) {
             return Err(AdManagerError::UpstreamContract {
                 field: "operation.response.reportResult",
@@ -2802,8 +2838,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn report_run_distinguishes_definitive_4xx_from_uncertain_5xx() {
-        for (status, expected_definitive) in [(400, true), (503, false)] {
+    async fn report_run_distinguishes_definitive_rejections_from_uncertain_statuses() {
+        for (status, expected_definitive) in [
+            (400, true),
+            (401, true),
+            (403, true),
+            (404, true),
+            (408, false),
+            (429, true),
+            (503, false),
+        ] {
             let body = br#"{"error":"run rejected"}"#;
             let response = format!(
                 "HTTP/1.1 {status} Upstream Error\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -2823,7 +2867,10 @@ mod tests {
             if expected_definitive {
                 assert!(matches!(
                     error,
-                    AdManagerError::UpstreamApi { status: 400, .. }
+                    AdManagerError::UpstreamApi {
+                        status: actual_status,
+                        ..
+                    } if actual_status == status
                 ));
             } else {
                 assert!(matches!(
@@ -2846,6 +2893,36 @@ mod tests {
         assert!(matches!(
             error,
             AdManagerError::UpstreamApi { status: 400, .. }
+        ));
+
+        let response =
+            b"HTTP/1.1 408 Request Timeout\r\nContent-Length: 65537\r\nConnection: close\r\n\r\n"
+                .to_vec();
+        let (base_url, server) = serve_one_http_response(response);
+        let client = AdManagerClient::for_test_api_base_url(base_url);
+        let error = client
+            .run_report("123", "456")
+            .await
+            .expect_err("oversized 408 body remains uncertain");
+        server.join().expect("oversized 408 server");
+        assert!(matches!(
+            error,
+            AdManagerError::ReportRunHandoffUncertain { .. }
+        ));
+
+        let response =
+            b"HTTP/1.1 408 Request Timeout\r\nContent-Length: 10\r\nConnection: close\r\n\r\nshort"
+                .to_vec();
+        let (base_url, server) = serve_one_http_response(response);
+        let client = AdManagerClient::for_test_api_base_url(base_url);
+        let error = client
+            .run_report("123", "456")
+            .await
+            .expect_err("truncated 408 body remains uncertain");
+        server.join().expect("truncated 408 server");
+        assert!(matches!(
+            error,
+            AdManagerError::ReportRunHandoffUncertain { .. }
         ));
     }
 
@@ -2987,6 +3064,34 @@ mod tests {
                 })
             ));
         }
+    }
+
+    #[test]
+    fn completed_report_operation_can_derive_binding_from_valid_result_name() {
+        let operation = json!({
+            "name": "networks/123/operations/reports/runs/789",
+            "done": true,
+            "response": {
+                "reportResult": "networks/123/reports/456/results/987"
+            }
+        });
+        let (report_name, projected) = validate_report_operation_binding(
+            &operation,
+            Some("networks/123/operations/reports/runs/789"),
+            None,
+        )
+        .expect("derive report binding from completed result");
+        assert_eq!(report_name, "networks/123/reports/456");
+        assert_eq!(projected["metadata"]["report"], "networks/123/reports/456");
+
+        let cross_network = json!({
+            "name": "networks/999/operations/reports/runs/789",
+            "done": true,
+            "response": {
+                "reportResult": "networks/123/reports/456/results/987"
+            }
+        });
+        assert!(validate_report_operation_binding(&cross_network, None, None).is_err());
     }
 
     #[test]
