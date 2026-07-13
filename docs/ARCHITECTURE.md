@@ -135,34 +135,32 @@ error.
 
 ## Tool design
 
-The initial first-class tool set is:
+The exact exported tool inventory is runtime-derived rather than maintained as
+a second handwritten list in this document:
 
-1. `gam_get_started`
-2. `gam_auth_status`
-3. `gam_auth_login_command`
-4. `gam_networks_list`
-5. `gam_network_catalog_list`
-6. `gam_report_run`
-7. `gam_report_operation_poll`
-8. `gam_report_result_rows`
-9. `gam_trafficking_tool_matrix`
-10. `gam_rest_write_plan`
-11. `gam_rest_write_apply`
-12. `gam_soap_payload_build`
-13. `gam_soap_trafficking_plan`
-14. `gam_soap_trafficking_apply`
-15. `gam_yield_group_exclusions_preview`
-16. `gam_yield_group_exclusions_apply`
-17. `gam_scratchpad_open_session`
-18. `gam_scratchpad_close_session`
-19. `gam_scratchpad_list_sessions`
-20. `gam_scratchpad_list_tables`
-21. `gam_scratchpad_drop_table`
-22. `gam_scratchpad_query`
-23. `gam_scratchpad_ingest_network_catalog`
-24. `gam_scratchpad_ingest_report_result_rows`
-25. `gam_scratchpad_ingest_soap_line_items`
-26. `gam_scratchpad_export_evidence_bundle`
+```bash
+google-ad-manager-mcp --print-tools
+```
+
+`AdManagerServer::tool_names()` reads the registered router, while
+`build_tool_inventory()` supplies the discovery metadata. The
+`inventory_matches_exported_tool_names` contract test requires those two
+surfaces to contain the same names. Use `--print-tool-schema` for the complete
+current schema surface and [the Tool Guide](TOOL_GUIDE.md) for the human-facing
+purpose and operating contract of each tool.
+
+At the architecture level, the surface is organized into these evolving tool
+families rather than a fixed name list:
+
+- discovery and first-run setup
+- network catalogue reads and bounded protection, dependency, and retirement
+  proofs
+- saved-report start, operation continuation, and completed-result retrieval
+- guarded REST and SOAP trafficking plans, applies, and focused workflows
+- bounded local scratchpad lifecycle, ingestion, query, and evidence export
+
+This family summary is intentionally non-exhaustive; the runtime commands above
+are authoritative for the current exported names and schemas.
 
 `find_tools` is also exposed for deferred-loading and `tool_search` clients. It
 uses the toolkit's additive ranked search path and compact serializer by
