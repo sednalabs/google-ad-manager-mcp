@@ -43,6 +43,8 @@ All tools return Contract V1 envelopes: `ok/data/meta` on success and
 `find_tools` accepts a natural-language `query` plus optional exact `group`,
 `read_only`, and `limit` filters. Deterministic ranked matching ignores common
 conversational words and returns total, returned, limit, and truncation state.
+Whitespace-only `group` input is treated as omitted; non-empty invalid or
+truncated group input remains fail-closed.
 It does not return free-form query text or query-derived terms;
 `request_summary` contains only presence, recognition, and term counts. `limit`
 defaults to 20 and must be at
@@ -468,8 +470,10 @@ The poll tool validates the existing operation name, waits for completion, and
 can fetch the first result page without creating another run. The run request,
 returned operation, polled operation, optional `metadata.report`, and final
 `reportResult` must all bind to the same network/report identity. A known
-requested report fills omitted metadata, but inconsistent present metadata and
-invalid `done`/`error`/`response` unions are rejected.
+requested report fills omitted metadata; for a completed poll without that
+caller binding, a valid `reportResult` may safely derive the report identity.
+Inconsistent present metadata and invalid `done`/`error`/`response` unions are
+rejected.
 Both the upstream handoff and caller input must match the exact
 `networks/{networkCode}/operations/reports/runs/{operationId}` resource shape;
 noncanonical values are rejected before polling.
@@ -488,8 +492,9 @@ retried. A definitive poll-time 4xx other than 408 or 429 returns
 remediation-required detail with no executable continuation and does not claim
 that the report operation itself is terminal. Timeout continuation uses a
 bounded larger timeout rather than repeating the expired value. Terminal
-operation errors and completed operations without a result do not offer another
-poll. Definitive 4xx run rejections are upstream API errors. Once the initial
+operation errors and completed operations without a safe report/result identity
+do not offer another poll. Run-time 4xx rejections other than HTTP 408 are
+definitive upstream API errors. Once the initial
 POST may otherwise have been dispatched, transport, body-read, response-bound,
 plausible server-status, JSON, missing, malformed, or cross-target handoff
 failures report an uncertain handoff, set `automatic_replay_safe=false`, and
@@ -497,9 +502,11 @@ prohibit automatic reruns. Every uncertain receipt retains the canonical
 `report_name`, an explicit `dispatch_state`, and `started_new_run=null` rather
 than claiming that a new run was confirmed. An immediate terminal operation error is a redacted
 MCP error with no success continuation. If
-completion succeeds but first-page retrieval fails, the
-error instead preserves `report_result`, page size, and a
-`gam_report_result_rows` continuation.
+completion succeeds but retryable first-page retrieval fails, the error instead
+preserves `report_result`, page size, and a `gam_report_result_rows`
+continuation. Authentication failures and definitive first-page 4xx responses
+other than 408 or 429 preserve the handle but require remediation without an
+executable unchanged continuation.
 Deterministic upstream or final RMCP result-size failures instead preserve
 bounded operation/report/result/page handles and expose a non-executable smaller
 page adjustment. They do not repeat the rejected page size; a page already at

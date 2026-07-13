@@ -124,8 +124,27 @@ impl AdManagerError {
             Self::AuthBootstrap(_) => {
                 "Run gam_auth_status or gam_auth_login_command to inspect or configure credentials."
             }
-            Self::Transport(_) | Self::UpstreamJson(_) | Self::UpstreamApi { .. } => {
+            Self::Transport(_) | Self::UpstreamJson(_) => {
                 "Retry the request, then confirm the Google principal can access the target network."
+            }
+            Self::UpstreamApi {
+                status: 401 | 403, ..
+            } => {
+                "Run gam_auth_status and correct the Google principal credentials or target-network access before retrying."
+            }
+            Self::UpstreamApi { status, .. }
+                if (400..500).contains(status) && !matches!(*status, 408 | 429) =>
+            {
+                "Correct the request arguments or target resource identity before retrying; the provider rejected the current request."
+            }
+            Self::UpstreamApi { .. } => {
+                "Retry the request with bounded backoff, then confirm the Google principal can access the target network if the failure persists."
+            }
+            Self::UpstreamContract {
+                field: "operation.completed_report_identity",
+                ..
+            } => {
+                "Inspect the completed operation and saved report identity; do not repeat the unchanged poll until a safe report or result resource is known."
             }
             Self::UpstreamContract { .. } => {
                 "Do not reuse the malformed provider value; retry the read and report an adapter or upstream contract defect if it persists."
@@ -154,6 +173,38 @@ impl AdManagerError {
             Self::ReportRunHandoffUncertain { .. } => {
                 "Do not automatically start another report run. Preserve this receipt and inspect Ad Manager report activity or retry only with explicit operator approval."
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AdManagerError;
+
+    #[test]
+    fn upstream_api_hints_distinguish_auth_permanent_and_retryable_statuses() {
+        for status in [401, 403] {
+            let error = AdManagerError::UpstreamApi {
+                status,
+                message: "rejected".to_string(),
+            };
+            assert!(error.hint().contains("gam_auth_status"));
+            assert!(!error.hint().starts_with("Retry the request"));
+        }
+        for status in [400, 404, 422] {
+            let error = AdManagerError::UpstreamApi {
+                status,
+                message: "rejected".to_string(),
+            };
+            assert!(error.hint().contains("Correct the request"));
+            assert!(!error.hint().starts_with("Retry the request"));
+        }
+        for status in [408, 429, 500, 503] {
+            let error = AdManagerError::UpstreamApi {
+                status,
+                message: "retryable".to_string(),
+            };
+            assert!(error.hint().starts_with("Retry the request"));
         }
     }
 }
