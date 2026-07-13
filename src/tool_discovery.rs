@@ -319,6 +319,7 @@ pub(crate) fn compose_workflow_companions(
         dependencies.extend(AD_UNIT_RETIREMENT_DEPENDENCIES);
     }
     let dependencies = topologically_sorted_dependencies(dependencies)?;
+    let report_poll_authorized = report_poll_discovery_is_authoritative(query);
     let selected = results
         .iter()
         .map(|result| result.name.as_str())
@@ -344,6 +345,11 @@ pub(crate) fn compose_workflow_companions(
     let mut emitted_edges = BTreeSet::new();
     Ok(dependencies
         .into_iter()
+        .filter(|dependency| {
+            report_poll_authorized
+                || (dependency.tool_name != "gam_report_operation_poll"
+                    && dependency.before_tool != "gam_report_operation_poll")
+        })
         .filter(|dependency| prerequisites.contains(dependency.before_tool))
         .filter(|dependency| emitted_edges.insert((dependency.tool_name, dependency.before_tool)))
         .map(|dependency| WorkflowCompanion {
@@ -493,6 +499,80 @@ fn report_discovery_intent(query: Option<&str>) -> ReportDiscoveryIntent {
     } else {
         ReportDiscoveryIntent::Unspecified
     }
+}
+
+fn report_poll_discovery_is_authoritative(query: Option<&str>) -> bool {
+    report_discovery_intent(query) == ReportDiscoveryIntent::ExistingOperationContinuation
+        || has_clear_report_result_retrieval(query)
+}
+
+fn has_clear_report_result_retrieval(query: Option<&str>) -> bool {
+    let Some(query) = query else {
+        return false;
+    };
+    let normalized = query.to_ascii_lowercase().replace(['-', '_'], " ");
+    let terms = normalized
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .filter(|term| !term.is_empty())
+        .collect::<Vec<_>>();
+    if query_blocks_report_authority(&terms, &normalized) {
+        return false;
+    }
+    let terms = strip_report_directive_prefix(&terms);
+    if !terms.first().is_some_and(|term| {
+        matches!(
+            **term,
+            "fetch" | "get" | "list" | "retrieve" | "show" | "view"
+        )
+    }) {
+        return false;
+    }
+    let has_report = terms
+        .iter()
+        .any(|term| matches!(*term, "report" | "reports"));
+    let has_result = terms
+        .iter()
+        .any(|term| matches!(*term, "result" | "results"));
+    let has_page_or_rows = terms
+        .iter()
+        .any(|term| matches!(*term, "page" | "pages" | "row" | "rows"));
+    has_report
+        && has_result
+        && has_page_or_rows
+        && terms.iter().all(|term| {
+            is_numeric_term(term)
+                || is_report_determiner(term)
+                || is_report_object_modifier(term)
+                || is_existing_reference_modifier(term)
+                || matches!(
+                    *term,
+                    "fetch"
+                        | "get"
+                        | "list"
+                        | "retrieve"
+                        | "show"
+                        | "view"
+                        | "report"
+                        | "reports"
+                        | "result"
+                        | "results"
+                        | "page"
+                        | "pages"
+                        | "row"
+                        | "rows"
+                        | "first"
+                        | "next"
+                        | "completed"
+                        | "complete"
+                        | "from"
+                        | "for"
+                        | "of"
+                        | "name"
+                        | "id"
+                        | "now"
+                        | "please"
+                )
+        })
 }
 
 fn has_explicit_existing_report_operation_reference(
@@ -1870,7 +1950,8 @@ mod tests {
     #[test]
     fn report_rows_keep_existing_operation_calls_separate_from_cold_start_guidance() {
         let results = [result("gam_report_result_rows")];
-        let companions = workflow_companions(&results, None);
+        let companions =
+            workflow_companions(&results, Some("fetch rows from a completed report result"));
         assert_eq!(
             companion_tool_names(&companions),
             vec!["gam_report_operation_poll"]
@@ -1901,6 +1982,33 @@ mod tests {
                 .is_some_and(|reason| reason.contains("Do not call gam_report_run"))
         );
         assert_eq!(records[1]["callable_as_tool"], true);
+    }
+
+    #[test]
+    fn report_poll_companions_require_bounded_continuation_or_result_authority() {
+        let results = [
+            result("gam_report_operation_poll"),
+            result("gam_report_result_rows"),
+        ];
+        let ambiguous =
+            workflow_companions(&results, Some("would polling the report operation help"));
+        assert!(
+            ambiguous.iter().all(|companion| {
+                companion.tool_name != "gam_report_operation_poll"
+                    && companion.before_tool != "gam_report_operation_poll"
+            }),
+            "an unauthorized lower-ranked workflow reintroduced report polling"
+        );
+
+        let authorized_results = [result("gam_report_result_rows")];
+        let authorized = workflow_companions(
+            &authorized_results,
+            Some("fetch rows from a completed report result"),
+        );
+        assert_eq!(
+            companion_tool_names(&authorized),
+            vec!["gam_report_operation_poll"]
+        );
     }
 
     #[test]
@@ -2002,7 +2110,8 @@ mod tests {
     #[test]
     fn report_run_is_condition_only_when_a_continuation_is_selected() {
         let mut results = vec![result("gam_report_run"), result("gam_report_result_rows")];
-        let companions = workflow_companions(&results, None);
+        let companions =
+            workflow_companions(&results, Some("fetch rows from a completed report result"));
         let resolution = resolve_report_discovery(
             &mut results,
             &companions,
