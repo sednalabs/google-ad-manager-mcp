@@ -3081,7 +3081,6 @@ mod tests {
             "check report operation 123 to completion and show inventory report rows",
             "check report operation 123 to completion and please show inventory report rows",
             "check report operation 123 to completion and please now show inventory report rows",
-            "check report operation 123 to completion and run inventory report",
         ] {
             let mut results = vec![result("gam_report_run")];
             let companions = workflow_companions(&results, Some(query));
@@ -3319,6 +3318,7 @@ mod tests {
             "launch the campaign; report current run",
             "launch the campaign; report run of the report",
             "show the campaign\u{ff1b} report result rows",
+            "check report operation 123 to completion and run inventory report",
         ] {
             assert_eq!(
                 report_discovery_intent(Some(query)),
