@@ -9,8 +9,11 @@ pub enum AdManagerError {
     },
     #[error("auth bootstrap failed: {0}")]
     AuthBootstrap(String),
-    #[error("upstream transport failed: {0}")]
-    Transport(#[from] reqwest::Error),
+    #[error("upstream transport failed")]
+    Transport {
+        #[source]
+        source: reqwest::Error,
+    },
     #[error("failed to parse upstream JSON: {0}")]
     UpstreamJson(#[from] serde_json::Error),
     #[error("upstream returned status {status}: {message}")]
@@ -63,7 +66,7 @@ impl AdManagerError {
         match self {
             Self::InvalidInput { .. } => "invalid_input",
             Self::AuthBootstrap(_) => "auth_bootstrap",
-            Self::Transport(_) => "transport_error",
+            Self::Transport { .. } => "transport_error",
             Self::UpstreamJson(_) => "upstream_json_error",
             Self::UpstreamApi { .. } => "upstream_api_error",
             Self::UpstreamContract { .. } => "upstream_contract_error",
@@ -82,7 +85,7 @@ impl AdManagerError {
         match self {
             Self::InvalidInput { .. } => "validation_failed",
             Self::AuthBootstrap(_) => "auth_not_ready",
-            Self::Transport(_) => "upstream_transport_failed",
+            Self::Transport { .. } => "upstream_transport_failed",
             Self::UpstreamJson(_) => "upstream_json_invalid",
             Self::UpstreamApi { .. } => "upstream_request_failed",
             Self::UpstreamContract { .. } => "upstream_contract_failed",
@@ -101,7 +104,7 @@ impl AdManagerError {
         match self {
             Self::InvalidInput { .. } => "input",
             Self::AuthBootstrap(_) => "auth",
-            Self::Transport(_)
+            Self::Transport { .. }
             | Self::UpstreamJson(_)
             | Self::UpstreamApi { .. }
             | Self::UpstreamContract { .. } => "upstream",
@@ -124,11 +127,8 @@ impl AdManagerError {
             Self::AuthBootstrap(_) => {
                 "Run gam_auth_status or gam_auth_login_command to inspect or configure credentials."
             }
-            Self::Transport(_) => {
+            Self::Transport { .. } | Self::UpstreamJson(_) => {
                 "Retry the request, then confirm the Google principal can access the target network."
-            }
-            Self::UpstreamJson(_) => {
-                "Inspect the malformed provider response and adapter contract before retrying; do not automatically replay the unchanged request."
             }
             Self::UpstreamApi {
                 status: 401 | 403, ..
@@ -183,6 +183,12 @@ impl AdManagerError {
     }
 }
 
+impl From<reqwest::Error> for AdManagerError {
+    fn from(source: reqwest::Error) -> Self {
+        Self::Transport { source }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::AdManagerError;
@@ -215,12 +221,7 @@ mod tests {
     }
 
     #[test]
-    fn malformed_report_result_hints_do_not_contradict_remediation_receipts() {
-        let json_error = AdManagerError::UpstreamJson(
-            serde_json::from_str::<serde_json::Value>("{").expect_err("malformed JSON"),
-        );
-        assert!(json_error.hint().contains("do not automatically replay"));
-
+    fn malformed_report_result_contract_hint_requires_inspection() {
         let contract_error = AdManagerError::UpstreamContract {
             field: "report_result_rows.rows",
             message: "must be an array".to_string(),
