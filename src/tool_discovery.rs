@@ -825,15 +825,51 @@ fn reference_has_non_report_relation_target(terms: &[&str], reference_index: usi
         if !matches!(*relation, "for" | "of" | "with" | "to") {
             return false;
         }
-        let target = tail[relation_index + 1..]
-            .split(|term| matches!(*term, "for" | "of" | "with" | "to"))
-            .next()
-            .unwrap_or_default();
+        let target_tail = &tail[relation_index + 1..];
+        let target_end = target_tail
+            .iter()
+            .enumerate()
+            .find_map(|(index, term)| {
+                if matches!(*term, "for" | "of" | "with" | "to")
+                    || (matches!(*term, "and" | "then")
+                        && report_relation_starts_new_clause(&target_tail[index + 1..]))
+                {
+                    Some(index)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(target_tail.len());
+        let target = &target_tail[..target_end];
         !target.is_empty()
             && target
                 .iter()
                 .any(|term| is_non_report_reference_domain(term))
     })
+}
+
+fn report_relation_starts_new_clause(terms: &[&str]) -> bool {
+    strip_report_directive_prefix(terms)
+        .first()
+        .is_some_and(|term| report_relation_clause_action(term))
+}
+
+fn report_relation_clause_action(term: &str) -> bool {
+    is_report_continuation_term(term)
+        || matches!(
+            term,
+            "show"
+                | "use"
+                | "fetch"
+                | "get"
+                | "retrieve"
+                | "return"
+                | "start"
+                | "launch"
+                | "execute"
+                | "select"
+                | "choose"
+        )
 }
 
 fn is_non_report_reference_domain(term: &str) -> bool {
@@ -1092,6 +1128,19 @@ fn has_unbound_canonical_reference(terms: &[&str]) -> bool {
 }
 
 fn report_term_is_reference_anchor(terms: &[&str], index: usize) -> bool {
+    let clause_start = terms[..index]
+        .iter()
+        .rposition(|term| matches!(*term, "and" | "then"))
+        .map_or(0, |boundary| boundary + 1);
+    let clause_prefix = &terms[clause_start..index];
+    if (clause_start > 0 && clause_prefix.is_empty())
+        || (!clause_prefix.is_empty()
+            && strip_report_directive_prefix(clause_prefix)
+                .iter()
+                .all(|term| matches!(*term, "please" | "now")))
+    {
+        return false;
+    }
     let previous = index.checked_sub(1).map(|previous| terms[previous]);
     let next = terms.get(index + 1).copied();
     !matches!(previous, Some("and" | "then"))
@@ -2860,6 +2909,8 @@ mod tests {
             "check the report and show me its operation id",
             "poll report operation 123 and get the first 100 of its result rows",
             "check operation 123 for the current report and poll to completion",
+            "check report operation 123 to completion and show inventory report rows",
+            "check report operation 123 to completion and please show inventory report rows",
         ] {
             let mut results = vec![result("gam_report_run")];
             let companions = workflow_companions(&results, Some(query));
@@ -3073,6 +3124,10 @@ mod tests {
             "check operation 123 for the report and its advertiser",
             "check operation_name=networks/123/operations/reports/runs/789 for the report and its advertiser",
             "check operation 123 for the report and its inventory",
+            "inspect inventory and please report operation 123",
+            "start a report and please report operation 123",
+            "inspect inventory and can you please report operation 123",
+            "start a report and now report operation 123",
         ] {
             assert_eq!(
                 report_discovery_intent(Some(query)),
