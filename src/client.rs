@@ -2637,7 +2637,7 @@ pub(crate) fn project_report_operation(operation: &Value) -> Value {
         },
         "done": operation.get("done").and_then(Value::as_bool),
     });
-    if let Some(error) = operation.get("error") {
+    if let Some(error) = operation.get("error").and_then(Value::as_object) {
         projected["error"] = json!({
             "code": error.get("code").and_then(Value::as_i64),
             "message": error
@@ -2646,7 +2646,7 @@ pub(crate) fn project_report_operation(operation: &Value) -> Value {
                 .map(|message| clip_message(message.to_string())),
         });
     }
-    if let Some(response) = operation.get("response") {
+    if let Some(response) = operation.get("response").and_then(Value::as_object) {
         projected["response"] = json!({
             "@type": projected_report_string(operation
                 .get("response")
@@ -3264,6 +3264,15 @@ mod tests {
         }));
         assert!(failed.get("response").is_none());
         assert_eq!(failed["error"]["code"], 13);
+
+        let explicit_nulls = project_report_operation(&json!({
+            "name": "networks/123/operations/reports/runs/789",
+            "done": true,
+            "error": null,
+            "response": null,
+        }));
+        assert!(explicit_nulls.get("error").is_none());
+        assert!(explicit_nulls.get("response").is_none());
     }
 
     #[test]

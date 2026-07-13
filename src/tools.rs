@@ -3307,6 +3307,7 @@ struct ReportOperationPollOptions<'a> {
 
 fn report_poll_requires_remediation(error: &AdManagerError) -> bool {
     matches!(error, AdManagerError::AuthBootstrap(_))
+        || matches!(error, AdManagerError::ReportRunMissingResult { .. })
         || matches!(
             error,
             AdManagerError::UpstreamContract {
@@ -3348,6 +3349,9 @@ async fn poll_report_operation_tool_result(
                     ..
                 } => {
                     "The completed operation did not expose a safe terminal contract and report identity. Inspect the operation and saved report before issuing another request."
+                }
+                AdManagerError::ReportRunMissingResult { .. } => {
+                    "The completed operation did not expose a report result. Inspect the terminal operation and saved report before issuing another request."
                 }
                 _ => {
                     "The provider definitively rejected this poll request. Correct access, operation identity, or request state before issuing another GET; the operation's terminal state was not observed."
@@ -8753,6 +8757,15 @@ mod tests {
             (
                 json!({
                 "name":"networks/123/operations/reports/runs/790",
+                "done":true,
+                "error":{"code":13,"message":"wrong operation failed"}
+                }),
+                true,
+                false,
+            ),
+            (
+                json!({
+                "name":"networks/123/operations/reports/runs/790",
                 "metadata":{"report":"networks/123/reports/456"},
                 "done":true,
                 "response":{"reportResult":"networks/123/reports/456/results/987"}
@@ -9177,6 +9190,13 @@ mod tests {
                 response["error"]["detail"]["operation_terminal_state_confirmed"],
                 true
             );
+            if explicit_null_response {
+                assert!(
+                    response["error"]["detail"]["operation"]
+                        .get("response")
+                        .is_none()
+                );
+            }
             assert_eq!(response["error"]["detail"]["continuation_available"], false);
             assert_eq!(
                 response["error"]["detail"]["operation"]["name"],
@@ -9341,6 +9361,14 @@ mod tests {
         assert_eq!(response["ok"], false);
         assert_eq!(response["error"]["code"], "report_run_missing_result");
         assert_eq!(response["error"]["detail"]["terminal"], true);
+        assert_eq!(
+            response["error"]["detail"]["operation_terminal_state_confirmed"],
+            true
+        );
+        assert_eq!(
+            response["error"]["detail"]["poll_outcome"],
+            "remediation_required"
+        );
         assert_eq!(response["error"]["detail"]["continuation_available"], false);
         assert_eq!(
             response["error"]["detail"]["operation"]["name"],
