@@ -330,7 +330,10 @@ campaign, or other non-report reference into report authority.
 Unbound identities and identities assigned or premodified by another domain
 block report-continuation fallback, and an identity label without a value cannot
 override a clear new start. Generic non-report operation references cannot
-inject the report poll tool.
+inject the report poll tool. Bounded `get`/`retrieve` continuations and
+`first N ... rows` requests use the same clause and identity checks; `to` or
+`with` targets name another GAM domain only fail closed, while lifecycle phrases
+such as `to completion` remain valid.
 Negative query syntax remains fail-closed under the shared inventory policy;
 request a nonblocking start affirmatively, for example `start a report and
 return immediately` or `start a report asynchronously`, rather than `without

@@ -169,7 +169,10 @@ reference into report authority. Unbound identities and
 identities related to or premodified by another domain block generic
 report-continuation fallback, and a label without a value cannot override a
 clear new start. Generic non-report operation references cannot inject the
-report poll tool. Report starts are representative rank probes but are never
+report poll tool. Bounded `get`/`retrieve` continuations and
+`first N ... rows` requests use the same clause and identity checks. A `to` or
+`with` target naming another GAM domain fails closed, while lifecycle phrases
+such as `to completion` remain valid. Report starts are representative rank probes but are never
 no-match recovery candidates.
 Negative query syntax remains fail-closed under the shared inventory policy.
 For a nonblocking run, use an affirmative bounded form such as `start a report

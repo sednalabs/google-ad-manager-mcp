@@ -8016,6 +8016,8 @@ mod tests {
             "start a campaign delivery audit with a saved report",
             "start a report and return its operation handle",
             "start a report and fetch the first 100 rows",
+            "start a report and get its operation id",
+            "start a report and retrieve its first 100 result rows",
         ] {
             let explicit_start = server
                 .find_tools(Parameters(FindToolsArgs {
@@ -8102,6 +8104,9 @@ mod tests {
             "get the status of report operation 123",
             "retrieve existing report operation 123",
             "poll report operation 123 and fetch the first 100 rows",
+            "check the report and retrieve its operation id",
+            "poll report operation 123 and get the first 100 report result rows",
+            "poll report operation 123 to completion",
             "check operation handle networks/123/operations/reports/runs/run_456-abc",
             "check operation handle `networks/123/operations/reports/runs/789`",
             "check operation_name=networks/123/operations/reports/runs/789",
@@ -8178,6 +8183,11 @@ mod tests {
             "use advertiser's current operation 123 for my saved report",
             "advertiser's operation: networks/123/operations/reports/runs/789",
             "campaign=networks/123/operations/reports/runs/789",
+            "advertiser_get_current_operation=networks/123/operations/reports/runs/789",
+            "check report operation networks/123/operations/reports/runs/789 and advertiser get operation networks/123/operations/reports/runs/789",
+            "check operation_name=networks/123/operations/reports/runs/789 with advertiser",
+            "check report operation 123 with campaign",
+            "check report operation 123 to advertiser",
             "check report operation networks/123/operations/reports/runs/789 and advertiser operation networks/123/operations/reports/runs/789",
             "check report operation 123 and report operation 456",
             "check report operation 123 and 456",
@@ -8191,6 +8201,8 @@ mod tests {
             "show report result rows for advertiser id 123",
             "show report result rows for advertiser 123, page 2",
             "check operation_name=networks/123/operations/reports/runs/789?x=1",
+            "check operation_name=networks/123/operations/reports/runs/789.report",
+            "check networks/123/operations/reports/runs/789 and networks/123/operations/reports/runs/789.report",
             "check https://example.invalid/networks/123/operations/reports/runs/789",
             "start a report without waiting",
         ] {

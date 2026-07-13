@@ -219,6 +219,10 @@ Unbound identities and identities related to or
 premodified by another domain block generic report-continuation fallback, and a
 label without a value cannot override a clear new start.
 Generic non-report operation identity cannot inject the report poll tool.
+Bounded `get`/`retrieve` continuations and `first N ... rows` requests use the
+same clause and identity checks. A `to` or `with` target naming another GAM
+domain fails closed, while lifecycle phrases such as `to completion` remain
+valid.
 Negative query syntax remains fail-closed under the shared search policy;
 nonblocking starts use affirmative `return immediately` or `asynchronously`
 language rather than a `without waiting` exception.
