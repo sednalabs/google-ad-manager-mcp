@@ -21,7 +21,7 @@ use crate::ad_unit_retirement::{
 };
 use crate::auth_ux::{gcloud_adc_login_command, shell_join_with_cloudsdk_config};
 use crate::client::{
-    AdManagerClient, CatalogCollection, DEFAULT_SOAP_API_VERSION,
+    AdManagerClient, CatalogCollection, CompletedReportRun, DEFAULT_SOAP_API_VERSION,
     MAX_REPORT_INITIAL_POLL_INTERVAL_MS, MAX_REPORT_RESULT_PAGE_SIZE, RestWriteOperation,
     RestWritePlan, RestWriteResource, SoapTraffickingApplyResult, SoapTraffickingOperation,
     SoapTraffickingPlan, YieldGroupUpdateSoapRequest, canonical_report_name,
