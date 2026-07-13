@@ -141,10 +141,10 @@ impl AdManagerError {
                 "Retry the request with bounded backoff, then confirm the Google principal can access the target network if the failure persists."
             }
             Self::UpstreamContract {
-                field: "operation.completed_report_identity",
+                field: "operation.completed_report_identity" | "operation.completed_state",
                 ..
             } => {
-                "Inspect the completed operation and saved report identity; do not repeat the unchanged poll until a safe report or result resource is known."
+                "Inspect the completed operation, terminal state, and saved report identity; do not repeat the unchanged poll until the provider contract issue is understood."
             }
             Self::UpstreamContract { .. } => {
                 "Do not reuse the malformed provider value; retry the read and report an adapter or upstream contract defect if it persists."
