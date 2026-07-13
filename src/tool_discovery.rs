@@ -568,11 +568,11 @@ fn report_discovery_intent(query: Option<&str>) -> ReportDiscoveryIntent {
             ReportStartActionTail::Candidate {
                 tail,
                 tail_start_index,
-            } => (
-                true,
-                report_start_tail_is_safe(tail, tail_start_index, &clause_text),
-                false,
-            ),
+            } => match report_start_tail_safety(tail, tail_start_index, &clause_text) {
+                ReportStartTailSafety::Safe => (true, true, false),
+                ReportStartTailSafety::Unsupported => (true, false, false),
+                ReportStartTailSafety::Rejected => (true, false, true),
+            },
             ReportStartActionTail::Rejected => (true, false, true),
         };
     if rejected_new_run_action {
@@ -1461,6 +1461,12 @@ enum ReportStartActionTail<'a> {
     Rejected,
 }
 
+enum ReportStartTailSafety {
+    Safe,
+    Unsupported,
+    Rejected,
+}
+
 fn report_start_action_tail<'a>(
     terms: &'a [&'a str],
     report_context: bool,
@@ -1858,38 +1864,43 @@ fn campaign_delivery_audit_report_object_end(terms: &[&str]) -> Option<usize> {
     matches!(terms.get(index), Some(&"report" | &"reports")).then_some(index + 1)
 }
 
-fn report_start_tail_is_safe(terms: &[&str], tail_start_index: usize, clause_text: &str) -> bool {
+fn report_start_tail_safety(
+    terms: &[&str],
+    tail_start_index: usize,
+    clause_text: &str,
+) -> ReportStartTailSafety {
     if terms.is_empty() {
-        return true;
+        return ReportStartTailSafety::Safe;
     }
     let term_spans = ascii_alphanumeric_term_spans(clause_text);
     let Some((_, report_end)) = tail_start_index
         .checked_sub(1)
         .and_then(|report_index| term_spans.get(report_index))
     else {
-        return false;
+        return ReportStartTailSafety::Rejected;
     };
     let Some((_, tail_end)) = term_spans.get(tail_start_index + terms.len() - 1) else {
-        return false;
+        return ReportStartTailSafety::Rejected;
     };
     if report_range_has_invalid_separator(clause_text, *report_end, *tail_end, true) {
-        return false;
+        return ReportStartTailSafety::Rejected;
     }
     if terms.iter().enumerate().any(|(index, term)| {
-        (*term == "run" && !report_tail_run_is_noun(terms, index))
+        (*term == "run"
+            && !report_tail_run_is_noun(terms, index, tail_start_index, clause_text, &term_spans))
             || (is_report_start_action(term)
                 && report_start_object_end(&terms[index + 1..]).is_some())
     }) {
-        return false;
+        return ReportStartTailSafety::Rejected;
     }
     if terms.iter().all(|term| matches!(*term, "now" | "please")) {
-        return true;
+        return ReportStartTailSafety::Safe;
     }
     if terms
         .iter()
         .all(|term| matches!(*term, "asynchronously" | "async" | "now" | "please"))
     {
-        return true;
+        return ReportStartTailSafety::Safe;
     }
     let starts_as_continuation = matches!(terms.first(), Some(&"and" | &"then" | &"until"));
     let has_continuation_action = terms.iter().any(|term| {
@@ -1908,7 +1919,7 @@ fn report_start_tail_is_safe(terms: &[&str], tail_start_index: usize, clause_tex
                     | "retrieving"
             )
     });
-    starts_as_continuation
+    if starts_as_continuation
         && has_continuation_action
         && terms.iter().all(|term| {
             is_report_continuation_term(term)
@@ -1965,20 +1976,63 @@ fn report_start_tail_is_safe(terms: &[&str], tail_start_index: usize, clause_tex
                         | "please"
                 )
         })
+    {
+        ReportStartTailSafety::Safe
+    } else {
+        ReportStartTailSafety::Unsupported
+    }
 }
 
-fn report_tail_run_is_noun(terms: &[&str], index: usize) -> bool {
+fn report_tail_run_is_noun(
+    terms: &[&str],
+    index: usize,
+    tail_start_index: usize,
+    clause_text: &str,
+    term_spans: &[(usize, usize)],
+) -> bool {
     let previous = index
         .checked_sub(1)
         .and_then(|previous| terms.get(previous));
     let next = terms.get(index + 1);
-    previous.is_some_and(|term| {
-        is_report_determiner(term)
-            || matches!(
-                *term,
-                "its" | "new" | "current" | "latest" | "recent" | "existing" | "report"
+    let global_index = tail_start_index + index;
+    let previous_is_adjacent_noun =
+        previous.is_some_and(|term| {
+            is_report_determiner(term)
+                || matches!(
+                    *term,
+                    "its" | "new" | "current" | "latest" | "recent" | "existing" | "report"
+                )
+        }) && global_index.checked_sub(1).is_some_and(|previous_index| {
+            report_terms_have_only_word_separator(
+                clause_text,
+                term_spans,
+                previous_index,
+                global_index,
             )
-    }) || next.is_some_and(|term| matches!(*term, "id" | "name" | "handle" | "of"))
+        });
+    let next_is_adjacent_noun = next
+        .is_some_and(|term| matches!(*term, "id" | "name" | "handle" | "of"))
+        && report_terms_have_only_word_separator(
+            clause_text,
+            term_spans,
+            global_index,
+            global_index + 1,
+        );
+    previous_is_adjacent_noun || next_is_adjacent_noun
+}
+
+fn report_terms_have_only_word_separator(
+    clause_text: &str,
+    term_spans: &[(usize, usize)],
+    left_index: usize,
+    right_index: usize,
+) -> bool {
+    let (Some((_, left_end)), Some((right_start, _))) =
+        (term_spans.get(left_index), term_spans.get(right_index))
+    else {
+        return false;
+    };
+    !report_range_has_invalid_separator(clause_text, *left_end, *right_start, false)
 }
 
 fn is_report_determiner(term: &str) -> bool {
@@ -3370,6 +3424,8 @@ mod tests {
             "start a report then poll it and execute the saved report",
             "start a report then poll it and run it",
             "start a report then poll it and run its report",
+            "start a report then poll the report, run it",
+            "start a report then poll report operation 123 and run it",
         ] {
             assert_eq!(
                 report_discovery_intent(Some(query)),
