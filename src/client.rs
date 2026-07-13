@@ -1025,9 +1025,11 @@ impl AdManagerClient {
                     }
                 }
             };
-            if let Some((projected_operation, message)) =
-                terminal_report_failure_observation(&operation, &operation_name)
-            {
+            if let Some((_, projected_operation, message)) = terminal_report_failure_observation(
+                &operation,
+                Some(&operation_name),
+                bound_report_name.as_deref(),
+            ) {
                 return Err(ReportPollFailure {
                     error: AdManagerError::ReportRunFailed {
                         operation_name: operation_name.to_string(),
@@ -1707,18 +1709,29 @@ impl AdManagerClient {
     }
 }
 
-fn terminal_report_failure_observation(
+pub(crate) fn terminal_report_failure_observation(
     operation: &Value,
-    expected_operation_name: &str,
-) -> Option<(Value, String)> {
+    expected_operation_name: Option<&str>,
+    expected_report_name: Option<&str>,
+) -> Option<(String, Value, String)> {
     if operation.get("done").and_then(Value::as_bool) != Some(true)
         || !operation.get("error").is_some_and(Value::is_object)
         || operation
             .get("response")
             .is_some_and(|response| !response.is_null())
-        || !report_operation_name_matches(operation, expected_operation_name)
     {
         return None;
+    }
+    let operation_name = operation.get("name").and_then(Value::as_str)?;
+    let operation_name = validate_operation_name(operation_name).ok()?;
+    if expected_operation_name.is_some_and(|expected| expected != operation_name) {
+        return None;
+    }
+    if let Some(expected_report_name) = expected_report_name {
+        let expected_report_name = validate_report_name(expected_report_name).ok()?;
+        if operation_name.split('/').nth(1) != expected_report_name.split('/').nth(1) {
+            return None;
+        }
     }
     let message = operation
         .get("error")
@@ -1733,7 +1746,11 @@ fn terminal_report_failure_observation(
                     .to_string(),
             )
         });
-    Some((project_report_operation(operation), message))
+    Some((
+        operation_name.to_string(),
+        project_report_operation(operation),
+        message,
+    ))
 }
 
 fn report_operation_name_matches(operation: &Value, expected_operation_name: &str) -> bool {

@@ -25,8 +25,9 @@ use crate::client::{
     MAX_REPORT_INITIAL_POLL_INTERVAL_MS, MAX_REPORT_RESULT_PAGE_SIZE, RestWriteOperation,
     RestWritePlan, RestWriteResource, SoapTraffickingApplyResult, SoapTraffickingOperation,
     SoapTraffickingPlan, YieldGroupUpdateSoapRequest, canonical_report_name,
-    project_report_operation, soap_error_message_with_truncation, validate_operation_name,
-    validate_report_result_name, validate_report_run_handoff, validate_soap_api_version,
+    project_report_operation, soap_error_message_with_truncation,
+    terminal_report_failure_observation, validate_operation_name, validate_report_result_name,
+    validate_report_run_handoff, validate_soap_api_version,
 };
 use crate::config::{
     GCLOUD_ADC_REQUIRED_SCOPE, MAX_REPORT_POLL_TIMEOUT_MS, server_adc_credentials_path,
@@ -1911,6 +1912,27 @@ impl AdManagerServer {
             Err(err) => return Ok(contract::error(err, started)),
         };
 
+        if let Some((operation_name, operation, message)) =
+            terminal_report_failure_observation(&initial_operation, None, Some(&report_name))
+        {
+            return Ok(contract::error_with_detail(
+                AdManagerError::ReportRunFailed {
+                    operation_name: operation_name.clone(),
+                    message,
+                },
+                json!({
+                    "operation_name": operation_name,
+                    "report_name": report_name,
+                    "started_new_run": true,
+                    "terminal": true,
+                    "operation_terminal_state_confirmed": true,
+                    "continuation_available": false,
+                    "operation": operation,
+                }),
+                started,
+            ));
+        }
+
         let (operation_name, operation) = match validate_report_run_handoff(
             &initial_operation,
             &report_name,
@@ -1933,32 +1955,6 @@ impl AdManagerServer {
                 ));
             }
         };
-
-        if initial_operation.get("done").and_then(Value::as_bool) == Some(true)
-            && initial_operation.get("error").is_some()
-        {
-            let message = operation
-                .get("error")
-                .and_then(|error| error.get("message"))
-                .and_then(Value::as_str)
-                .unwrap_or("report execution failed")
-                .to_string();
-            return Ok(contract::error_with_detail(
-                AdManagerError::ReportRunFailed {
-                    operation_name: operation_name.clone(),
-                    message,
-                },
-                json!({
-                    "operation_name": operation_name,
-                    "report_name": report_name,
-                    "started_new_run": true,
-                    "terminal": true,
-                    "continuation_available": false,
-                    "operation": operation,
-                }),
-                started,
-            ));
-        }
 
         if initial_operation.get("done").and_then(Value::as_bool) == Some(true) {
             return Ok(poll_report_operation_tool_result(
@@ -8330,40 +8326,63 @@ mod tests {
     #[tokio::test]
     async fn immediate_terminal_report_error_is_redacted_and_has_no_continuation() {
         let operation_name = "networks/123/operations/reports/runs/789";
-        let (base_url, requests, server) = serve_report_http_sequence(vec![(
-            200,
-            json!({
+        for (metadata, explicit_null_response) in [
+            (None, false),
+            (None, true),
+            (Some(Value::Null), false),
+            (Some(json!({"report": "not-a-report"})), false),
+            (Some(json!({"report": "networks/999/reports/456"})), false),
+        ] {
+            let mut operation = json!({
                 "name": operation_name,
                 "done": true,
                 "error": {"code": 13, "message": "authorization=secret-value report failed"}
-            }),
-        )]);
-        let client = AdManagerClient::for_test_api_base_url(base_url);
-        let server_under_test = AdManagerServer::new(crate::Settings::default())
-            .expect("build terminal report server")
-            .with_test_client(client);
-        let result = server_under_test
-            .gam_report_run(Parameters(ReportRunArgs {
-                network_code: "123".to_string(),
-                report_id: "456".to_string(),
-                wait_for_completion: Some(false),
-                fetch_first_page: None,
-                result_page_size: None,
-                poll_timeout_ms: None,
-                initial_poll_interval_ms: None,
-            }))
-            .await
-            .expect("classify terminal report handoff");
-        assert_eq!(result.is_error, Some(true));
-        let response = result.structured_content.expect("terminal report response");
-        assert_eq!(response["error"]["code"], "report_run_failed");
-        assert_eq!(response["error"]["detail"]["terminal"], true);
-        assert_eq!(response["error"]["detail"]["continuation_available"], false);
-        assert!(response["error"]["detail"].get("continuation").is_none());
-        assert!(!response.to_string().contains("secret-value"));
+            });
+            if let Some(metadata) = metadata {
+                operation["metadata"] = metadata;
+            }
+            if explicit_null_response {
+                operation["response"] = Value::Null;
+            }
+            let (base_url, requests, server) = serve_report_http_sequence(vec![(200, operation)]);
+            let client = AdManagerClient::for_test_api_base_url(base_url);
+            let server_under_test = AdManagerServer::new(crate::Settings::default())
+                .expect("build terminal report server")
+                .with_test_client(client);
+            let result = server_under_test
+                .gam_report_run(Parameters(ReportRunArgs {
+                    network_code: "123".to_string(),
+                    report_id: "456".to_string(),
+                    wait_for_completion: Some(false),
+                    fetch_first_page: None,
+                    result_page_size: None,
+                    poll_timeout_ms: None,
+                    initial_poll_interval_ms: None,
+                }))
+                .await
+                .expect("classify terminal report handoff");
+            assert_eq!(result.is_error, Some(true));
+            let response = result.structured_content.expect("terminal report response");
+            assert_eq!(response["error"]["code"], "report_run_failed");
+            assert_eq!(response["error"]["detail"]["terminal"], true);
+            assert_eq!(
+                response["error"]["detail"]["operation_terminal_state_confirmed"],
+                true
+            );
+            assert_eq!(response["error"]["detail"]["continuation_available"], false);
+            assert!(response["error"]["detail"].get("continuation").is_none());
+            assert!(!response.to_string().contains("secret-value"));
+            if explicit_null_response {
+                assert!(
+                    response["error"]["detail"]["operation"]
+                        .get("response")
+                        .is_none()
+                );
+            }
 
-        server.join().expect("join terminal report server");
-        assert_eq!(requests.lock().expect("lock terminal requests").len(), 1);
+            server.join().expect("join terminal report server");
+            assert_eq!(requests.lock().expect("lock terminal requests").len(), 1);
+        }
     }
 
     #[tokio::test]
