@@ -855,18 +855,23 @@ fn report_relation_starts_new_clause(terms: &[&str]) -> bool {
 }
 
 fn report_relation_clause_action(term: &str) -> bool {
-    is_report_continuation_term(term)
+    is_report_start_action(term)
         || matches!(
             term,
-            "show"
+            "continue"
+                | "resume"
+                | "check"
+                | "poll"
+                | "monitor"
+                | "inspect"
+                | "view"
+                | "wait"
+                | "show"
                 | "use"
                 | "fetch"
                 | "get"
                 | "retrieve"
                 | "return"
-                | "start"
-                | "launch"
-                | "execute"
                 | "select"
                 | "choose"
         )
@@ -1435,6 +1440,7 @@ fn report_start_action_tail<'a>(
     if !report_context {
         return None;
     }
+    let term_spans = ascii_alphanumeric_term_spans(normalized);
     terms.iter().enumerate().find_map(|(index, term)| {
         if !is_report_start_action(term) {
             return None;
@@ -1444,10 +1450,28 @@ fn report_start_action_tail<'a>(
         }
         let object_terms = &terms[index + 1..];
         if let Some(consumed) = campaign_delivery_audit_report_object_end(object_terms) {
+            let report_index = index + consumed;
+            if report_action_object_crosses_clause_boundary(
+                normalized,
+                &term_spans,
+                index,
+                report_index,
+            ) {
+                return None;
+            }
             return Some(&object_terms[consumed..]);
         }
         for (candidate_index, candidate) in object_terms.iter().enumerate() {
             if matches!(*candidate, "report" | "reports") {
+                let report_index = index + candidate_index + 1;
+                if report_action_object_crosses_clause_boundary(
+                    normalized,
+                    &term_spans,
+                    index,
+                    report_index,
+                ) {
+                    return None;
+                }
                 return Some(&object_terms[candidate_index + 1..]);
             }
             if !is_report_object_modifier(candidate) {
@@ -1456,6 +1480,45 @@ fn report_start_action_tail<'a>(
         }
         None
     })
+}
+
+fn ascii_alphanumeric_term_spans(text: &str) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
+    let mut start = None;
+    for (index, character) in text.char_indices() {
+        if character.is_ascii_alphanumeric() {
+            start.get_or_insert(index);
+        } else if let Some(start) = start.take() {
+            spans.push((start, index));
+        }
+    }
+    if let Some(start) = start {
+        spans.push((start, text.len()));
+    }
+    spans
+}
+
+fn report_action_object_crosses_clause_boundary(
+    normalized: &str,
+    term_spans: &[(usize, usize)],
+    action_index: usize,
+    report_index: usize,
+) -> bool {
+    let (Some((_, action_end)), Some((report_start, _))) =
+        (term_spans.get(action_index), term_spans.get(report_index))
+    else {
+        return true;
+    };
+    normalized[*action_end..*report_start]
+        .chars()
+        .any(|character| {
+            (character.is_ascii_punctuation()
+                && !matches!(
+                    character,
+                    '\'' | '"' | '`' | '(' | ')' | '[' | ']' | '{' | '}'
+                ))
+                || matches!(character, '\u{2013}' | '\u{2014}')
+        })
 }
 
 fn is_report_start_action(term: &str) -> bool {
@@ -1489,32 +1552,39 @@ fn report_action_prefix_is_authoritative(prefix: &[&str]) -> bool {
     report_selection_clause_is_authoritative(selection_clause)
 }
 
-fn strip_report_directive_prefix<'a>(terms: &'a [&'a str]) -> &'a [&'a str] {
-    let terms = terms
-        .strip_prefix(&["please"])
-        .or_else(|| terms.strip_prefix(&["now"]))
-        .unwrap_or(terms);
-    if let Some(rest) = terms
-        .strip_prefix(&["can", "you"])
-        .or_else(|| terms.strip_prefix(&["could", "you"]))
-        .or_else(|| terms.strip_prefix(&["would", "you"]))
-        .or_else(|| terms.strip_prefix(&["will", "you"]))
-    {
-        return rest.strip_prefix(&["please"]).unwrap_or(rest);
+fn strip_report_directive_prefix<'a>(mut terms: &'a [&'a str]) -> &'a [&'a str] {
+    loop {
+        if let Some(rest) = terms
+            .strip_prefix(&["please"])
+            .or_else(|| terms.strip_prefix(&["now"]))
+        {
+            terms = rest;
+            continue;
+        }
+        if let Some(rest) = terms
+            .strip_prefix(&["can", "you"])
+            .or_else(|| terms.strip_prefix(&["could", "you"]))
+            .or_else(|| terms.strip_prefix(&["would", "you"]))
+            .or_else(|| terms.strip_prefix(&["will", "you"]))
+        {
+            terms = rest;
+            continue;
+        }
+        if let Some(rest) = terms
+            .strip_prefix(&["i", "want", "to"])
+            .or_else(|| terms.strip_prefix(&["i", "need", "to"]))
+            .or_else(|| terms.strip_prefix(&["we", "want", "to"]))
+            .or_else(|| terms.strip_prefix(&["we", "need", "to"]))
+            .or_else(|| terms.strip_prefix(&["i", "want", "you", "to"]))
+            .or_else(|| terms.strip_prefix(&["i", "need", "you", "to"]))
+            .or_else(|| terms.strip_prefix(&["we", "want", "you", "to"]))
+            .or_else(|| terms.strip_prefix(&["we", "need", "you", "to"]))
+        {
+            terms = rest;
+            continue;
+        }
+        return terms;
     }
-    if let Some(rest) = terms
-        .strip_prefix(&["i", "want", "to"])
-        .or_else(|| terms.strip_prefix(&["i", "need", "to"]))
-        .or_else(|| terms.strip_prefix(&["we", "want", "to"]))
-        .or_else(|| terms.strip_prefix(&["we", "need", "to"]))
-        .or_else(|| terms.strip_prefix(&["i", "want", "you", "to"]))
-        .or_else(|| terms.strip_prefix(&["i", "need", "you", "to"]))
-        .or_else(|| terms.strip_prefix(&["we", "want", "you", "to"]))
-        .or_else(|| terms.strip_prefix(&["we", "need", "you", "to"]))
-    {
-        return rest.strip_prefix(&["please"]).unwrap_or(rest);
-    }
-    terms
 }
 
 fn report_selection_clause_is_authoritative(terms: &[&str]) -> bool {
@@ -2911,6 +2981,8 @@ mod tests {
             "check operation 123 for the current report and poll to completion",
             "check report operation 123 to completion and show inventory report rows",
             "check report operation 123 to completion and please show inventory report rows",
+            "check report operation 123 to completion and please now show inventory report rows",
+            "check report operation 123 to completion and run inventory report",
         ] {
             let mut results = vec![result("gam_report_run")];
             let companions = workflow_companions(&results, Some(query));
@@ -3128,6 +3200,12 @@ mod tests {
             "start a report and please report operation 123",
             "inspect inventory and can you please report operation 123",
             "start a report and now report operation 123",
+            "check operation 123 for the report and monitoring campaign",
+            "check operation 123 for the report and checking advertiser",
+            "launch the campaign; report now",
+            "launch the campaign, report now",
+            "launch the campaign. report now",
+            "launch the campaign: report now",
         ] {
             assert_eq!(
                 report_discovery_intent(Some(query)),
