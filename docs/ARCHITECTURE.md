@@ -192,7 +192,9 @@ hosted-client metadata are emitted only when `include_schema=true`, and only
 when the complete direct-plus-companion selection contains at most five tools.
 Report-run starts use a non-read-only toolkit risk posture because they create
 an upstream job. Discovery exposes a direct start only when `read_only=false`
-and the bounded toolkit query expresses explicit new-run intent.
+and the bounded toolkit query expresses explicit action-object new-run intent.
+Bare, latest, and current report-run noun phrases resolve to existing-operation
+continuation rather than treating `run` as a start verb.
 Existing-operation continuation context replaces any ranked start with a non-callable
 condition record and, when the active filter would exclude it, exposes the
 GET-only poll tool as a callable safe alternative to prevent replay.

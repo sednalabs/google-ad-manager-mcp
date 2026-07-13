@@ -481,13 +481,15 @@ fn report_discovery_intent(query: Option<&str>) -> ReportDiscoveryIntent {
         || normalized.contains("existing operation")
         || normalized.contains("operation name")
         || normalized.contains("operation handle");
+    let report_run_noun_reference = has_report_run_noun_reference(&terms);
     if explicit_existing_operation_reference {
         return ReportDiscoveryIntent::ExistingOperationContinuation;
     }
 
     if clear_new_run_action {
         ReportDiscoveryIntent::ExplicitNewRun
-    } else if normalized.contains("continue waiting")
+    } else if report_run_noun_reference
+        || normalized.contains("continue waiting")
         || (strong_continuation_action && (report_context || operation_context))
         || (wait_action && (report_context || operation_context))
     {
@@ -505,23 +507,48 @@ fn has_clear_report_start_action(terms: &[&str], report_context: bool) -> bool {
         if !matches!(*term, "start" | "run" | "launch" | "execute") {
             return false;
         }
-        let next_significant = terms[index + 1..]
+        if terms[..index]
             .iter()
-            .copied()
-            .find(|term| !matches!(*term, "a" | "an" | "the" | "one" | "new" | "saved"));
-        if next_significant.is_some_and(|term| {
-            is_report_continuation_term(term) || matches!(term, "latest" | "operation")
-        }) {
-            return false;
-        }
-        if *term == "run"
-            && terms[..index]
-                .iter()
-                .any(|term| is_report_continuation_term(term))
+            .any(|term| is_report_continuation_term(term))
         {
             return false;
         }
-        true
+        let mut significant_terms = 0_u8;
+        for candidate in &terms[index + 1..] {
+            if matches!(*candidate, "a" | "an" | "the" | "one" | "new" | "saved") {
+                continue;
+            }
+            significant_terms = significant_terms.saturating_add(1);
+            if significant_terms > 8
+                || is_report_continuation_term(candidate)
+                || matches!(
+                    *candidate,
+                    "latest"
+                        | "current"
+                        | "operation"
+                        | "operations"
+                        | "handle"
+                        | "status"
+                        | "result"
+                        | "results"
+                )
+            {
+                return false;
+            }
+            if matches!(*candidate, "report" | "reports") {
+                return true;
+            }
+        }
+        false
+    })
+}
+
+fn has_report_run_noun_reference(terms: &[&str]) -> bool {
+    terms.iter().enumerate().any(|(index, term)| {
+        matches!(*term, "run" | "runs")
+            && terms[..index]
+                .iter()
+                .any(|candidate| matches!(*candidate, "report" | "reports"))
     })
 }
 
@@ -1444,6 +1471,45 @@ mod tests {
     }
 
     #[test]
+    fn report_run_noun_phrases_are_poll_only_under_write_like_filter() {
+        for query in [
+            "report run",
+            "latest report run",
+            "current report run",
+            "the latest report run",
+            "the report's most recent run",
+            "show the current report run",
+            "report runs",
+            "start the latest report run",
+        ] {
+            let mut results = vec![result("gam_report_run")];
+            let companions = workflow_companions(&results, Some(query));
+            let resolution = resolve_report_discovery(
+                &mut results,
+                &companions,
+                Some(query),
+                Some("reports"),
+                true,
+                Some(false),
+            );
+            assert!(
+                results.is_empty(),
+                "report start remained callable: {query}"
+            );
+            assert_eq!(
+                resolution.records[0]["report_intent"], "existing_operation_continuation",
+                "noun phrase did not fail closed: {query}"
+            );
+            assert_eq!(resolution.records[0]["callable_as_tool"], false);
+            assert_eq!(
+                resolution.callable_alternatives,
+                vec!["gam_report_operation_poll"],
+                "GET-only continuation missing: {query}"
+            );
+        }
+    }
+
+    #[test]
     fn broad_report_continuation_language_never_classifies_as_a_new_run() {
         for query in [
             "continue the saved report operation",
@@ -1461,6 +1527,14 @@ mod tests {
             "check run status for the report",
             "monitor the report's latest run",
             "inspect the latest report run",
+            "report run",
+            "latest report run",
+            "current report run",
+            "the latest report run",
+            "the report's most recent run",
+            "show the current report run",
+            "report runs",
+            "start the latest report run",
         ] {
             assert_eq!(
                 report_discovery_intent(Some(query)),
@@ -1477,6 +1551,10 @@ mod tests {
             ReportDiscoveryIntent::ExplicitNewRun
         );
         for query in [
+            "start a report",
+            "run the report",
+            "launch a saved report",
+            "execute the report",
             "start a saved report then monitor its status",
             "run the campaign delivery report and check its status",
             "launch a report and inspect it until completion",
