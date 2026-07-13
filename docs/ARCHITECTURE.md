@@ -83,13 +83,19 @@ observation, avoiding an unnecessary GET when it is already complete. Invalid
 KiB and projected to the documented name/metadata/done/error/response fields.
 Result-page reads are
 capped at 512 KiB and page size 1,000, validate documented row, token, and count
-types, then pass model-visible and complete RMCP result guards. Poll controls
+types, then pass model-visible and complete RMCP result guards. Direct row-fetch
+failures preserve the exact bounded result name, page size, and page token.
+Only transport, 408, 429, and 5xx failures expose an executable GET
+continuation; invalid input, authentication, permanent 4xx, malformed JSON, and
+provider-contract failures require remediation without unchanged replay. Poll controls
 require a 5-to-30-second initial interval and at most 24 hours, with bounded
 backoff. An absolute deadline bounds every in-flight GET and sleep. Each
 continuation carries the optional expected report identity; malformed poll
 observations preserve the last valid observation and remain safely GET-resumable.
 Deterministic result-size failures retain bounded operation/report/result/page
-handles and return a non-executable smaller-page adjustment.
+handles and return a non-executable smaller-page adjustment. If page size 1 is
+still too large, the saved report dimensions or filters must be reduced; the
+scratchpad uses the same bounded fetch path and is not an overflow bypass.
 
 SOAP v202605 by default:
 
