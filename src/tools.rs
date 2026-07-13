@@ -25,9 +25,9 @@ use crate::client::{
     MAX_REPORT_INITIAL_POLL_INTERVAL_MS, MAX_REPORT_RESULT_PAGE_SIZE, RestWriteOperation,
     RestWritePlan, RestWriteResource, SoapTraffickingApplyResult, SoapTraffickingOperation,
     SoapTraffickingPlan, YieldGroupUpdateSoapRequest, canonical_report_name,
-    project_report_operation, soap_error_message_with_truncation,
-    terminal_report_failure_observation, validate_operation_name, validate_report_result_name,
-    validate_report_run_handoff, validate_soap_api_version,
+    project_report_operation, report_operation_name_for_report, soap_error_message_with_truncation,
+    validate_operation_name, validate_report_result_name, validate_report_run_handoff,
+    validate_soap_api_version,
 };
 use crate::config::{
     GCLOUD_ADC_REQUIRED_SCOPE, MAX_REPORT_POLL_TIMEOUT_MS, server_adc_credentials_path,
@@ -1912,25 +1912,26 @@ impl AdManagerServer {
             Err(err) => return Ok(contract::error(err, started)),
         };
 
-        if let Some((operation_name, operation, message)) =
-            terminal_report_failure_observation(&initial_operation, None, Some(&report_name))
+        if initial_operation.get("done").and_then(Value::as_bool) == Some(true)
+            && let Some(operation_name) =
+                report_operation_name_for_report(&initial_operation, &report_name)
         {
-            return Ok(contract::error_with_detail(
-                AdManagerError::ReportRunFailed {
-                    operation_name: operation_name.clone(),
-                    message,
+            return Ok(poll_report_operation_tool_result(
+                self.client(),
+                ReportOperationPollOptions {
+                    operation_name: &operation_name,
+                    fetch_first_page: wait_for_completion && fetch_first_page,
+                    result_page_size: args.result_page_size,
+                    timeout,
+                    initial_interval,
+                    started_new_run: true,
+                    expected_report_name: Some(&report_name),
+                    initial_operation: Some(initial_operation),
+                    wait_requested: wait_for_completion,
                 },
-                json!({
-                    "operation_name": operation_name,
-                    "report_name": report_name,
-                    "started_new_run": true,
-                    "terminal": true,
-                    "operation_terminal_state_confirmed": true,
-                    "continuation_available": false,
-                    "operation": operation,
-                }),
                 started,
-            ));
+            )
+            .await);
         }
 
         let (operation_name, operation) = match validate_report_run_handoff(
@@ -1955,25 +1956,6 @@ impl AdManagerServer {
                 ));
             }
         };
-
-        if initial_operation.get("done").and_then(Value::as_bool) == Some(true) {
-            return Ok(poll_report_operation_tool_result(
-                self.client(),
-                ReportOperationPollOptions {
-                    operation_name: &operation_name,
-                    fetch_first_page: wait_for_completion && fetch_first_page,
-                    result_page_size: args.result_page_size,
-                    timeout,
-                    initial_interval,
-                    started_new_run: true,
-                    expected_report_name: Some(&report_name),
-                    initial_operation: Some(initial_operation),
-                    wait_requested: wait_for_completion,
-                },
-                started,
-            )
-            .await);
-        }
 
         if !wait_for_completion {
             let handoff = ReportSizeHandoff {
@@ -8382,6 +8364,71 @@ mod tests {
 
             server.join().expect("join terminal report server");
             assert_eq!(requests.lock().expect("lock terminal requests").len(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn immediate_completed_unsafe_union_uses_terminal_remediation_contract() {
+        let operation_name = "networks/123/operations/reports/runs/789";
+        for operation in [
+            json!({
+                "name": operation_name,
+                "metadata": {"report": "networks/123/reports/456"},
+                "done": true,
+                "error": {"code": 13, "message": "failed"},
+                "response": {"reportResult": "networks/123/reports/456/results/987"}
+            }),
+            json!({
+                "name": operation_name,
+                "metadata": {"report": "networks/123/reports/456"},
+                "done": true,
+                "error": null,
+                "response": {"reportResult": "networks/123/reports/456/results/987"}
+            }),
+            json!({
+                "name": operation_name,
+                "metadata": {"report": "networks/123/reports/456"},
+                "done": true,
+                "response": {"reportResult": 42}
+            }),
+        ] {
+            let (base_url, requests, server) = serve_report_http_sequence(vec![(200, operation)]);
+            let client = AdManagerClient::for_test_api_base_url(base_url);
+            let server_under_test = AdManagerServer::new(crate::Settings::default())
+                .expect("build immediate unsafe-union server")
+                .with_test_client(client);
+            let result = server_under_test
+                .gam_report_run(Parameters(ReportRunArgs {
+                    network_code: "123".to_string(),
+                    report_id: "456".to_string(),
+                    wait_for_completion: Some(false),
+                    fetch_first_page: Some(false),
+                    result_page_size: None,
+                    poll_timeout_ms: None,
+                    initial_poll_interval_ms: None,
+                }))
+                .await
+                .expect("classify immediate completed unsafe union");
+            let response = result
+                .structured_content
+                .expect("immediate unsafe-union response");
+            assert_eq!(response["error"]["code"], "upstream_contract_error");
+            assert_eq!(response["error"]["detail"]["terminal"], true);
+            assert_eq!(
+                response["error"]["detail"]["operation_terminal_state_confirmed"],
+                true
+            );
+            assert_eq!(
+                response["error"]["detail"]["poll_outcome"],
+                "remediation_required"
+            );
+            assert_eq!(response["error"]["detail"]["continuation_available"], false);
+            assert!(response["error"]["detail"].get("continuation").is_none());
+
+            server.join().expect("join immediate unsafe-union server");
+            let requests = requests.lock().expect("lock immediate requests");
+            assert_eq!(requests.len(), 1);
+            assert!(requests[0].starts_with("POST /v1/networks/123/reports/456:run "));
         }
     }
 

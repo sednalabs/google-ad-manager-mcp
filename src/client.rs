@@ -1728,8 +1728,9 @@ pub(crate) fn terminal_report_failure_observation(
         return None;
     }
     if let Some(expected_report_name) = expected_report_name {
-        let expected_report_name = validate_report_name(expected_report_name).ok()?;
-        if operation_name.split('/').nth(1) != expected_report_name.split('/').nth(1) {
+        if report_operation_name_for_report(operation, expected_report_name).as_deref()
+            != Some(operation_name)
+        {
             return None;
         }
     }
@@ -1751,6 +1752,17 @@ pub(crate) fn terminal_report_failure_observation(
         project_report_operation(operation),
         message,
     ))
+}
+
+pub(crate) fn report_operation_name_for_report(
+    operation: &Value,
+    expected_report_name: &str,
+) -> Option<String> {
+    let operation_name = operation.get("name").and_then(Value::as_str)?;
+    let operation_name = validate_operation_name(operation_name).ok()?;
+    let expected_report_name = validate_report_name(expected_report_name).ok()?;
+    (operation_name.split('/').nth(1) == expected_report_name.split('/').nth(1))
+        .then(|| operation_name.to_string())
 }
 
 fn report_operation_name_matches(operation: &Value, expected_operation_name: &str) -> bool {
