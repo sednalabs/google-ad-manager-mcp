@@ -145,15 +145,16 @@ starting a saved report creates an upstream job. An explicit
 `read_only=false` report-start search exposes `gam_report_run`, its schema, and
 its toolkit risk posture only when the bounded toolkit query also expresses
 explicit action-object new-run intent: start, run, launch, or execute must
-precede a report object with only recognized report modifiers between them.
-The remaining query must be empty or a bounded continuation of that newly
-started run. Planning, explanatory, negative, or unrelated language fails
-closed. Bare, latest, current, and reverse `run of/for ... report` noun phrases
-are existing-operation references and expose only GET-based polling. Any
-explicit report operation or run identity takes precedence over a start phrase,
-while a generic non-report operation reference cannot inject the report poll
-tool. Report starts are representative rank probes but are never no-match
-recovery candidates.
+follow a bounded directive prefix and precede a report object with only
+recognized report modifiers between them. The remaining query must be empty or
+a bounded continuation of that newly started run. Planning, explanatory,
+negative, or unrelated language fails closed. Bare, latest, current, and
+reverse `run of/for ... report` noun phrases are existing-operation references
+and expose only GET-based polling. Report operation and run identities must be
+locally bound to the report clause, and a label without a value cannot override
+a clear new start. Generic non-report operation references cannot inject the
+report poll tool. Report starts are representative rank probes but are never
+no-match recovery candidates.
 When discovery identifies an existing
 `operation_name` continuation, the same tool is instead emitted as a
 non-callable condition record so it cannot prompt a duplicate start.
