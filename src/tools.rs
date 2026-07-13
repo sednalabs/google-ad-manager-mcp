@@ -8080,6 +8080,8 @@ mod tests {
             "show the current run of the report",
             "start a report, then poll the current run",
             "start a report and check operation 123",
+            "start a report and use run id 123",
+            "start a new report then poll the current run",
         ] {
             let noun_reference = server
                 .find_tools(Parameters(FindToolsArgs {
@@ -8117,6 +8119,15 @@ mod tests {
             "start planning the saved report",
             "execute a query against the report",
             "start server for the report",
+            "show me how to run a report",
+            "start a report planning session",
+            "start a campaign with a report",
+            "start a report server",
+            "start a report campaign",
+            "start a report and email the results",
+            "execute line-item operation 123",
+            "check line-item operation 123",
+            "continue waiting",
         ] {
             let ambiguous_action = server
                 .find_tools(Parameters(FindToolsArgs {
@@ -8139,11 +8150,30 @@ mod tests {
                 "report start was callable for unrelated action: {query}"
             );
             assert!(ambiguous_action["schemas"].get("gam_report_run").is_none());
+            assert!(
+                !ambiguous_action["openai_allowed_tools"]
+                    .as_array()
+                    .expect("ambiguous-action allowed tools")
+                    .contains(&json!("gam_report_operation_poll")),
+                "report poll was injected for unrelated action: {query}"
+            );
+            assert!(
+                ambiguous_action["schemas"]
+                    .get("gam_report_operation_poll")
+                    .is_none()
+            );
         }
 
         for query in [
             "run the current-quarter delivery report",
             "run the latest report",
+            "run this report",
+            "start my saved report",
+            "launch another report",
+            "for the current network, run the saved report",
+            "start a report then poll the new run",
+            "run the report then show its result",
+            "run the report now",
         ] {
             let explicit_start = server
                 .find_tools(Parameters(FindToolsArgs {

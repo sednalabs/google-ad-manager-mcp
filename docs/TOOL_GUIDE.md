@@ -146,18 +146,22 @@ starting a saved report creates an upstream job. An explicit
 its toolkit risk posture only when the bounded toolkit query also expresses
 explicit action-object new-run intent: start, run, launch, or execute must
 precede a report object with only recognized report modifiers between them.
-Unrelated intervening verbs or objects fail closed. Bare, latest, current, and
-reverse `run of/for ... report` noun phrases are existing-operation references
-and expose only GET-based polling. Any explicit existing operation or run
-reference takes precedence over a start phrase. Report starts are
-representative rank probes but are never no-match recovery candidates.
+The remaining query must be empty or a bounded continuation of that newly
+started run. Planning, explanatory, negative, or unrelated language fails
+closed. Bare, latest, current, and reverse `run of/for ... report` noun phrases
+are existing-operation references and expose only GET-based polling. Any
+explicit report operation or run identity takes precedence over a start phrase,
+while a generic non-report operation reference cannot inject the report poll
+tool. Report starts are representative rank probes but are never no-match
+recovery candidates.
 When discovery identifies an existing
 `operation_name` continuation, the same tool is instead emitted as a
 non-callable condition record so it cannot prompt a duplicate start.
 Continuation, status, resume, check, poll, monitor, operation-name,
-operation-handle, and wait-without-new-run language under `read_only=false` also exposes
-`gam_report_operation_poll` as a callable GET-only safe alternative in
-`openai_allowed_tools` and requested schemas.
+operation-handle, and wait-without-new-run language under `read_only=false` also
+exposes `gam_report_operation_poll` as a callable GET-only safe alternative in
+`openai_allowed_tools` and requested schemas only when the bounded query
+establishes report context. Generic operation or waiting language does not.
 Existing-operation polling and completed-result retrieval remain executable
 discovery paths. Optional SOAP builder guidance remains callable. A broad
 scratchpad recovery starts with

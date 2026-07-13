@@ -306,11 +306,13 @@ before ingestion. Starting a report creates an upstream job, so
 discovery only when the bounded toolkit query places an explicit start, run,
 launch, or execute action before a report object and the caller sets
 `read_only=false`. Only recognized report-object modifiers may occur between
-that action and object; unrelated verbs or objects fail closed. Bare, latest,
-current, and reverse `run of/for ... report` noun phrases expose only the
-GET-based existing-operation continuation. Any explicit existing operation or
-run reference takes precedence over a start phrase. Report start is not a
-canned retry example.
+that action and object, and any tail must be empty or a bounded continuation of
+the newly started run; planning, explanatory, negative, or unrelated language
+fails closed. Bare, latest, current, and reverse `run of/for ... report` noun
+phrases expose only the GET-based existing-operation continuation. Any explicit
+report operation or run identity takes precedence over a start phrase, while a
+generic non-report operation reference cannot inject the report poll tool.
+Report start is not a canned retry example.
 
 Report runs send the provider-required empty POST body. Definitive 4xx run
 rejections are normal upstream API failures. Once the POST may otherwise have
@@ -398,8 +400,9 @@ guidance, so it is never injected into `openai_allowed_tools` or schemas and
 cannot prompt a duplicate run. Continuation, status, resume, check, poll,
 monitor, operation-name, operation-handle, and wait-without-new-run language
 under `read_only=false` adds `gam_report_operation_poll` as a callable GET-only
-safe alternative in the allowed-tool and requested-schema projections. Outside that continuation
-context, an explicit
+safe alternative only when the bounded query also establishes report context.
+Generic operation or waiting language does not cross that boundary. Outside
+that continuation context, an explicit
 `read_only=false` report-start search returns the tool and schema normally with
 its toolkit risk posture. Optional SOAP builder guidance remains callable.
 The legacy `required` field remains as an equal
