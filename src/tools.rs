@@ -8134,6 +8134,11 @@ mod tests {
             "is it safe, then run a report",
             "assess whether we should run a report",
             "check line-item operation 123 and plan a report",
+            "show me how to select the report, then run the saved report",
+            "should I poll the report operation",
+            "summarize the report and use operation 123 for the line item",
+            "inspect deployment run 123 and summarize a report",
+            "start a report without waiting",
         ] {
             let ambiguous_action = server
                 .find_tools(Parameters(FindToolsArgs {
@@ -8183,7 +8188,8 @@ mod tests {
             "select the report, then run the saved report",
             "start a report then poll the report operation",
             "start a report then wait until it is complete",
-            "start a report without waiting",
+            "start a report and return immediately",
+            "start a report, then fetch the first result page",
             "start a report and return the run id",
             "start a report and show the operation id",
             "start a campaign delivery audit with my saved report",

@@ -201,6 +201,9 @@ reverse `run of/for ... report` noun phrases fail closed to existing-operation
 polling. Report operation and run identities must be locally bound to the
 report clause, and a label without a value cannot override a clear new start.
 Generic non-report operation identity cannot inject the report poll tool.
+Negative query syntax remains fail-closed under the shared search policy;
+nonblocking starts use affirmative `return immediately` language rather than a
+`without waiting` exception.
 This server bounds that surface by:
 
 - requiring an explicit saved report identifier

@@ -314,7 +314,10 @@ the GET-based existing-operation continuation. An explicit report operation or
 run identity takes precedence only when it is locally bound to the report
 clause; an identity label without a value cannot override a clear new start.
 Generic non-report operation references cannot inject the report poll tool.
-Report start is not a canned retry example.
+Negative query syntax remains fail-closed under the shared inventory policy;
+request a nonblocking start affirmatively, for example `start a report and
+return immediately`, rather than `without waiting`. Report start is not a
+canned retry example.
 
 Report runs send the provider-required empty POST body. Definitive 4xx run
 rejections are normal upstream API failures. Once the POST may otherwise have
