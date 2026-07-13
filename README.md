@@ -332,9 +332,11 @@ block report-continuation fallback, and an identity label without a value cannot
 override a new-run action object, even when a later tail term makes the complete
 start request invalid. Invalid start tails therefore fail closed instead of
 being reinterpreted as existing-operation requests. Conjunction-led imperative
-uses of `report` are not ownership anchors. Coordinated relation targets are
-evaluated as a whole, so any non-report GAM domain in the target fails closed
-even when the target also names a report. Generic non-report
+uses of `report` are not ownership anchors, including when bounded directive
+fillers separate the conjunction from the verb. Coordinated noun relation
+targets are evaluated as a whole, so any non-report GAM domain in the target
+fails closed even when the target also names a report; a later imperative
+clause starts a new target boundary. Generic non-report
 operation references cannot inject the report poll tool. Bounded `get`/`retrieve` continuations and
 `first N ... rows` requests use the same clause and identity checks; `to` or
 `with` targets name another GAM domain only fail closed, while lifecycle phrases
