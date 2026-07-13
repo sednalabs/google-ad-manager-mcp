@@ -8258,6 +8258,9 @@ mod tests {
             "start a report then poll it and run its report",
             "start a report then poll the report, run it",
             "start a report then poll report operation 123 and run it",
+            "start a report then poll report operation 123 and start it",
+            "start a report then poll report operation 123 and launch it",
+            "start a report then poll report operation 123 and execute it",
         ] {
             let ambiguous_action = server
                 .find_tools(Parameters(FindToolsArgs {
