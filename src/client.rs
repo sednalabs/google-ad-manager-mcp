@@ -2559,13 +2559,13 @@ fn validate_report_operation_binding(
             message: "report binding did not match the report requested by this run".to_string(),
         });
     }
-    if let Some(report_result) = report_result {
-        if !report_result.starts_with(&format!("{report_name}/results/")) {
-            return Err(AdManagerError::UpstreamContract {
-                field: "operation.response.reportResult",
-                message: "must belong to the report named by operation.metadata.report".to_string(),
-            });
-        }
+    if let Some(report_result) = report_result
+        && !report_result.starts_with(&format!("{report_name}/results/"))
+    {
+        return Err(AdManagerError::UpstreamContract {
+            field: "operation.response.reportResult",
+            message: "must belong to the report named by operation.metadata.report".to_string(),
+        });
     }
 
     let mut projected = project_report_operation(operation);
