@@ -1876,7 +1876,9 @@ fn report_start_tail_is_safe(terms: &[&str], tail_start_index: usize, clause_tex
         return false;
     }
     if terms.iter().enumerate().any(|(index, term)| {
-        is_report_start_action(term) && report_start_object_end(&terms[index + 1..]).is_some()
+        (*term == "run" && !report_tail_run_is_noun(terms, index))
+            || (is_report_start_action(term)
+                && report_start_object_end(&terms[index + 1..]).is_some())
     }) {
         return false;
     }
@@ -1963,6 +1965,20 @@ fn report_start_tail_is_safe(terms: &[&str], tail_start_index: usize, clause_tex
                         | "please"
                 )
         })
+}
+
+fn report_tail_run_is_noun(terms: &[&str], index: usize) -> bool {
+    let previous = index
+        .checked_sub(1)
+        .and_then(|previous| terms.get(previous));
+    let next = terms.get(index + 1);
+    previous.is_some_and(|term| {
+        is_report_determiner(term)
+            || matches!(
+                *term,
+                "its" | "new" | "current" | "latest" | "recent" | "existing" | "report"
+            )
+    }) || next.is_some_and(|term| matches!(*term, "id" | "name" | "handle" | "of"))
 }
 
 fn is_report_determiner(term: &str) -> bool {
@@ -3352,6 +3368,8 @@ mod tests {
             "start a report then poll it and start a new report",
             "start a report then poll it and launch another report",
             "start a report then poll it and execute the saved report",
+            "start a report then poll it and run it",
+            "start a report then poll it and run its report",
         ] {
             assert_eq!(
                 report_discovery_intent(Some(query)),
