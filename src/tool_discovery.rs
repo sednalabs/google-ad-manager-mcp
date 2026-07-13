@@ -2305,7 +2305,8 @@ pub(crate) fn resolve_report_discovery(
         callable_alternatives: Vec::new(),
     };
     let report_group_selected = !group_filter_supplied || active_group == Some("reports");
-    if intent == ReportDiscoveryIntent::ExistingOperationContinuation
+    if report_poll_authorized
+        && intent == ReportDiscoveryIntent::ExistingOperationContinuation
         && report_group_selected
         && read_only == Some(false)
     {
