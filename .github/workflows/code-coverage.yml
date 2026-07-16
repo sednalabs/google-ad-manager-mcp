@@ -27,7 +27,7 @@ jobs:
     steps:
       - name: Checkout repository
         # actions/checkout v6
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with:
           fetch-depth: 1
           persist-credentials: false
@@ -49,7 +49,7 @@ jobs:
 
       - name: Install coverage tool
         # taiki-e/install-action v2
-        uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5
+        uses: taiki-e/install-action@ed67fa35ac944f3a9b33f12c4dd43b6f31a47e20
         with:
           tool: cargo-llvm-cov
 
@@ -61,7 +61,7 @@ jobs:
 
       - name: Upload coverage to GitHub Code Quality
         # actions/upload-code-coverage v1
-        uses: actions/upload-code-coverage@abb5995db9e0199b0e2bb9dbd136fce4cb1ec4d3
+        uses: actions/upload-code-coverage@a72ab75b4dee0e479386fb9bf33c8dcf64b9c772
         with:
           file: coverage/google-ad-manager-mcp.xml
           language: Rust
