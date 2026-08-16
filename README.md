@@ -62,10 +62,10 @@ cargo install --locked --git https://github.com/sednalabs/google-ad-manager-mcp 
 ```
 
 The repository also publishes GitHub-hosted binary bundles through the release
-workflow and a Linux artifact on `main` through the `Linux Artifact` workflow.
-Those hosted artifacts are useful when you want a pinned binary plus SHA256
-manifests and a Sigstore verification bundle from hosted compute rather than a
-local `cargo install`.
+workflow and native x86_64 and aarch64 Linux artifacts on `main` through the
+`Linux Artifact` and `Linux Arm64 Artifact` workflows. Those hosted artifacts
+are useful when you want a pinned binary plus SHA256 manifests and a Sigstore
+verification bundle from hosted compute rather than a local `cargo install`.
 
 ## First Run
 

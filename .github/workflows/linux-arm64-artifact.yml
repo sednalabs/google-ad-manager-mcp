@@ -1,0 +1,64 @@
+name: Linux Arm64 Artifact
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build Linux aarch64 artifact
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        # actions/checkout v6
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        # dtolnay/rust-toolchain stable
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
+
+      - name: Cache cargo artifacts
+        # swatinem/rust-cache v2
+        uses: swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
+        with:
+          shared-key: linux-arm64-artifact-${{ runner.os }}
+          workspaces: |
+            . -> target
+          cache-on-failure: "true"
+          cache-all-crates: "true"
+          cache-workspace-crates: "true"
+
+      - name: Build release binary
+        run: cargo build --release --locked --bin google-ad-manager-mcp
+
+      - name: Stage artifact
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp target/release/google-ad-manager-mcp dist/google-ad-manager-mcp
+          chmod 0755 dist/google-ad-manager-mcp
+          {
+            echo "name=google-ad-manager-mcp"
+            echo "version=$(dist/google-ad-manager-mcp --version)"
+            echo "commit=${GITHUB_SHA}"
+            echo "target=aarch64-unknown-linux-gnu"
+            sha256sum dist/google-ad-manager-mcp
+          } > dist/MANIFEST.txt
+
+      - name: Upload artifact
+        # actions/upload-artifact v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: google-ad-manager-mcp-linux-aarch64
+          path: dist/
+          if-no-files-found: error
