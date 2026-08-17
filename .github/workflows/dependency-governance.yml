@@ -31,7 +31,7 @@ jobs:
             command: cargo deny check advisories licenses bans sources
           - name: cargo-audit
             tool: cargo-audit
-            command: cargo audit --deny warnings
+            command: ./scripts/cargo_audit_check.sh
           - name: cargo-outdated
             tool: cargo-outdated
             command: cargo outdated --root-deps-only --depth 1
