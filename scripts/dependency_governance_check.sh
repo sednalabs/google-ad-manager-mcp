@@ -91,7 +91,7 @@ echo "[2/4] cargo deny"
 (cd "${ROOT_DIR}" && cargo deny check advisories licenses bans sources)
 
 echo "[3/4] cargo audit"
-(cd "${ROOT_DIR}" && cargo audit --deny warnings)
+(cd "${ROOT_DIR}" && ./scripts/cargo_audit_check.sh)
 
 echo "[4/4] cargo outdated"
 if [[ "${STRICT_OUTDATED}" == "1" ]]; then
