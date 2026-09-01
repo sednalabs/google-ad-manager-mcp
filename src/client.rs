@@ -590,6 +590,7 @@ enum UpstreamAuthMode {
     AuthorizedUserAdcFile(PathBuf),
     ServiceAccountJsonPath(String),
     ServiceAccountJsonEnv(String),
+    Unavailable(String),
 }
 
 #[derive(Debug, Clone)]
@@ -628,7 +629,8 @@ impl AdManagerClient {
 
         Self {
             http,
-            auth_mode: select_auth_mode(settings).expect("auth mode should build"),
+            auth_mode: select_auth_mode(settings)
+                .unwrap_or_else(|err| UpstreamAuthMode::Unavailable(err.to_string())),
             token_provider: Arc::new(OnceCell::new()),
             oauth_token_provider: Arc::new(OnceCell::new()),
             scope: Arc::from(settings.scope.as_str()),
@@ -1311,6 +1313,9 @@ impl AdManagerClient {
                             )?);
                         Ok(provider)
                     }
+                    UpstreamAuthMode::Unavailable(reason) => {
+                        Err(AdManagerError::AuthBootstrap(reason.clone()))
+                    }
                 }
             })
             .await?;
@@ -1397,6 +1402,9 @@ fn auth_source_for_mode(auth_mode: &UpstreamAuthMode) -> AuthSource {
         UpstreamAuthMode::AuthorizedUserAdcFile(_) => AuthSource::GoogleAuthorizedUserAdcFile,
         UpstreamAuthMode::ServiceAccountJsonPath(_) => AuthSource::ServiceAccountJsonPath,
         UpstreamAuthMode::ServiceAccountJsonEnv(_) => AuthSource::ServiceAccountJsonEnv,
+        // Keep the public source enum backward-compatible while ensuring that
+        // token acquisition still fails closed for an unconfigured client.
+        UpstreamAuthMode::Unavailable(_) => AuthSource::GoogleDefaultProviderChain,
     }
 }
 
@@ -1421,15 +1429,21 @@ fn select_auth_mode(settings: &Settings) -> Result<UpstreamAuthMode, AdManagerEr
         return Ok(UpstreamAuthMode::ServiceAccountJsonPath(path.to_string()));
     }
 
-    if std::env::var_os("GOOGLE_APPLICATION_CREDENTIALS").is_some() {
+    if std::env::var_os("GOOGLE_APPLICATION_CREDENTIALS").is_some_and(|value| !value.is_empty()) {
         return Ok(UpstreamAuthMode::Adc);
     }
 
-    if let Some(path) = selected_adc_file(settings.shared_adc).map(|selected| selected.path) {
+    if let Some(path) = selected_adc_file(settings.shared_adc)
+        .map(|selected| selected.path)
+        .filter(|path| path.is_file())
+    {
         return Ok(UpstreamAuthMode::AuthorizedUserAdcFile(path));
     }
 
-    Ok(UpstreamAuthMode::Adc)
+    Err(AdManagerError::AuthBootstrap(
+        "no usable credential source was configured; provide a service-account credential, set GOOGLE_APPLICATION_CREDENTIALS, or create the selected ADC file"
+            .to_string(),
+    ))
 }
 
 fn google_adc_file_missing(err: &UpstreamOAuthError) -> bool {
@@ -1469,13 +1483,13 @@ fn validate_network_code(value: &str) -> Result<String, AdManagerError> {
 }
 
 fn validate_resource_name(
-    field: &'static str,
+    field: &str,
     value: Option<&str>,
     network_code: &str,
     segment: &str,
 ) -> Result<String, AdManagerError> {
     let Some(value) = value else {
-        return Err(AdManagerError::invalid(
+        return Err(AdManagerError::invalid_owned(
             field,
             "is required for patch operations",
         ));
@@ -1483,14 +1497,14 @@ fn validate_resource_name(
     let trimmed = value.trim();
     let expected_prefix = format!("networks/{network_code}/{segment}/");
     if trimmed.is_empty() || !trimmed.starts_with(&expected_prefix) {
-        return Err(AdManagerError::invalid(
+        return Err(AdManagerError::invalid_owned(
             field,
             format!("must start with {expected_prefix}"),
         ));
     }
     let id_segment = &trimmed[expected_prefix.len()..];
     if id_segment.is_empty() || id_segment.contains('/') {
-        return Err(AdManagerError::invalid(
+        return Err(AdManagerError::invalid_owned(
             field,
             "must contain exactly one resource ID segment after the prefix",
         ));
@@ -1499,12 +1513,9 @@ fn validate_resource_name(
     Ok(trimmed.to_string())
 }
 
-fn validate_rest_resource_id_segment(
-    field: &'static str,
-    value: &str,
-) -> Result<(), AdManagerError> {
+fn validate_rest_resource_id_segment(field: &str, value: &str) -> Result<(), AdManagerError> {
     if matches!(value, "." | "..") {
-        return Err(AdManagerError::invalid(
+        return Err(AdManagerError::invalid_owned(
             field,
             "must use a single URL-safe resource ID segment and cannot be '.' or '..'",
         ));
@@ -1512,7 +1523,7 @@ fn validate_rest_resource_id_segment(
     if value.bytes().all(is_safe_rest_resource_id_byte) {
         return Ok(());
     }
-    Err(AdManagerError::invalid(
+    Err(AdManagerError::invalid_owned(
         field,
         "must use a single URL-safe resource ID segment containing only ASCII letters, digits, '.', '_' or '-'",
     ))
@@ -1601,17 +1612,17 @@ fn validate_rest_write_body_binding(
                 }
             }
             let mut names = Vec::new();
-            collect_nested_resource_names(body, "body.name", &mut names)?;
-            for name in names {
-                validate_resource_name("body.name", Some(name), network_code, segment)?;
+            collect_nested_resource_names(body, "body", &mut names)?;
+            for (name, field_path) in names {
+                validate_resource_name(&field_path, Some(name), network_code, segment)?;
             }
             Ok(())
         }
         RestWriteOperation::Create => {
             let mut names = Vec::new();
-            collect_nested_resource_names(body, "body.name", &mut names)?;
-            for name in names {
-                validate_resource_name("body.name", Some(name), network_code, segment)?;
+            collect_nested_resource_names(body, "body", &mut names)?;
+            for (name, field_path) in names {
+                validate_resource_name(&field_path, Some(name), network_code, segment)?;
             }
             Ok(())
         }
@@ -1633,23 +1644,24 @@ fn validate_batch_request_bindings(
                 "must be an array for batch create/update operations",
             )
         })?;
-    for request in requests {
+    for (index, request) in requests.iter().enumerate() {
+        let request_path = format!("body.requests[{index}]");
         if !request.is_object() {
-            return Err(AdManagerError::invalid(
-                "body.requests[]",
+            return Err(AdManagerError::invalid_owned(
+                request_path,
                 "must contain JSON objects",
             ));
         }
         let mut names = Vec::new();
-        collect_nested_resource_names(request, "body.requests[].name", &mut names)?;
+        collect_nested_resource_names(request, &request_path, &mut names)?;
         if operation == RestWriteOperation::BatchUpdate && names.is_empty() {
-            return Err(AdManagerError::invalid(
-                "body.requests[]",
+            return Err(AdManagerError::invalid_owned(
+                request_path,
                 "must contain at least one nested resource `name` for batch update operations",
             ));
         }
-        for name in names {
-            validate_resource_name("body.requests[].name", Some(name), network_code, segment)?;
+        for (name, field_path) in names {
+            validate_resource_name(&field_path, Some(name), network_code, segment)?;
         }
     }
     Ok(())
@@ -1666,36 +1678,42 @@ fn validate_batch_name_bindings(
             "must be an array for batch state/action operations",
         )
     })?;
-    for name in names {
+    for (index, name) in names.iter().enumerate() {
+        let field_path = format!("body.names[{index}]");
         let name = name.as_str().ok_or_else(|| {
-            AdManagerError::invalid("body.names[]", "must contain string resource names")
+            AdManagerError::invalid_owned(field_path.clone(), "must contain string resource names")
         })?;
-        validate_resource_name("body.names[]", Some(name), network_code, segment)?;
+        validate_resource_name(&field_path, Some(name), network_code, segment)?;
     }
     Ok(())
 }
 
 fn collect_nested_resource_names<'a>(
     value: &'a Value,
-    field_path: &'static str,
-    names: &mut Vec<&'a str>,
+    field_path: &str,
+    names: &mut Vec<(&'a str, String)>,
 ) -> Result<(), AdManagerError> {
     match value {
         Value::Object(object) => {
             for (key, child) in object {
+                let child_path = format!("{field_path}.{key}");
                 if key == "name" {
                     let name = child.as_str().ok_or_else(|| {
-                        AdManagerError::invalid(field_path, "must be a string resource name")
+                        AdManagerError::invalid_owned(
+                            child_path.clone(),
+                            "must be a string resource name",
+                        )
                     })?;
-                    names.push(name);
+                    names.push((name, child_path.clone()));
                 }
-                collect_nested_resource_names(child, field_path, names)?;
+                collect_nested_resource_names(child, &child_path, names)?;
             }
             Ok(())
         }
         Value::Array(items) => {
-            for item in items {
-                collect_nested_resource_names(item, field_path, names)?;
+            for (index, item) in items.iter().enumerate() {
+                let item_path = format!("{field_path}[{index}]");
+                collect_nested_resource_names(item, &item_path, names)?;
             }
             Ok(())
         }
@@ -2118,24 +2136,95 @@ pub(crate) fn soap_error_message_with_truncation(
 }
 
 fn extract_xml_tag(value: &str, tag: &str) -> Option<String> {
-    for prefix in ["", "gam:", "soapenv:", "soap:"] {
-        let full_tag = format!("{prefix}{tag}");
-        let open = format!("<{full_tag}");
-        let close = format!("</{prefix}{tag}>");
-        for (start, _) in value.match_indices(&open) {
-            let after_tag = &value[start + open.len()..];
-            let starts_with_tag_close = after_tag.starts_with('>');
-            let starts_with_space = after_tag.chars().next().is_some_and(char::is_whitespace);
-            if !(starts_with_tag_close || starts_with_space) {
+    let mut cursor = 0;
+    while let Some(relative_start) = value[cursor..].find('<') {
+        let start = cursor + relative_start;
+        let Some((closing, name_end)) = xml_tag_name_end(value, start) else {
+            cursor = start + 1;
+            continue;
+        };
+        let Some(tag_end) = xml_tag_end(value, start) else {
+            break;
+        };
+        let name_start = start + 1 + if closing { 1 } else { 0 };
+        if !closing && xml_local_name(&value[name_start..name_end]) == tag {
+            if value[start..tag_end].trim_end().ends_with('/') {
+                cursor = tag_end + 1;
                 continue;
             }
-            if let Some(open_end) = after_tag.find('>') {
-                let content_start = start + open.len() + open_end + 1;
-                if let Some(end) = value[content_start..].find(&close) {
-                    return Some(value[content_start..content_start + end].trim().to_string());
+            let content_start = tag_end + 1;
+            let mut scan = content_start;
+            let mut depth = 1usize;
+            while let Some(relative_nested_start) = value[scan..].find('<') {
+                let nested_start = scan + relative_nested_start;
+                let Some((nested_closing, nested_name_end)) = xml_tag_name_end(value, nested_start)
+                else {
+                    scan = nested_start + 1;
+                    continue;
+                };
+                let Some(nested_tag_end) = xml_tag_end(value, nested_start) else {
+                    break;
+                };
+                let nested_name_start = nested_start + 1 + if nested_closing { 1 } else { 0 };
+                if xml_local_name(&value[nested_name_start..nested_name_end]) == tag {
+                    if nested_closing {
+                        depth -= 1;
+                        if depth == 0 {
+                            return Some(value[content_start..nested_start].trim().to_string());
+                        }
+                    } else if !value[nested_start..nested_tag_end]
+                        .trim_end()
+                        .ends_with('/')
+                    {
+                        depth += 1;
+                    }
                 }
+                scan = nested_tag_end + 1;
             }
         }
+        cursor = tag_end + 1;
+    }
+    None
+}
+
+fn xml_local_name(name: &str) -> &str {
+    name.rsplit_once(':')
+        .map_or(name, |(_, local_name)| local_name)
+}
+
+fn xml_tag_name_end(value: &str, start: usize) -> Option<(bool, usize)> {
+    let bytes = value.as_bytes();
+    if bytes.get(start) != Some(&b'<') {
+        return None;
+    }
+    let mut cursor = start + 1;
+    let closing = bytes.get(cursor) == Some(&b'/');
+    if closing {
+        cursor += 1;
+    }
+    let name_start = cursor;
+    while let Some(byte) = bytes.get(cursor) {
+        if byte.is_ascii_alphanumeric() || matches!(*byte, b':' | b'_' | b'-' | b'.') {
+            cursor += 1;
+        } else {
+            break;
+        }
+    }
+    (cursor > name_start).then_some((closing, cursor))
+}
+
+fn xml_tag_end(value: &str, start: usize) -> Option<usize> {
+    let bytes = value.as_bytes();
+    let mut cursor = start + 1;
+    let mut quote = None;
+    while let Some(byte) = bytes.get(cursor) {
+        match quote {
+            Some(delimiter) if *byte == delimiter => quote = None,
+            None if *byte == b'"' || *byte == b'\'' => quote = Some(*byte),
+            None if *byte == b'>' => return Some(cursor),
+            _ => {}
+        }
+        cursor += 1;
     }
     None
 }
@@ -2212,9 +2301,10 @@ mod tests {
     use super::{
         AD_UNIT_HIERARCHY_FIELDS, AdManagerClient, CatalogCollection, MAX_SOAP_RESPONSE_XML_BYTES,
         NETWORK_HIERARCHY_FIELDS, RestWriteOperation, RestWriteResource, SOAP_ENVELOPE_NAMESPACE,
-        SoapTraffickingOperation, ad_unit_hierarchy_list_query, classify_soap_impact, clip_message,
-        clip_message_with_truncation, clip_xml_response, extract_xml_tag, validate_operation_name,
-        validate_report_result_name, validate_rest_write_body, validate_soap_payload_xml,
+        SoapTraffickingApplyResult, SoapTraffickingOperation, ad_unit_hierarchy_list_query,
+        classify_soap_impact, clip_message, clip_message_with_truncation, clip_xml_response,
+        extract_xml_tag, soap_apply_failed, validate_operation_name, validate_report_result_name,
+        validate_rest_write_body, validate_soap_payload_xml,
     };
     use crate::Settings;
     use serde_json::json;
@@ -2460,8 +2550,29 @@ mod tests {
                 json!({"site": {"name": 123}}),
             )
             .expect_err("non-string nested patch name");
-        assert!(err.to_string().contains("body.name"));
-        assert!(!err.to_string().contains("body.requests"));
+        assert_eq!(
+            err.to_string(),
+            "invalid body.site.name: must be a string resource name"
+        );
+
+        let err = client
+            .build_rest_write_plan(
+                "1234567",
+                RestWriteResource::Sites,
+                RestWriteOperation::BatchCreate,
+                None,
+                None,
+                json!({
+                    "requests": [{
+                        "site": {"labels": [{"name": 123}]}
+                    }]
+                }),
+            )
+            .expect_err("non-string nested array name");
+        assert_eq!(
+            err.to_string(),
+            "invalid body.requests[0].site.labels[0].name: must be a string resource name"
+        );
     }
 
     #[test]
@@ -2707,5 +2818,28 @@ mod tests {
             extract_xml_tag(&xml, "Fault").as_deref(),
             Some(r#"<faultstring xml:lang="en">boom</faultstring>"#)
         );
+    }
+
+    #[test]
+    fn extract_xml_tag_handles_arbitrary_namespace_prefixes() {
+        let xml = r#"<s:Fault xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:faultstring>denied</s:faultstring></s:Fault>"#;
+        assert_eq!(
+            extract_xml_tag(xml, "faultstring").as_deref(),
+            Some("denied")
+        );
+        assert_eq!(
+            extract_xml_tag(xml, "Fault").as_deref(),
+            Some("<s:faultstring>denied</s:faultstring>")
+        );
+
+        let result = SoapTraffickingApplyResult {
+            upstream_status: 200,
+            upstream_response_xml: xml.to_string(),
+            response_truncated: false,
+            request_id: None,
+            response_time: None,
+            soap_fault: extract_xml_tag(xml, "faultstring"),
+        };
+        assert!(soap_apply_failed(&result));
     }
 }

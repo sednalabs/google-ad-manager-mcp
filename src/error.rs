@@ -7,6 +7,8 @@ pub enum AdManagerError {
         field: &'static str,
         message: String,
     },
+    #[error("invalid {field}: {message}")]
+    InvalidInputOwned { field: String, message: String },
     #[error("auth bootstrap failed: {0}")]
     AuthBootstrap(String),
     #[error("upstream transport failed: {0}")]
@@ -45,9 +47,16 @@ impl AdManagerError {
         }
     }
 
+    pub fn invalid_owned(field: impl Into<String>, message: impl Into<String>) -> Self {
+        Self::InvalidInputOwned {
+            field: field.into(),
+            message: message.into(),
+        }
+    }
+
     pub fn code(&self) -> &'static str {
         match self {
-            Self::InvalidInput { .. } => "invalid_input",
+            Self::InvalidInput { .. } | Self::InvalidInputOwned { .. } => "invalid_input",
             Self::AuthBootstrap(_) => "auth_bootstrap",
             Self::Transport(_) => "transport_error",
             Self::UpstreamJson(_) => "upstream_json_error",
@@ -63,7 +72,7 @@ impl AdManagerError {
 
     pub fn reason(&self) -> &'static str {
         match self {
-            Self::InvalidInput { .. } => "validation_failed",
+            Self::InvalidInput { .. } | Self::InvalidInputOwned { .. } => "validation_failed",
             Self::AuthBootstrap(_) => "auth_not_ready",
             Self::Transport(_) => "upstream_transport_failed",
             Self::UpstreamJson(_) => "upstream_json_invalid",
@@ -79,7 +88,7 @@ impl AdManagerError {
 
     pub fn category(&self) -> &'static str {
         match self {
-            Self::InvalidInput { .. } => "input",
+            Self::InvalidInput { .. } | Self::InvalidInputOwned { .. } => "input",
             Self::AuthBootstrap(_) => "auth",
             Self::Transport(_) | Self::UpstreamJson(_) | Self::UpstreamApi { .. } => "upstream",
             Self::WriteActionDisabled { .. }
@@ -92,7 +101,7 @@ impl AdManagerError {
 
     pub fn hint(&self) -> &'static str {
         match self {
-            Self::InvalidInput { .. } => {
+            Self::InvalidInput { .. } | Self::InvalidInputOwned { .. } => {
                 "Check the tool arguments and use the documented resource-name format."
             }
             Self::AuthBootstrap(_) => {
