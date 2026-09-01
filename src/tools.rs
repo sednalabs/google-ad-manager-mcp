@@ -8845,8 +8845,10 @@ mod tests {
             (None, false),
             (None, true),
             (Some(Value::Null), false),
+            (Some(json!("not-an-object")), false),
+            (Some(json!({})), false),
+            (Some(json!({"report": 42})), false),
             (Some(json!({"report": "not-a-report"})), false),
-            (Some(json!({"report": "networks/999/reports/456"})), false),
         ] {
             let mut operation = json!({
                 "name": operation_name,
@@ -8897,6 +8899,55 @@ mod tests {
 
             server.join().expect("join terminal report server");
             assert_eq!(requests.lock().expect("lock terminal requests").len(), 1);
+        }
+
+        for wrong_report in ["networks/999/reports/456", "networks/123/reports/999"] {
+            let operation = json!({
+                "name": operation_name,
+                "metadata": {"report": wrong_report},
+                "done": true,
+                "error": {"code": 13, "message": "authorization=secret-value report failed"}
+            });
+            let (base_url, requests, server) = serve_report_http_sequence(vec![(200, operation)]);
+            let client = AdManagerClient::for_test_api_base_url(base_url);
+            let server_under_test = AdManagerServer::new(crate::Settings::default())
+                .expect("build wrong-report server")
+                .with_test_client(client);
+            let result = server_under_test
+                .gam_report_run(Parameters(ReportRunArgs {
+                    network_code: "123".to_string(),
+                    report_id: "456".to_string(),
+                    wait_for_completion: Some(false),
+                    fetch_first_page: None,
+                    result_page_size: None,
+                    poll_timeout_ms: None,
+                    initial_poll_interval_ms: None,
+                }))
+                .await
+                .expect("classify wrong-report handoff");
+            assert_eq!(result.is_error, Some(true));
+            let response = result
+                .structured_content
+                .expect("wrong-report handoff response");
+            assert_eq!(response["error"]["code"], "report_run_handoff_uncertain");
+            assert_eq!(
+                response["error"]["detail"]["dispatch_state"],
+                "provider_response_received_handoff_uncertain"
+            );
+            assert_eq!(response["error"]["detail"]["started_new_run"], Value::Null);
+            assert_eq!(
+                response["error"]["detail"]["run_request_may_have_been_dispatched"],
+                true
+            );
+            assert_eq!(response["error"]["detail"]["continuation_available"], false);
+            assert_eq!(response["error"]["detail"]["automatic_replay_safe"], false);
+            assert!(response["error"]["detail"].get("continuation").is_none());
+            assert!(!response.to_string().contains("secret-value"));
+
+            server.join().expect("join wrong-report server");
+            let requests = requests.lock().expect("lock wrong-report requests");
+            assert_eq!(requests.len(), 1);
+            assert!(requests[0].starts_with("POST /v1/networks/123/reports/456:run "));
         }
     }
 

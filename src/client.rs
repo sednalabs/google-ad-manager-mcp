@@ -1769,16 +1769,15 @@ pub(crate) fn report_operation_name_for_report(
     let operation_name = operation.get("name").and_then(Value::as_str)?;
     let operation_name = validate_operation_name(operation_name).ok()?;
     let expected_report_name = validate_report_name(expected_report_name).ok()?;
-    if let Some(metadata) = operation.get("metadata") {
-        if let Some(metadata) = metadata.as_object()
-            && let Some(report) = metadata.get("report")
-            && let Some(report) = report
-                .as_str()
-                .and_then(|report| validate_report_name(report).ok())
-            && report != expected_report_name
-        {
-            return None;
-        }
+    if let Some(metadata) = operation.get("metadata")
+        && let Some(metadata) = metadata.as_object()
+        && let Some(report) = metadata.get("report")
+        && let Some(report) = report
+            .as_str()
+            .and_then(|report| validate_report_name(report).ok())
+        && report != expected_report_name
+    {
+        return None;
     }
     (operation_name.split('/').nth(1) == expected_report_name.split('/').nth(1))
         .then(|| operation_name.to_string())
