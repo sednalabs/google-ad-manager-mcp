@@ -50,7 +50,7 @@ jobs:
       - name: Cache cargo artifacts
         if: ${{ matrix.lane.tool != '' }}
         # swatinem/rust-cache v2
-        uses: swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3
+        uses: swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16
         with:
           shared-key: dependency-governance-${{ runner.os }}
           workspaces: |
@@ -62,7 +62,7 @@ jobs:
       - name: Install governance tools
         if: ${{ matrix.lane.tool != '' }}
         # taiki-e/install-action v2
-        uses: taiki-e/install-action@82cd3e7658a6f96c86c0234aeeda1748937cb0a1
+        uses: taiki-e/install-action@742a3317eac7bd62f91cd888b4eead5e784ba833
         with:
           tool: ${{ matrix.lane.tool }}
 
