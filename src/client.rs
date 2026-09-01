@@ -2197,7 +2197,7 @@ fn soap_mutation_response_matches(
     let Some(body) = body else {
         return false;
     };
-    if body.descendants().any(|node| {
+    if body.descendants().skip(1).any(|node| {
         node.is_element()
             && ((node.tag_name().name() == "Fault" || node.tag_name().name() == "Body")
                 && node.tag_name().namespace() == Some(SOAP_ENVELOPE_NAMESPACE))
