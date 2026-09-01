@@ -676,6 +676,8 @@ impl AdManagerServer {
             json!({
                 "requested_scope": self.client().scope(),
                 "auth_source_candidate": diagnostics.get("auth_source").cloned().unwrap_or_else(|| json!("unavailable")),
+                "config_valid": diagnostics.get("config_valid").cloned().unwrap_or_else(|| json!(false)),
+                "config_issue": diagnostics.get("config_issue").cloned().unwrap_or(Value::Null),
                 "quota_project_configured": self.client().quota_project_configured(),
                 "credential_material_detected": diagnostics.get("credential_material_detected").cloned().unwrap_or_else(|| json!(false)),
                 "adc_file": diagnostics.get("adc_file").cloned().unwrap_or(Value::Null),
@@ -713,7 +715,7 @@ impl AdManagerServer {
         } else {
             self.client().scope()
         };
-        let shared_adc = args.shared_adc.unwrap_or(false);
+        let shared_adc = requested_shared_adc(self.settings().shared_adc, args.shared_adc);
         let cloudsdk_config = if shared_adc {
             None
         } else {
@@ -6746,6 +6748,10 @@ fn auth_next_steps(scope: &str, token_checked: bool, access_checked: bool) -> Ve
     steps
 }
 
+fn requested_shared_adc(configured: bool, requested: Option<bool>) -> bool {
+    requested.unwrap_or(configured)
+}
+
 fn ad_manager_provider_auth_config(scope: &str) -> GoogleProviderAuthConfig {
     GoogleProviderAuthConfig::new(AD_MANAGER_PROVIDER_API_NAME, split_scopes(scope))
         .with_api_service_name(AD_MANAGER_PROVIDER_API_SERVICE)
@@ -6777,6 +6783,30 @@ async fn gcloud_version() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shared_adc_request_uses_configured_default_and_explicit_override() {
+        assert!(!requested_shared_adc(false, None));
+        assert!(requested_shared_adc(true, None));
+        assert!(requested_shared_adc(false, Some(true)));
+        assert!(!requested_shared_adc(true, Some(false)));
+    }
+
+    #[test]
+    fn auth_status_next_steps_distinguish_token_and_access_checks() {
+        let token_steps = auth_next_steps(crate::DEFAULT_READONLY_SCOPE, false, false);
+        assert!(
+            token_steps
+                .iter()
+                .any(|step| step.contains("verify_token=true"))
+        );
+        let access_steps = auth_next_steps(crate::DEFAULT_READONLY_SCOPE, true, false);
+        assert!(
+            access_steps
+                .iter()
+                .any(|step| step.contains("verify_access=true"))
+        );
+    }
 
     fn values(value: Value) -> Map<String, Value> {
         value.as_object().expect("object").clone()

@@ -94,7 +94,9 @@ You can inspect or script auth without starting an MCP session:
 ```bash
 google-ad-manager-mcp auth command --headless
 google-ad-manager-mcp auth status --verify-token
+google-ad-manager-mcp auth status --verify-access
 google-ad-manager-mcp auth doctor --verify-token --json
+google-ad-manager-mcp auth doctor --verify-access --json
 ```
 
 Then restart any stdio MCP client that keeps a long-lived child process and call:

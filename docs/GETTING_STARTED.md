@@ -38,7 +38,9 @@ google-ad-manager-mcp auth login --headless --quota-project <PROJECT_ID> --share
 google-ad-manager-mcp auth command --headless
 google-ad-manager-mcp auth command --headless --manage-scope
 google-ad-manager-mcp auth status --verify-token
+google-ad-manager-mcp auth status --verify-access
 google-ad-manager-mcp auth doctor --verify-token --json
+google-ad-manager-mcp auth doctor --verify-access --json
 ```
 
 If you prefer raw `gcloud`, set `CLOUDSDK_CONFIG` to the server-specific config
