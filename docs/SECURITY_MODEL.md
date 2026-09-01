@@ -25,8 +25,9 @@ service account inputs:
 The local login helper uses a Google-Ad-Manager-specific gcloud config
 directory by default. This keeps its refresh token and scopes separate from
 other Google MCP servers that may run under the same OS user. Conventional
-shared local ADC remains a compatibility fallback when the server-specific ADC
-file has not been created yet.
+shared local ADC is never selected implicitly; operators must set
+`GOOGLE_AD_MANAGER_MCP_SHARED_ADC=true` (or pass `--runtime-shared-adc`) to
+select it explicitly.
 
 Tool responses may report whether a credential source looks configured or
 whether a low-cost access check succeeded. They must not return:
