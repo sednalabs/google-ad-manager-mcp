@@ -679,7 +679,7 @@ impl AdManagerServer {
                 "config_valid": diagnostics.get("config_valid").cloned().unwrap_or_else(|| json!(false)),
                 "config_issue": diagnostics.get("config_issue").cloned().unwrap_or(Value::Null),
                 "quota_project_configured": self.client().quota_project_configured(),
-                "credential_material_detected": diagnostics.get("credential_material_detected").cloned().unwrap_or_else(|| json!(false)),
+                "credential_material_detected": diagnostics.get("credential_material_detected").cloned().unwrap_or(Value::Bool(false)),
                 "adc_file": diagnostics.get("adc_file").cloned().unwrap_or(Value::Null),
                 "quota_project": diagnostics.get("quota_project").cloned().unwrap_or(Value::Null),
                 "detected": {

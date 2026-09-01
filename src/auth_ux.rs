@@ -1214,8 +1214,8 @@ sbhtpi32ZJCvwpBEP6g7HaOR
         let token = verification_failure(&AdManagerError::AuthBootstrap(
             "token acquisition failed".to_string(),
         ));
-        let access = VerificationReport::skipped("token_check_failed");
-        let ready = readiness(true, &token, &access, &access);
+        let access = super::VerificationReport::skipped("token_check_failed");
+        let ready = super::readiness(true, &token, &access, &access);
         assert_eq!(ready, "no");
     }
 
