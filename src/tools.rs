@@ -777,7 +777,7 @@ impl AdManagerServer {
                     "By default this command writes a Google Ad Manager-specific ADC file for this OS user.",
                     "Set shared_adc=true only when you intentionally want the conventional shared gcloud ADC file.",
                     "No token or client secret is returned by this tool.",
-                    format!("Use manage_scope=true or --manage-scope when you need write-capable Ad Manager credentials for operator-approved apply."),
+                    "Use manage_scope=true or --manage-scope when you need write-capable Ad Manager credentials for operator-approved apply.".to_string(),
                     "Use the client-id-file command if Google rejects the Ad Manager scope during ADC login.",
                     "For unattended deployments, prefer service-account or workload identity credentials over local user ADC.",
                 ]
