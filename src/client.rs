@@ -1245,6 +1245,7 @@ impl AdManagerClient {
         &self,
         plan: &RestWritePlan,
     ) -> Result<RestWriteApplyResult, AdManagerError> {
+        let readback_path = validate_rest_write_readback_path(plan)?;
         let token = self.access_token().await?;
         let method = match plan.method {
             "POST" => Method::POST,
@@ -1269,11 +1270,10 @@ impl AdManagerClient {
         }
 
         let upstream_response = self.send_json(request).await?;
-        let readback_path = upstream_response
-            .get("name")
-            .and_then(Value::as_str)
-            .map(ToOwned::to_owned)
-            .or_else(|| plan.readback_path.clone());
+        // The response is upstream-controlled and must never select an
+        // authenticated follow-up target.  Readback is derived solely from
+        // the validated plan, whose path is bound to the request's network
+        // and resource by `build_rest_write_plan`.
 
         let mut readback = None;
         let mut readback_error = None;
@@ -1769,8 +1769,46 @@ pub(crate) fn report_operation_name_for_report(
     let operation_name = operation.get("name").and_then(Value::as_str)?;
     let operation_name = validate_operation_name(operation_name).ok()?;
     let expected_report_name = validate_report_name(expected_report_name).ok()?;
+    if let Some(metadata) = operation.get("metadata") {
+        let metadata = metadata.as_object()?;
+        if let Some(report) = metadata.get("report") {
+            let report = report
+                .as_str()
+                .and_then(|report| validate_report_name(report).ok())?;
+            if report != expected_report_name {
+                return None;
+            }
+        }
+    }
     (operation_name.split('/').nth(1) == expected_report_name.split('/').nth(1))
         .then(|| operation_name.to_string())
+}
+
+fn validate_rest_write_readback_path(
+    plan: &RestWritePlan,
+) -> Result<Option<String>, AdManagerError> {
+    let Some(readback_path) = plan.readback_path.as_deref() else {
+        return Ok(None);
+    };
+    if plan.operation != RestWriteOperation::Patch {
+        return Err(AdManagerError::invalid(
+            "readback_path",
+            "must be omitted for REST operations without a single-resource target",
+        ));
+    }
+    let validated = validate_resource_name(
+        "readback_path",
+        Some(readback_path),
+        &plan.network_code,
+        plan.resource.resource_segment(),
+    )?;
+    if validated != plan.path || validated != plan.target {
+        return Err(AdManagerError::invalid(
+            "readback_path",
+            "must exactly match the validated REST write target",
+        ));
+    }
+    Ok(Some(validated))
 }
 
 fn report_operation_name_matches(operation: &Value, expected_operation_name: &str) -> bool {
@@ -3271,7 +3309,9 @@ fn clip_message_with_truncation(message: String) -> (String, bool) {
 mod tests {
     use std::io::{Read, Write};
     use std::net::TcpListener;
+    use std::sync::mpsc;
     use std::thread;
+    use std::time::{Duration, Instant};
 
     use super::{
         AD_UNIT_HIERARCHY_FIELDS, AdManagerClient, AuthSource, CatalogCollection,
@@ -3298,6 +3338,65 @@ mod tests {
             let _ = stream.write_all(&response);
         });
         (format!("http://{address}/bounded"), handle)
+    }
+
+    fn serve_rest_write_response(
+        response: Value,
+    ) -> (String, u16, mpsc::Receiver<Vec<u8>>, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind REST test server");
+        let address = listener.local_addr().expect("REST test server address");
+        let port = address.port();
+        let (requests_tx, requests_rx) = mpsc::channel();
+        let body = serde_json::to_vec(&response).expect("serialize REST test response");
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        )
+        .into_bytes()
+        .into_iter()
+        .chain(body)
+        .collect::<Vec<_>>();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept REST write request");
+            let _ = stream.set_read_timeout(Some(Duration::from_millis(100)));
+            let mut request = [0_u8; 8192];
+            let bytes_read = stream.read(&mut request).expect("read REST write request");
+            requests_tx
+                .send(request[..bytes_read].to_vec())
+                .expect("record REST write request");
+            stream
+                .write_all(&response)
+                .expect("write REST write response");
+
+            listener
+                .set_nonblocking(true)
+                .expect("set REST test listener nonblocking");
+            let deadline = Instant::now() + Duration::from_millis(300);
+            while Instant::now() < deadline {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let _ = stream.set_read_timeout(Some(Duration::from_millis(100)));
+                        let mut request = [0_u8; 8192];
+                        let bytes_read = stream.read(&mut request).unwrap_or(0);
+                        requests_tx
+                            .send(request[..bytes_read].to_vec())
+                            .expect("record unexpected REST readback request");
+                        let _ = stream.write_all(&response);
+                        break;
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("accept unexpected REST request: {error}"),
+                }
+            }
+        });
+        (
+            format!("http://{address}/bounded"),
+            port,
+            requests_rx,
+            handle,
+        )
     }
 
     #[test]
@@ -3839,6 +3938,65 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn completed_operation_with_wrong_same_network_report_fails_closed() {
+        let operation_name = "networks/123/operations/reports/runs/789";
+        let expected_report = "networks/123/reports/456";
+        let client = AdManagerClient::from_settings(&Settings::default());
+
+        let terminal_error = json!({
+            "name": operation_name,
+            "metadata": {"report": "networks/123/reports/999"},
+            "done": true,
+            "error": {"code": 13, "message": "private terminal failure"}
+        });
+        let failure = client
+            .wait_for_report_result_with_state(
+                operation_name,
+                Some(expected_report),
+                Some(terminal_error),
+                std::time::Duration::from_millis(1_000),
+                std::time::Duration::from_millis(5_000),
+            )
+            .await
+            .expect_err("wrong-report terminal error must fail closed");
+        assert!(matches!(
+            failure.error,
+            AdManagerError::UpstreamContract {
+                field: "operation.completed_state",
+                ..
+            }
+        ));
+        assert!(failure.terminal);
+
+        let completed_success = json!({
+            "name": operation_name,
+            "metadata": {"report": "networks/123/reports/999"},
+            "done": true,
+            "response": {
+                "reportResult": "networks/123/reports/999/results/987"
+            }
+        });
+        let failure = client
+            .wait_for_report_result_with_state(
+                operation_name,
+                Some(expected_report),
+                Some(completed_success),
+                std::time::Duration::from_millis(1_000),
+                std::time::Duration::from_millis(5_000),
+            )
+            .await
+            .expect_err("wrong-report completed success must fail closed");
+        assert!(matches!(
+            failure.error,
+            AdManagerError::UpstreamContract {
+                field: "operation.completed_report_identity",
+                ..
+            }
+        ));
+        assert!(failure.terminal);
+    }
+
     #[test]
     fn report_operation_projection_preserves_long_running_operation_union_presence() {
         let pending = project_report_operation(&json!({
@@ -3939,6 +4097,93 @@ mod tests {
         assert_eq!(submit.method, "POST");
         assert_eq!(submit.path, "networks/1234567/sites:batchSubmitForApproval");
         assert!(submit.send_adjacent);
+    }
+
+    #[tokio::test]
+    async fn rest_write_apply_does_not_follow_untrusted_upstream_names() {
+        for upstream_name in [
+            "https://127.0.0.1:1/networks/999/reports/999",
+            "networks/999/reports/999",
+        ] {
+            let (base_url, _port, requests, server) = serve_rest_write_response(json!({
+                "name": upstream_name,
+            }));
+            let client = AdManagerClient::for_test_api_base_url(base_url);
+            let plan = client
+                .build_rest_write_plan(
+                    "123",
+                    RestWriteResource::Reports,
+                    RestWriteOperation::Create,
+                    None,
+                    None,
+                    json!({}),
+                )
+                .expect("REST create plan");
+
+            let result = client
+                .execute_rest_write_plan(&plan)
+                .await
+                .expect("REST create response");
+            assert!(result.readback.is_none());
+            assert!(result.readback_error.is_none());
+            let first_request = requests
+                .recv_timeout(Duration::from_secs(1))
+                .expect("record REST write request");
+            let first_request = String::from_utf8_lossy(&first_request);
+            assert!(first_request.starts_with("POST "));
+            assert!(first_request.contains("authorization: Bearer test-access-token"));
+            assert!(requests.recv_timeout(Duration::from_millis(350)).is_err());
+            server.join().expect("REST test server");
+        }
+    }
+
+    #[tokio::test]
+    async fn rest_write_apply_follows_only_validated_planned_readback() {
+        let (base_url, _port, requests, server) = serve_rest_write_response(json!({
+            "name": "networks/123/reports/987654",
+            "displayName": "Delivery proof",
+        }));
+        let client = AdManagerClient::for_test_api_base_url(base_url);
+        let plan = client
+            .build_rest_write_plan(
+                "123",
+                RestWriteResource::Reports,
+                RestWriteOperation::Patch,
+                Some("networks/123/reports/987654"),
+                Some("displayName"),
+                json!({
+                    "name": "networks/123/reports/987654",
+                    "displayName": "Delivery proof",
+                }),
+            )
+            .expect("REST patch plan");
+
+        let result = client
+            .execute_rest_write_plan(&plan)
+            .await
+            .expect("REST patch response and planned readback");
+        assert_eq!(
+            result.readback,
+            Some(json!({
+                "name": "networks/123/reports/987654",
+                "displayName": "Delivery proof",
+            }))
+        );
+        assert!(result.readback_error.is_none());
+
+        let first_request = requests
+            .recv_timeout(Duration::from_secs(1))
+            .expect("record REST patch request");
+        let first_request = String::from_utf8_lossy(&first_request);
+        assert!(first_request.starts_with("PATCH "));
+        assert!(first_request.contains("authorization: Bearer test-access-token"));
+        let second_request = requests
+            .recv_timeout(Duration::from_secs(1))
+            .expect("record planned REST readback request");
+        let second_request = String::from_utf8_lossy(&second_request);
+        assert!(second_request.starts_with("GET /bounded/networks/123/reports/987654 "));
+        assert!(second_request.contains("authorization: Bearer test-access-token"));
+        server.join().expect("REST test server");
     }
 
     #[test]
