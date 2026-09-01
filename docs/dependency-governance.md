@@ -50,8 +50,17 @@ considered, and how you would roll the change back.
 
 ## Toolkit and RMCP upgrade receipts
 
-The semantic-discovery change advances all six direct toolkit packages together
-from immutable revision
+The entries below preserve the historical compatibility and rollback evidence
+from the original semantic-discovery development sequence. The replayed change
+does not retain those historical pins: all six direct toolkit packages now use
+the authoritative `mcp-toolkit-rs/main` snapshot
+`8bfe29c056ef7cfcc9a7748bdabd527961e7e082`, with the same exact identity in
+`Cargo.lock` for reproducible builds. Refresh that snapshot from the
+authoritative `main` branch before future dependency work; do not float a
+branch reference or restore an older historical revision.
+
+The historical sequence advanced all six direct toolkit packages together from
+immutable revision
 `679d7a4d93ba33f582ea8ac3f23e15e0c2d133f9` to
 `f90934bd647d3d114ae3b651b11b58a0363c3bc4`. The interval is intentionally
 documented as two compatibility and rollback domains even though it lands in
@@ -83,13 +92,18 @@ one pull request.
   checks rather than rewriting this immutable dependency-upgrade receipt.
   Those lanes cover compilation, Clippy, focused stdio/tool contracts, package
   installation, dependency policy, and the RMCP pin check.
-- **Rollback:** use the standard reviewed revert path for the complete pull
-  request back to server base
+- **Historical rollback:** the original development sequence used the standard
+  reviewed revert path for the complete pull request back to server base
   `97a37896cc5fe8883ce5c0ee8432f7750de0f78a`. That restores every toolkit
   dependency and test dependency to the old immutable revision together with
   the matching lockfile, schema snapshot, and pre-upgrade source. Re-run the
   same hosted compatibility lanes before release. Do not roll back only one
   toolkit crate or independently pin `rmcp-macros`.
+
+For the current replay, rollback is a whole-change revert to the exact
+integration base `0c5d5c26bd7982cbc9eedfa59206a8f94f9169c3`, followed by fresh
+hosted validation. Do not use the historical revisions above as a current
+dependency target.
 
 ### Receipt 2: ranked and bounded discovery
 
@@ -109,7 +123,7 @@ one pull request.
 - **Compatibility proof:** the same exact-head hosted lanes above pass the
   complete semantic, dependency-edge, schema-union, redaction, result-bound,
   auth, and stdio contract suite.
-- **Rollback:** this partial path is a reviewed reconstruction, not a revert to
+- **Historical rollback:** this partial path is a reviewed reconstruction, not a revert to
   an existing GAM commit. Apply this manifest as one atomic change:
   - change all six toolkit revisions in `Cargo.toml` from `f90934bd` to
     `87d21ed9`, then regenerate `Cargo.lock`;
@@ -147,6 +161,10 @@ one pull request.
   baseline, package readiness, dependency governance, and the complete stdio
   tool-list/schema contracts. If the runtime/auth uplift must also be rolled
   back, follow Receipt 1 instead.
+
+These historical rollback instructions document provenance only. They do not
+authorize pinning the current server to `f90934bd` or `87d21ed9`; the current
+server remains on the authoritative `main` snapshot recorded above.
 
 ## Auth dependency note
 
