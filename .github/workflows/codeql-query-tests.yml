@@ -38,7 +38,7 @@ jobs:
       - name: Set up CodeQL
         # github/codeql-action v4
         id: setup-codeql
-        uses: github/codeql-action/setup-codeql@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd
+        uses: github/codeql-action/setup-codeql@cdf488f595d80d6e07e03d4674febd5ab45fa938
 
       - name: Install query pack dependencies
         shell: bash
