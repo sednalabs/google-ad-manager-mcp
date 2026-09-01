@@ -103,4 +103,5 @@ jobs:
                 throw
               }
             }
+            exit 0
           '
