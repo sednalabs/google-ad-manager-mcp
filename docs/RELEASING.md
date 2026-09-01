@@ -23,7 +23,8 @@ The workflow:
    - macOS arm64
    - macOS x86_64
    - Windows x86_64
-4. creates or resumes an exact-target draft, attaches those bundles,
+4. creates or resumes an exact-tag-commit draft, re-verifies the peeled tag
+   commit immediately before publication, and attaches those bundles and
    checksum-verifying install helpers,
    `SHA256SUMS`, `SHA256SUMS.sigstore.json`, and release metadata, then publishes
    it under GitHub's immutable-release policy; and

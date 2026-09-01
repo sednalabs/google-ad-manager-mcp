@@ -73,6 +73,9 @@ jobs:
         run: |
           set -euo pipefail
           bash -n scripts/install-release.sh
+          bash -n scripts/verify-release-tag.sh
+          bash -n scripts/test-verify-release-tag.sh
+          scripts/test-verify-release-tag.sh
           scripts/install-release.sh --help >/dev/null
           if scripts/install-release.sh --version '../v0.1.1' >/dev/null 2>&1; then
             echo "Unix installer accepted an unsafe release version" >&2

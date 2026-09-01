@@ -341,16 +341,15 @@ jobs:
           resume_draft="false"
           if release_json=$(gh api "repos/${repo}/releases/tags/${tag_name}" 2>/dev/null); then
             is_draft=$(jq -r '.draft' <<<"${release_json}")
-            existing_target=$(jq -r '.target_commitish' <<<"${release_json}")
             if [[ "${is_draft}" != "true" ]]; then
               echo "Published release ${tag_name} already exists; refusing to replace immutable assets" >&2
               exit 1
             fi
-            if [[ "${existing_target}" != "${target_ref}" ]]; then
-              echo "Draft ${tag_name} targets ${existing_target}, expected ${target_ref}; refusing to modify it" >&2
-              exit 1
-            fi
             resume_draft="true"
+          fi
+
+          if [[ "${GITHUB_EVENT_NAME}" == "push" || "${resume_draft}" == "true" ]]; then
+            scripts/verify-release-tag.sh "${repo}" "${tag_name}" "${target_ref}"
           fi
 
           if [[ "${resume_draft}" != "true" && "${GITHUB_EVENT_NAME}" != "push" ]] && \
@@ -376,6 +375,10 @@ jobs:
               --notes-file release/RELEASE_NOTES.md \
               --target "${target_ref}"
           fi
+
+          # Draft tags remain mutable. Re-resolve the canonical peeled commit
+          # immediately before crossing the immutable publication boundary.
+          scripts/verify-release-tag.sh "${repo}" "${tag_name}" "${target_ref}"
 
           publish_flags=(--latest)
           if [[ "${{ needs.prepare.outputs.prerelease }}" == "true" ]]; then
