@@ -17,29 +17,33 @@ The workflow:
 1. verifies that the requested tag matches `Cargo.toml`;
 2. builds standard-runner release bundles for:
    - Linux x86_64
+   - Linux arm64
    - macOS arm64
+   - macOS x86_64
    - Windows x86_64
-3. attaches those bundles plus `SHA256SUMS`, `SHA256SUMS.sigstore.json`, and
-   release metadata to a GitHub release; and
+3. creates a draft, attaches those bundles, checksum-verifying install helpers,
+   `SHA256SUMS`, `SHA256SUMS.sigstore.json`, and release metadata, then publishes
+   it under GitHub's immutable-release policy; and
 4. keeps the install path aligned with the tagged source release.
 
 ## Expected tag format
 
 The release tag must match the package version exactly:
 
-- package version `0.1.1-alpha.0`
-- release tag `v0.1.1-alpha.0`
+- package version `0.1.1`
+- release tag `v0.1.1`
 
 If the tag and package version drift, the workflow fails before building.
 
-Use GitHub's prerelease flag for alpha tags.
+Use GitHub's prerelease flag for alpha tags. Stable releases are published as
+the latest release.
 
 ## Canonical install paths
 
 Source install from a tagged release:
 
 ```bash
-cargo install --locked --git https://github.com/sednalabs/google-ad-manager-mcp --tag v0.1.1-alpha.0 google-ad-manager-mcp
+cargo install --locked --git https://github.com/sednalabs/google-ad-manager-mcp --tag v0.1.1 google-ad-manager-mcp
 ```
 
 Hosted release bundles:
@@ -68,3 +72,5 @@ Check these first:
 2. `Cargo.toml` version is correct.
 3. README install instructions still match the workflow outputs.
 4. Tool schema and public docs reflect the current surface.
+5. The target tag and GitHub release do not already exist; release artifacts
+   are never replaced in place.

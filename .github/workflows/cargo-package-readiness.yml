@@ -67,3 +67,24 @@ jobs:
           cargo install --locked --path . --root .tmp/install-root
           .tmp/install-root/bin/google-ad-manager-mcp --version
           .tmp/install-root/bin/google-ad-manager-mcp --print-tools >/dev/null
+
+      - name: Validate release installers
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash -n scripts/install-release.sh
+          scripts/install-release.sh --help >/dev/null
+          # shellcheck disable=SC2016
+          pwsh -NoProfile -Command '
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              "scripts/install-release.ps1",
+              [ref]$tokens,
+              [ref]$errors
+            ) | Out-Null
+            if ($errors.Count) {
+              $errors | ForEach-Object { Write-Error $_ }
+              exit 1
+            }
+          '

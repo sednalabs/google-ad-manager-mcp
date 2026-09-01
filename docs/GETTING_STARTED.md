@@ -81,16 +81,34 @@ Or set the server-specific secret path:
 export GOOGLE_AD_MANAGER_MCP_SERVICE_ACCOUNT_JSON_PATH=/path/to/service-account.json
 ```
 
-## 3. Start the server
+## 3. Install and connect the server
 
-If you installed from a tagged GitHub release bundle, unpack the archive,
-verify it against `SHA256SUMS` and the attached
-`SHA256SUMS.sigstore.json` bundle, and place the extracted binary on your
-`PATH`.
+The release installers select your platform, download the immutable GitHub
+release, verify its SHA-256 digest, and install the binary without requiring a
+Rust toolchain. See the [README install instructions](../README.md#install).
+
+Start it directly with:
 
 ```bash
 google-ad-manager-mcp
 ```
+
+For MCP clients that use JSON configuration, add the installed executable as a
+stdio server:
+
+```json
+{
+  "mcpServers": {
+    "google-ad-manager": {
+      "command": "google-ad-manager-mcp"
+    }
+  }
+}
+```
+
+If your graphical MCP client does not inherit your shell `PATH`, use the full
+path printed by the installer instead. Restart clients that keep a long-lived
+stdio child process after upgrading.
 
 By default the server uses `GOOGLE_AD_MANAGER_MCP_WRITE_MODE=preview_only`.
 That allows write planning but denies live apply. For an operator-approved
