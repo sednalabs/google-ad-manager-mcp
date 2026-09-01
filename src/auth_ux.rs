@@ -14,6 +14,7 @@ use mcp_toolkit_auth::upstream_oauth::{
     UpstreamOAuthError, google_authorized_user_adc_metadata_from_file,
 };
 use serde::Serialize;
+use serde_json::{Value, json};
 use tokio::process::Command;
 
 use crate::client::auth_source_from_settings;
@@ -222,14 +223,11 @@ async fn build_report(settings: &Settings, verify: bool) -> AuthReport {
         match credential_source.as_ref() {
             Ok(_) => {
                 let client = AdManagerClient::from_settings(settings);
-                match client.list_networks(Some(1), None).await {
-                    Ok(payload) => VerificationReport {
+                match client.verify_token().await {
+                    Ok(()) => VerificationReport {
                         checked: true,
                         ok: Some(true),
-                        sample_network_count: payload
-                            .get("networks")
-                            .and_then(|value| value.as_array())
-                            .map(Vec::len),
+                        sample_network_count: None,
                         error: None,
                         hint: None,
                     },
@@ -428,10 +426,11 @@ fn print_human_report(report: &AuthReport) {
     );
     if report.verification.checked {
         if report.verification.ok == Some(true) {
-            println!(
-                "Verification: ok (sample_network_count={})",
-                report.verification.sample_network_count.unwrap_or(0)
-            );
+            if let Some(count) = report.verification.sample_network_count {
+                println!("Verification: ok (sample_network_count={count})");
+            } else {
+                println!("Verification: token ok");
+            }
         } else {
             println!("Verification: failed");
             if let Some(error) = &report.verification.error {
@@ -756,6 +755,35 @@ pub(crate) fn validated_auth_source(settings: &Settings) -> AuthSource {
         status.config_valid,
         auth_source_from_settings(settings).ok(),
     )
+}
+
+/// Returns the secret-safe, non-network authentication diagnostics shared by
+/// the CLI and MCP status surfaces. In particular, this reports which ADC
+/// file was selected, whether it is present/usable, and its quota-project
+/// metadata without exposing credential material.
+pub(crate) fn mcp_auth_diagnostics(settings: &Settings) -> Value {
+    let env = EnvStatus {
+        google_application_credentials: std::env::var_os("GOOGLE_APPLICATION_CREDENTIALS")
+            .is_some(),
+        service_account_path: settings.service_account_json_path.is_some(),
+        service_account_json: settings.service_account_json.is_some(),
+        quota_project: settings.quota_project.is_some(),
+        shared_adc: settings.shared_adc,
+    };
+    let status = credential_source_status(settings, uses_local_user_adc(&env));
+    let auth_source = reported_auth_source(
+        status.config_valid,
+        auth_source_from_settings(settings).ok(),
+    );
+    let quota_project = effective_quota_project(settings, status.adc_file.as_ref(), &env);
+    json!({
+        "auth_source": auth_source.as_str(),
+        "config_valid": status.config_valid,
+        "config_issue": status.config_issue,
+        "credential_material_detected": status.credential_material_detected,
+        "adc_file": status.adc_file,
+        "quota_project": quota_project,
+    })
 }
 
 fn selected_adc_missing_step(adc_file: &AdcFileStatus) -> String {

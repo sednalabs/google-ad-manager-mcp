@@ -26,7 +26,8 @@ The helper:
 - includes the required ADC `cloud-platform` scope and the read-only Ad Manager
   scope;
 - sets the ADC quota project when `--quota-project` is supplied;
-- verifies access with a safe `networks.list` request.
+- can verify a token without a data request, and can verify access with a safe
+  `networks.list` request.
 
 Useful variants:
 
@@ -110,7 +111,8 @@ google-ad-manager-mcp --print-tool-schema > spec/tool_schema_snapshot.v1.json
 
 ## 4. First MCP calls
 
-1. `gam_auth_status` with `verify_access=true`
+1. `gam_auth_status` with `verify_token=true` (or `verify_access=true` to also
+   run the low-cost `networks.list` access probe)
 2. `gam_networks_list`
 3. `gam_network_catalog_list`
 4. `gam_exchange_protection_probe` when you need exchange/yield/protection

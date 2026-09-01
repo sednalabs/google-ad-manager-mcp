@@ -16,7 +16,7 @@ surface, not an SDK mirror or generic upstream proxy.
 - `src/auth_ux.rs`
   - operator-facing `auth login`, `auth command`, `auth status`, and
     `auth doctor` flows
-  - ADC quota-project detection and verification reporting
+  - ADC quota-project detection, selected-file diagnostics, and verification reporting
 - `src/client.rs`
   - authenticated Google Ad Manager REST adapter
   - authenticated Google Ad Manager SOAP envelope and request adapter
@@ -237,10 +237,11 @@ file is separate from other Google MCP servers under the same OS account. The
 login command requests both the `cloud-platform` ADC scope required by `gcloud`
 and the configured Ad Manager scope. The `--manage-scope` flag switches the login command to
 `https://www.googleapis.com/auth/admanager` for operator-approved write apply
-testing without asking users to remember the raw scope string. Verification
-uses `networks.list` with a small page size, which proves token minting, API
-enablement, quota-project behavior, and Ad Manager network visibility without
-exposing tokens.
+testing without asking users to remember the raw scope string. Verification is
+split into token acquisition and a low-cost `networks.list` request. Access
+verification always performs the token check first, and never performs a data
+request when token acquisition fails. Results include explicit skipped reasons
+and a legacy access-result alias so older clients continue to parse responses.
 
 ## Scratchpad Boundary
 

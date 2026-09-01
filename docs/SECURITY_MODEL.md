@@ -39,6 +39,13 @@ whether a low-cost access check succeeded. They must not return:
 - private keys
 - whole credential files
 
+`gam_auth_status` keeps token acquisition separate from API access: a
+`verify_token` check does not call Ad Manager, while `verify_access` first
+performs that token check and only then calls `networks.list`. Failed or skipped
+checks include safe reasons and redacted errors. Selected ADC paths and quota
+project metadata are diagnostic labels only; credential contents are never
+serialized.
+
 ## Tool-surface restrictions
 
 The server intentionally does not expose:
