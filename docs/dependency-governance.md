@@ -30,6 +30,20 @@ to block the lane:
 STRICT_OUTDATED=1 ./scripts/dependency_governance_check.sh
 ```
 
+### Feature-inactive RustSec exception
+
+`rust_decimal` declares `rkyv` 0.7 as an optional dependency, so Cargo records
+it in `Cargo.lock` even though GAM does not enable that feature. RustSec
+`RUSTSEC-2026-0235` affects `rkyv` 0.7, but that crate is not linked into the
+GAM server.
+
+`scripts/cargo_audit_check.sh` applies the narrow cargo-audit exception only
+after proving that `rkyv@0.7.46` is absent from every normal/build target
+graph. The check fails before applying the exception if a future dependency or
+feature activates that package. Remove the exception as soon as
+`rust_decimal` no longer carries the vulnerable optional dependency in the
+resolved lockfile.
+
 When you add a new direct dependency or make a major upgrade, include a short
 PR note that records why the crate is needed, which safer alternatives were
 considered, and how you would roll the change back.

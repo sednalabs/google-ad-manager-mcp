@@ -1,4 +1,4 @@
-name: Linux Artifact
+name: Linux Arm64 Artifact
 
 on:
   push:
@@ -11,8 +11,8 @@ permissions:
 
 jobs:
   build:
-    name: Build Linux x86_64 artifact
-    runs-on: ubuntu-24.04
+    name: Build Linux aarch64 artifact
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 60
 
     steps:
@@ -31,7 +31,7 @@ jobs:
         # swatinem/rust-cache v2
         uses: swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3
         with:
-          shared-key: linux-artifact-${{ runner.os }}
+          shared-key: linux-arm64-artifact-${{ runner.os }}
           workspaces: |
             . -> target
           cache-on-failure: "true"
@@ -51,7 +51,7 @@ jobs:
             echo "name=google-ad-manager-mcp"
             echo "version=$(dist/google-ad-manager-mcp --version)"
             echo "commit=${GITHUB_SHA}"
-            echo "target=x86_64-unknown-linux-gnu"
+            echo "target=aarch64-unknown-linux-gnu"
             sha256sum dist/google-ad-manager-mcp
           } > dist/MANIFEST.txt
 
@@ -59,6 +59,6 @@ jobs:
         # actions/upload-artifact v7
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: google-ad-manager-mcp-linux-x86_64
+          name: google-ad-manager-mcp-linux-aarch64
           path: dist/
           if-no-files-found: error
