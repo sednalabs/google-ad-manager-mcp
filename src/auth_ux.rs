@@ -279,16 +279,7 @@ async fn build_report(settings: &Settings, verify_token: bool, verify_access: bo
             .map(|err| redact_secret_text(&err.to_string()))
     });
     let config_valid = credential_status.config_valid && credential_source.is_ok();
-    let ready = if !config_valid {
-        "no".to_string()
-    } else {
-        match verification.ok {
-            Some(true) => "yes",
-            Some(false) => "no",
-            None => "not_verified",
-        }
-        .to_string()
-    };
+    let ready = readiness(config_valid, &token_check, &access_check, &verification);
     let credential_material_detected =
         credential_status.credential_material_detected || verification.ok == Some(true);
     let next_steps = next_steps(
@@ -315,6 +306,24 @@ async fn build_report(settings: &Settings, verify_token: bool, verify_access: bo
         verification,
         ready,
         next_steps,
+    }
+}
+
+fn readiness(
+    config_valid: bool,
+    token_check: &VerificationReport,
+    access_check: &VerificationReport,
+    verification: &VerificationReport,
+) -> String {
+    if !config_valid || token_check.ok == Some(false) || access_check.ok == Some(false) {
+        "no".to_string()
+    } else {
+        match verification.ok {
+            Some(true) => "yes",
+            Some(false) => "no",
+            None => "not_verified",
+        }
+        .to_string()
     }
 }
 
@@ -1198,6 +1207,16 @@ sbhtpi32ZJCvwpBEP6g7HaOR
         let serialized = serde_json::to_string(&report).expect("serialize skipped verification");
         assert!(serialized.contains(r#""checked":false"#));
         assert!(serialized.contains(r#""reason":"token_check_failed"#));
+    }
+
+    #[test]
+    fn failed_token_with_skipped_access_is_not_ready() {
+        let token = verification_failure(&AdManagerError::AuthBootstrap(
+            "token acquisition failed".to_string(),
+        ));
+        let access = VerificationReport::skipped("token_check_failed");
+        let ready = readiness(true, &token, &access, &access);
+        assert_eq!(ready, "no");
     }
 
     #[test]
