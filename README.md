@@ -5,7 +5,7 @@ Manager workflows. It is built on `mcp-toolkit-rs`, the official Google Ad
 Manager API (Beta), and the official Google Ad Manager SOAP API for classic
 trafficking operations that are not yet available through REST.
 
-The current alpha focuses on a small useful surface:
+The current release focuses on a small useful surface:
 
 - inspect Google Ad Manager credential readiness without exposing secrets;
 - discover accessible Ad Manager networks;
@@ -49,19 +49,39 @@ query surface, or default live write operations.
 
 ## Install
 
-The lowest-friction install path today is:
+### Prebuilt binary (no Rust toolchain required)
+
+On Linux or macOS, download the installer from the latest immutable GitHub
+release and run it:
 
 ```bash
-cargo install --locked --git https://github.com/sednalabs/google-ad-manager-mcp google-ad-manager-mcp
+curl --proto '=https' --tlsv1.2 -fsSLO \
+  https://github.com/sednalabs/google-ad-manager-mcp/releases/latest/download/install.sh
+sh install.sh
 ```
 
-For a pinned tagged source install:
+On Windows PowerShell:
+
+```powershell
+Invoke-WebRequest https://github.com/sednalabs/google-ad-manager-mcp/releases/latest/download/install.ps1 -OutFile install.ps1
+.\install.ps1
+```
+
+Both helpers select the matching release bundle and verify its SHA-256 digest
+against the release checksum manifest before installing. Pass
+`--version v0.1.1` on Unix or `-Version v0.1.1` on Windows to pin a release.
+Release binaries cover Linux x86_64 and arm64, macOS Apple Silicon and Intel,
+and Windows x86_64.
+
+### Build and install from source
+
+With a Rust toolchain installed, build the immutable tagged source release:
 
 ```bash
-cargo install --locked --git https://github.com/sednalabs/google-ad-manager-mcp --tag v0.1.1-alpha.0 google-ad-manager-mcp
+cargo install --locked --git https://github.com/sednalabs/google-ad-manager-mcp --tag v0.1.1 google-ad-manager-mcp
 ```
 
-The repository also publishes GitHub-hosted binary bundles through the release
+The repository publishes GitHub-hosted binary bundles through the release
 workflow and native x86_64 and aarch64 Linux artifacts on `main` through the
 `Linux Artifact` and `Linux Arm64 Artifact` workflows. Those hosted artifacts
 are useful when you want a pinned binary plus SHA256 manifests and a Sigstore

@@ -67,3 +67,41 @@ jobs:
           cargo install --locked --path . --root .tmp/install-root
           .tmp/install-root/bin/google-ad-manager-mcp --version
           .tmp/install-root/bin/google-ad-manager-mcp --print-tools >/dev/null
+
+      - name: Validate release installers
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash -n scripts/install-release.sh
+          bash -n scripts/verify-release-tag.sh
+          bash -n scripts/test-verify-release-tag.sh
+          scripts/test-verify-release-tag.sh
+          scripts/install-release.sh --help >/dev/null
+          if scripts/install-release.sh --version '../v0.1.1' >/dev/null 2>&1; then
+            echo "Unix installer accepted an unsafe release version" >&2
+            exit 1
+          fi
+          # shellcheck disable=SC2016
+          pwsh -NoProfile -Command '
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              "scripts/install-release.ps1",
+              [ref]$tokens,
+              [ref]$errors
+            ) | Out-Null
+            if ($errors.Count) {
+              $errors | ForEach-Object { Write-Error $_ }
+              exit 1
+            }
+            try {
+              & scripts/install-release.ps1 -Version "../v0.1.1" | Out-Null
+              Write-Error "PowerShell installer accepted an unsafe release version"
+              exit 1
+            } catch {
+              if ($_.Exception.Message -notlike "*complete semantic version*") {
+                throw
+              }
+            }
+            exit 0
+          '

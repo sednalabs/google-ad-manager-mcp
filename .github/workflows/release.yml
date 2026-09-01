@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       tag_name:
-        description: "Release tag to create or update; defaults to v<package version>"
+        description: "New immutable release tag; defaults to v<package version>"
         required: false
         default: ""
       prerelease:
@@ -37,11 +37,16 @@ jobs:
         # actions/checkout v6
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          fetch-depth: 1
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Resolve package version and release target
         id: meta
+        env:
+          RELEASE_TAG_INPUT: ${{ inputs.tag_name }}
+          PRERELEASE_INPUT: ${{ inputs.prerelease }}
+          TAG_EVENT_CREATED: ${{ github.event.created }}
+          TAG_EVENT_FORCED: ${{ github.event.forced }}
         shell: bash
         run: |
           set -euo pipefail
@@ -51,13 +56,17 @@ jobs:
           )"
 
           if [[ "${GITHUB_EVENT_NAME}" == "push" ]]; then
-            target_ref="${GITHUB_REF_NAME}"
+            if [[ "${TAG_EVENT_CREATED}" != "true" || "${TAG_EVENT_FORCED}" == "true" ]]; then
+              echo "Tag-triggered releases require a newly created, unforced tag" >&2
+              exit 1
+            fi
+            target_ref="${GITHUB_SHA}"
             tag_name="${GITHUB_REF_NAME}"
             prerelease="false"
           else
-            target_ref="${GITHUB_REF_NAME}"
-            tag_name="${{ inputs.tag_name }}"
-            prerelease="${{ inputs.prerelease }}"
+            target_ref="${GITHUB_SHA}"
+            tag_name="${RELEASE_TAG_INPUT}"
+            prerelease="${PRERELEASE_INPUT}"
             if [[ -z "${tag_name}" ]]; then
               tag_name="v${package_version}"
             fi
@@ -66,6 +75,12 @@ jobs:
           expected_tag="v${package_version}"
           if [[ "${tag_name}" != "${expected_tag}" ]]; then
             echo "Expected tag ${expected_tag} for package version ${package_version}, got ${tag_name}" >&2
+            exit 1
+          fi
+
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor "${target_ref}" FETCH_HEAD; then
+            echo "Release target ${target_ref} is not contained by origin/main" >&2
             exit 1
           fi
 
@@ -105,9 +120,19 @@ jobs:
             target: x86_64-unknown-linux-gnu
             binary_name: google-ad-manager-mcp
             archive_ext: tar.gz
+          - name: linux-arm64
+            runs_on: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            binary_name: google-ad-manager-mcp
+            archive_ext: tar.gz
           - name: macos-arm64
             runs_on: macos-15
             target: aarch64-apple-darwin
+            binary_name: google-ad-manager-mcp
+            archive_ext: tar.gz
+          - name: macos-x86_64
+            runs_on: macos-15-intel
+            target: x86_64-apple-darwin
             binary_name: google-ad-manager-mcp
             archive_ext: tar.gz
           - name: windows-x86_64
@@ -161,6 +186,8 @@ jobs:
           cp README.md LICENSE "${bundle_dir}/"
 
           "./${bundle_dir}/google-ad-manager-mcp" --version > "${bundle_dir}/VERSION.txt"
+          grep -Fx "google-ad-manager-mcp ${{ needs.prepare.outputs.package_version }}" \
+            "${bundle_dir}/VERSION.txt"
 
           tar -C dist -czf "dist/${asset_base}.tar.gz" "${asset_base}"
 
@@ -179,6 +206,9 @@ jobs:
           Copy-Item LICENSE "$bundleDir/LICENSE"
 
           $version = & "$bundleDir/google-ad-manager-mcp.exe" --version
+          if ($version.Trim() -ne "google-ad-manager-mcp ${{ needs.prepare.outputs.package_version }}") {
+            throw "Built binary version '$version' does not match release version '${{ needs.prepare.outputs.package_version }}'"
+          }
           Set-Content -Path "$bundleDir/VERSION.txt" -Value $version
 
           Compress-Archive -Path "$bundleDir/*" -DestinationPath "dist/$assetBase.zip" -Force
@@ -201,6 +231,13 @@ jobs:
       contents: write
       id-token: write
     steps:
+      - name: Checkout release helpers
+        # actions/checkout v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
       - name: Download release bundles
         # actions/download-artifact v5
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
@@ -215,23 +252,49 @@ jobs:
 
           mkdir -p release
           find release-artifacts -type f \( -name '*.tar.gz' -o -name '*.zip' \) -print -exec cp {} release/ \;
+          install -m 0755 scripts/install-release.sh release/install.sh
+          install -m 0644 scripts/install-release.ps1 release/install.ps1
           cd release
-          sha256sum *.tar.gz *.zip > SHA256SUMS
+          sha256sum -- ./*.tar.gz ./*.zip ./install.sh ./install.ps1 \
+            | sed 's#  \./#  #' > SHA256SUMS
 
-          cat > RELEASE_NOTES.md <<EOF
-          google-ad-manager-mcp ${{ needs.prepare.outputs.tag_name }}
+          RELEASE_TAG="${{ needs.prepare.outputs.tag_name }}" python3 <<'PY'
+          import os
+          from pathlib import Path
+
+          tag = os.environ["RELEASE_TAG"]
+          Path("RELEASE_NOTES.md").write_text(
+              f"""google-ad-manager-mcp {tag}
 
           Public stdio MCP server for Google Ad Manager workflows, including guarded REST write previews.
 
-          Install from source:
+          Install on Linux or macOS:
 
-          \`\`\`bash
-          cargo install --locked --git https://github.com/sednalabs/google-ad-manager-mcp --tag ${{ needs.prepare.outputs.tag_name }} google-ad-manager-mcp
-          \`\`\`
+          ```bash
+          curl --proto '=https' --tlsv1.2 -fsSLO https://github.com/sednalabs/google-ad-manager-mcp/releases/download/{tag}/install.sh
+          sh install.sh --version {tag}
+          ```
 
-          Prebuilt release bundles are attached for Linux x86_64, macOS arm64, and Windows x86_64.
+          Install on Windows PowerShell:
+
+          ```powershell
+          Invoke-WebRequest https://github.com/sednalabs/google-ad-manager-mcp/releases/download/{tag}/install.ps1 -OutFile install.ps1
+          .\\install.ps1 -Version {tag}
+          ```
+
+          Or install from source with Rust:
+
+          ```bash
+          cargo install --locked --git https://github.com/sednalabs/google-ad-manager-mcp --tag {tag} google-ad-manager-mcp
+          ```
+
+          Prebuilt release bundles are attached for Linux x86_64, Linux arm64, macOS arm64, macOS x86_64, and Windows x86_64.
+          The attached `install.sh` and `install.ps1` helpers download and checksum-verify the matching bundle.
           See README.md and docs/GETTING_STARTED.md for credential setup and first-run flow.
-          EOF
+          """,
+              encoding="utf-8",
+          )
+          PY
 
           cat > RELEASE-METADATA.json <<EOF
           {
@@ -268,7 +331,7 @@ jobs:
             --bundle release/SHA256SUMS.sigstore.json \
             release/SHA256SUMS
 
-      - name: Create or update GitHub release
+      - name: Publish new immutable GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
@@ -280,22 +343,80 @@ jobs:
           release_title="${{ needs.prepare.outputs.release_title }}"
           target_ref="${{ needs.prepare.outputs.target_ref }}"
 
-          if gh release view "${tag_name}" --repo "${repo}" >/dev/null 2>&1; then
-            gh release upload "${tag_name}" release/*.tar.gz release/*.zip release/SHA256SUMS release/RELEASE-METADATA.json release/RELEASE-METADATA.txt release/SHA256SUMS.sigstore.json --clobber --repo "${repo}"
-            gh release edit "${tag_name}" \
-              --repo "${repo}" \
-              --title "${release_title}" \
-              --notes-file release/RELEASE_NOTES.md \
-              ${{ needs.prepare.outputs.prerelease == 'true' && '--prerelease' || '' }}
-          else
-            gh release create "${tag_name}" \
-              --repo "${repo}" \
-              release/*.tar.gz release/*.zip release/SHA256SUMS release/RELEASE-METADATA.json release/RELEASE-METADATA.txt release/SHA256SUMS.sigstore.json \
-              --title "${release_title}" \
-              --notes-file release/RELEASE_NOTES.md \
-              --target "${target_ref}" \
-              ${{ needs.prepare.outputs.prerelease == 'true' && '--prerelease' || '' }}
+          resume_draft="false"
+          if release_json=$(gh api "repos/${repo}/releases/tags/${tag_name}" 2>/dev/null); then
+            is_draft=$(jq -r '.draft' <<<"${release_json}")
+            if [[ "${is_draft}" != "true" ]]; then
+              echo "Published release ${tag_name} already exists; refusing to replace immutable assets" >&2
+              exit 1
+            fi
+            resume_draft="true"
           fi
+
+          if [[ "${GITHUB_EVENT_NAME}" == "push" || "${resume_draft}" == "true" ]]; then
+            scripts/verify-release-tag.sh "${repo}" "${tag_name}" "${target_ref}"
+          fi
+
+          if [[ "${resume_draft}" != "true" && "${GITHUB_EVENT_NAME}" != "push" ]] && \
+             gh api "repos/${repo}/git/ref/tags/${tag_name}" >/dev/null 2>&1; then
+            echo "Tag ${tag_name} already exists; refusing to attach a new release to an unexpected tag" >&2
+            exit 1
+          fi
+
+          release_assets=(
+            release/*.tar.gz release/*.zip release/install.sh release/install.ps1
+            release/SHA256SUMS release/RELEASE-METADATA.json
+            release/RELEASE-METADATA.txt release/SHA256SUMS.sigstore.json
+          )
+          expected_asset_names=$(printf '%s\n' "${release_assets[@]##*/}" | sort)
+          if [[ "${resume_draft}" == "true" ]]; then
+            release_id=$(jq -r '.id' <<<"${release_json}")
+            existing_asset_names=$(
+              gh api --paginate "repos/${repo}/releases/${release_id}/assets" --jq '.[].name' | sort
+            )
+            while IFS= read -r existing_name; do
+              [[ -z "${existing_name}" ]] && continue
+              if ! grep -Fxq -- "${existing_name}" <<<"${expected_asset_names}"; then
+                echo "Draft ${tag_name} contains unexpected asset ${existing_name}; refusing to modify it" >&2
+                exit 1
+              fi
+            done <<<"${existing_asset_names}"
+
+            gh release edit "${tag_name}" --repo "${repo}" \
+              --title "${release_title}" --notes-file release/RELEASE_NOTES.md
+            gh release upload "${tag_name}" "${release_assets[@]}" --clobber --repo "${repo}"
+          else
+            gh release create "${tag_name}" "${release_assets[@]}" \
+              --repo "${repo}" \
+              --draft \
+              --title "${release_title}" \
+              --notes-file release/RELEASE_NOTES.md \
+              --target "${target_ref}"
+          fi
+
+          release_id=$(gh api "repos/${repo}/releases/tags/${tag_name}" --jq .id)
+          published_asset_names=$(
+            gh api --paginate "repos/${repo}/releases/${release_id}/assets" --jq '.[].name' | sort
+          )
+          if [[ "${published_asset_names}" != "${expected_asset_names}" ]]; then
+            echo "Draft ${tag_name} asset inventory does not exactly match the release payload" >&2
+            diff -u <(printf '%s\n' "${expected_asset_names}") \
+              <(printf '%s\n' "${published_asset_names}") || true
+            exit 1
+          fi
+
+          # Draft tags remain mutable. Re-resolve the canonical peeled commit
+          # immediately before crossing the immutable publication boundary.
+          scripts/verify-release-tag.sh "${repo}" "${tag_name}" "${target_ref}"
+
+          publish_flags=(--latest)
+          if [[ "${{ needs.prepare.outputs.prerelease }}" == "true" ]]; then
+            publish_flags=(--prerelease)
+          fi
+          gh release edit "${tag_name}" \
+            --repo "${repo}" \
+            --draft=false \
+            "${publish_flags[@]}"
 
       - name: Summarize published assets
         shell: bash
@@ -307,5 +428,5 @@ jobs:
             echo "- Tag: \`${{ needs.prepare.outputs.tag_name }}\`"
             echo "- GitHub release: \`${{ needs.prepare.outputs.release_title }}\`"
             echo "- Assets:"
-            ls -1 release | sed 's/^/  - /'
+            find release -maxdepth 1 -type f -printf '  - %f\n' | sort
           } >> "${GITHUB_STEP_SUMMARY}"

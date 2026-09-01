@@ -52,12 +52,12 @@ considered, and how you would roll the change back.
 
 The entries below preserve the historical compatibility and rollback evidence
 from the original semantic-discovery development sequence. The replayed change
-does not retain those historical pins: all six direct toolkit packages now use
-the authoritative `mcp-toolkit-rs/main` snapshot
-`8bfe29c056ef7cfcc9a7748bdabd527961e7e082`, with the same exact identity in
-`Cargo.lock` for reproducible builds. Refresh that snapshot from the
-authoritative `main` branch before future dependency work; do not float a
-branch reference or restore an older historical revision.
+does not retain those historical pins: all six direct toolkit packages follow
+the authoritative `mcp-toolkit-rs/main` branch in `Cargo.toml`, while
+`Cargo.lock` records the exact resolved Toolkit SHA for reproducible builds.
+Refresh and review that lockfile identity before future dependency work; use a
+manifest `rev` only when intentionally freezing a long-lived Toolkit version,
+as recommended by the Toolkit's existing-service adoption guide.
 
 The historical sequence advanced all six direct toolkit packages together from
 immutable revision
@@ -164,7 +164,8 @@ dependency target.
 
 These historical rollback instructions document provenance only. They do not
 authorize pinning the current server to `f90934bd` or `87d21ed9`; the current
-server remains on the authoritative `main` snapshot recorded above.
+server follows the authoritative `main` branch and commits its resolved SHA in
+`Cargo.lock`.
 
 ## Auth dependency note
 
