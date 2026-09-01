@@ -802,22 +802,6 @@ fn reported_auth_source(config_valid: bool, selected: Option<AuthSource>) -> Aut
     }
 }
 
-pub(crate) fn validated_auth_source(settings: &Settings) -> AuthSource {
-    let env = EnvStatus {
-        google_application_credentials: std::env::var_os("GOOGLE_APPLICATION_CREDENTIALS")
-            .is_some(),
-        service_account_path: settings.service_account_json_path.is_some(),
-        service_account_json: settings.service_account_json.is_some(),
-        quota_project: settings.quota_project.is_some(),
-        shared_adc: settings.shared_adc,
-    };
-    let status = credential_source_status(settings, uses_local_user_adc(&env));
-    reported_auth_source(
-        status.config_valid,
-        auth_source_from_settings(settings).ok(),
-    )
-}
-
 /// Returns the secret-safe, non-network authentication diagnostics shared by
 /// the CLI and MCP status surfaces. In particular, this reports which ADC
 /// file was selected, whether it is present/usable, and its quota-project

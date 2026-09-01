@@ -676,7 +676,7 @@ impl AdManagerServer {
             json!({
                 "requested_scope": self.client().scope(),
                 "auth_source_candidate": diagnostics.get("auth_source").cloned().unwrap_or_else(|| json!("unavailable")),
-                "config_valid": diagnostics.get("config_valid").cloned().unwrap_or_else(|| json!(false)),
+                "config_valid": diagnostics.get("config_valid").cloned().unwrap_or(Value::Bool(false)),
                 "config_issue": diagnostics.get("config_issue").cloned().unwrap_or(Value::Null),
                 "quota_project_configured": self.client().quota_project_configured(),
                 "credential_material_detected": diagnostics.get("credential_material_detected").cloned().unwrap_or(Value::Bool(false)),
