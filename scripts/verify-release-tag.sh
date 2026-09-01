@@ -2,7 +2,7 @@
 set -eu
 
 usage() {
-  echo "Usage: verify-release-tag.sh OWNER/REPO TAG EXPECTED_COMMIT_SHA" >&2
+  echo "Usage: verify-release-tag.sh <repository> <tag> <commit>" >&2
 }
 
 [ "$#" -eq 3 ] || { usage; exit 2; }
