@@ -1,0 +1,4267 @@
+//! Provider-specific tool-discovery orchestration.
+//!
+//! This module keeps semantic ranking in `mcp-toolkit-rs` and owns only the
+//! Google Ad Manager workflow relationships that the generic toolkit cannot
+//! infer, such as guided builder/plan/apply dependencies and filter recovery.
+
+use std::collections::{BTreeMap, BTreeSet};
+
+use mcp_toolkit_core::guarded_action::GuardedActionOperationClass;
+use mcp_toolkit_core::tool_inventory::{
+    ToolInventory, ToolInventoryPolicy, ToolOperation, ToolSearchFilter, ToolSearchMatchSummary,
+    ToolSearchResult,
+};
+use serde_json::{Value, json};
+
+use crate::client::validate_operation_name;
+
+const SCRATCHPAD_REST_READ_TOOLS: [&str; 2] = [
+    "gam_scratchpad_ingest_network_catalog",
+    "gam_scratchpad_ingest_report_result_rows",
+];
+const SCRATCHPAD_MANAGE_SCOPE_READ_TOOLS: [&str; 1] = ["gam_scratchpad_ingest_soap_line_items"];
+const MAX_RECOVERY_GROUPS: usize = 16;
+const MAX_RECOVERY_EXAMPLE_QUERIES: usize = 8;
+const MAX_RECOVERY_LOCAL_STATE_TOOLS: usize = 16;
+const CANONICAL_REPORT_OPERATION_TERM: &str = "canonicalreportoperation";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RepresentativeDiscoveryCandidate {
+    pub query: &'static str,
+    pub expected_tool: &'static str,
+    pub group: &'static str,
+    pub read_only: bool,
+    pub no_match_recovery: bool,
+}
+
+pub(crate) const REPRESENTATIVE_DISCOVERY_CANDIDATES: [RepresentativeDiscoveryCandidate; 20] = [
+    candidate(
+        "set up and authenticate Google Ad Manager",
+        "gam_auth_status",
+        "setup",
+        true,
+    ),
+    candidate(
+        "inspect ad units and placements",
+        "gam_network_catalog_list",
+        "catalog",
+        true,
+    ),
+    candidate(
+        "plan a campaign line item with creatives",
+        "gam_soap_trafficking_plan",
+        "trafficking",
+        true,
+    ),
+    candidate(
+        "pause a line item",
+        "gam_soap_trafficking_plan",
+        "trafficking",
+        true,
+    ),
+    candidate(
+        "resume a line item",
+        "gam_soap_trafficking_plan",
+        "trafficking",
+        true,
+    ),
+    candidate(
+        "archive a line item",
+        "gam_soap_trafficking_plan",
+        "trafficking",
+        true,
+    ),
+    candidate(
+        "deactivate an ad unit",
+        "gam_rest_write_plan",
+        "trafficking",
+        true,
+    ),
+    candidate(
+        "archive an ad unit",
+        "gam_rest_write_plan",
+        "trafficking",
+        true,
+    ),
+    rank_only_candidate(
+        "start a campaign delivery audit with a saved report",
+        "gam_report_run",
+        "reports",
+        false,
+    ),
+    candidate(
+        "continue waiting for an existing report operation",
+        "gam_report_operation_poll",
+        "reports",
+        true,
+    ),
+    candidate(
+        "fetch rows from a completed report result",
+        "gam_report_result_rows",
+        "reports",
+        true,
+    ),
+    candidate(
+        "check exchange and yield protection",
+        "gam_exchange_protection_probe",
+        "catalog",
+        true,
+    ),
+    candidate(
+        "assess ad units for retirement",
+        "gam_ad_unit_retirement_assessment",
+        "catalog",
+        true,
+    ),
+    candidate(
+        "open a scratchpad session for delivery analysis",
+        "gam_scratchpad_open_session",
+        "scratchpad",
+        false,
+    ),
+    candidate(
+        "ingest line item delivery into an existing scratchpad session",
+        "gam_scratchpad_ingest_soap_line_items",
+        "scratchpad",
+        false,
+    ),
+    candidate(
+        "discover Google Ad Manager MCP tools by workflow",
+        "find_tools",
+        "discovery",
+        true,
+    ),
+    candidate(
+        "list Google Ad Manager networks visible to the authenticated principal",
+        "gam_networks_list",
+        "networks",
+        true,
+    ),
+    candidate(
+        "apply an allowlisted REST write",
+        "gam_rest_write_apply",
+        "trafficking",
+        false,
+    ),
+    candidate(
+        "apply a SOAP trafficking creative operation",
+        "gam_soap_trafficking_apply",
+        "trafficking",
+        false,
+    ),
+    candidate(
+        "apply descendant-safe yield group exclusions",
+        "gam_yield_group_exclusions_apply",
+        "trafficking",
+        false,
+    ),
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReportDiscoveryIntent {
+    ExplicitNewRun,
+    ExistingOperationContinuation,
+    Unspecified,
+}
+
+impl ReportDiscoveryIntent {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::ExplicitNewRun => "explicit_new_run",
+            Self::ExistingOperationContinuation => "existing_operation_continuation",
+            Self::Unspecified => "unspecified",
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct ReportDiscoveryResolution {
+    pub records: Vec<Value>,
+    pub callable_alternatives: Vec<&'static str>,
+}
+
+const fn candidate(
+    query: &'static str,
+    expected_tool: &'static str,
+    group: &'static str,
+    read_only: bool,
+) -> RepresentativeDiscoveryCandidate {
+    RepresentativeDiscoveryCandidate {
+        query,
+        expected_tool,
+        group,
+        read_only,
+        no_match_recovery: true,
+    }
+}
+
+const fn rank_only_candidate(
+    query: &'static str,
+    expected_tool: &'static str,
+    group: &'static str,
+    read_only: bool,
+) -> RepresentativeDiscoveryCandidate {
+    RepresentativeDiscoveryCandidate {
+        query,
+        expected_tool,
+        group,
+        read_only,
+        no_match_recovery: false,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WorkflowDependency {
+    tool_name: &'static str,
+    before_tool: &'static str,
+    callable_as_tool: bool,
+    required_for_guided_sequence: bool,
+    reason: &'static str,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct WorkflowCompanion {
+    pub tool_name: &'static str,
+    pub before_tool: &'static str,
+    pub callable_as_tool: bool,
+    pub required_for_guided_sequence: bool,
+    pub tool_already_selected: bool,
+    pub reason: &'static str,
+}
+
+// Declaration order is not trusted; the provider composer validates and sorts the full graph.
+const WORKFLOW_DEPENDENCIES: [WorkflowDependency; 8] = [
+    WorkflowDependency {
+        tool_name: "gam_networks_list",
+        before_tool: "gam_network_catalog_list",
+        callable_as_tool: true,
+        required_for_guided_sequence: true,
+        reason: "Cold-start catalog sequence: discover the exact network code before listing a network collection. Discovery does not prove that network discovery ran.",
+    },
+    WorkflowDependency {
+        tool_name: "gam_network_catalog_list",
+        before_tool: "gam_report_run",
+        callable_as_tool: true,
+        required_for_guided_sequence: true,
+        reason: "Cold-start report sequence: list collection=reports with the exact network code to obtain a saved report id before starting a run. Discovery does not prove that report catalog lookup ran.",
+    },
+    WorkflowDependency {
+        tool_name: "gam_report_run",
+        before_tool: "gam_report_operation_poll",
+        callable_as_tool: false,
+        required_for_guided_sequence: false,
+        reason: "Asynchronous report sequence: when no operation_name exists yet, start one report run with wait_for_completion=false, then pass its returned operation_name to gam_report_operation_poll. Do not call gam_report_run when an existing operation_name is already available; the poll tool never starts another report run.",
+    },
+    WorkflowDependency {
+        tool_name: "gam_report_operation_poll",
+        before_tool: "gam_report_result_rows",
+        callable_as_tool: true,
+        required_for_guided_sequence: false,
+        reason: "Asynchronous report sequence: poll the existing operation until it returns report_result before fetching rows. This step is optional when gam_report_run already waited for completion and returned report_result.",
+    },
+    WorkflowDependency {
+        tool_name: "gam_rest_write_plan",
+        before_tool: "gam_rest_write_apply",
+        callable_as_tool: true,
+        required_for_guided_sequence: true,
+        reason: "Guided sequence: review the REST plan before apply. Discovery does not prove that plan ran. REST apply independently revalidates its exact request and token and retains runtime, scope, and confirmation gates; configured readback is attempted where available but is not a universal success gate.",
+    },
+    WorkflowDependency {
+        tool_name: "gam_soap_payload_build",
+        before_tool: "gam_soap_trafficking_plan",
+        callable_as_tool: true,
+        required_for_guided_sequence: false,
+        reason: "Guided sequence: optionally build a typed SOAP payload before planning. Discovery does not prove the builder ran; independently authored payload_xml remains valid input, and the plan validates and builds its exact no-upstream-call request.",
+    },
+    WorkflowDependency {
+        tool_name: "gam_soap_trafficking_plan",
+        before_tool: "gam_soap_trafficking_apply",
+        callable_as_tool: true,
+        required_for_guided_sequence: true,
+        reason: "Guided sequence: review the SOAP trafficking plan before apply. Discovery does not prove that plan ran. Generic SOAP apply independently revalidates its exact request and token and retains runtime, scope, and confirmation gates; follow-up verification is still required.",
+    },
+    WorkflowDependency {
+        tool_name: "gam_yield_group_exclusions_preview",
+        before_tool: "gam_yield_group_exclusions_apply",
+        callable_as_tool: true,
+        required_for_guided_sequence: true,
+        reason: "Guided sequence: review descendant-safe yield-group exclusions before apply. Discovery does not prove that preview ran. Typed yield apply independently revalidates its exact request and token, retains runtime, scope, and confirmation gates, and requires descendant-safe post-apply readback.",
+    },
+];
+
+const AD_UNIT_RETIREMENT_DEPENDENCIES: [WorkflowDependency; 3] = [
+    WorkflowDependency {
+        tool_name: "gam_network_catalog_list",
+        before_tool: "gam_ad_unit_dependency_probe",
+        callable_as_tool: true,
+        required_for_guided_sequence: true,
+        reason: "Ad-unit retirement sequence: resolve the exact ad-unit code and canonical id before checking placement and line-item dependencies.",
+    },
+    WorkflowDependency {
+        tool_name: "gam_ad_unit_dependency_probe",
+        before_tool: "gam_ad_unit_retirement_assessment",
+        callable_as_tool: true,
+        required_for_guided_sequence: true,
+        reason: "Ad-unit retirement sequence: inspect current placement and line-item dependencies before producing a freshness-bound retirement assessment.",
+    },
+    WorkflowDependency {
+        tool_name: "gam_ad_unit_retirement_assessment",
+        before_tool: "gam_rest_write_plan",
+        callable_as_tool: true,
+        required_for_guided_sequence: true,
+        reason: "Ad-unit archive/deactivate sequence: review the conservative identity, hierarchy, dependency, and freshness assessment before creating any REST write plan.",
+    },
+];
+
+pub(crate) fn compose_workflow_companions(
+    results: &[ToolSearchResult],
+    query: Option<&str>,
+) -> Result<Vec<WorkflowCompanion>, &'static str> {
+    let mut dependencies = WORKFLOW_DEPENDENCIES.to_vec();
+    if is_ad_unit_retirement_intent(query) {
+        dependencies.extend(AD_UNIT_RETIREMENT_DEPENDENCIES);
+    }
+    let dependencies = topologically_sorted_dependencies(dependencies)?;
+    let report_poll_authorized = report_poll_discovery_is_authoritative(query);
+    let selected = results
+        .iter()
+        .map(|result| result.name.as_str())
+        .collect::<BTreeSet<_>>();
+    let mut prerequisites = selected.clone();
+    if selected.contains("gam_report_run")
+        && report_discovery_intent(query) == ReportDiscoveryIntent::ExistingOperationContinuation
+    {
+        prerequisites.insert("gam_report_operation_poll");
+    }
+    loop {
+        let mut changed = false;
+        for dependency in dependencies.iter().copied() {
+            if dependency.callable_as_tool && prerequisites.contains(dependency.before_tool) {
+                changed |= prerequisites.insert(dependency.tool_name);
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    let mut emitted_edges = BTreeSet::new();
+    Ok(dependencies
+        .into_iter()
+        .filter(|dependency| {
+            report_poll_authorized
+                || (dependency.tool_name != "gam_report_operation_poll"
+                    && dependency.before_tool != "gam_report_operation_poll")
+        })
+        .filter(|dependency| prerequisites.contains(dependency.before_tool))
+        .filter(|dependency| emitted_edges.insert((dependency.tool_name, dependency.before_tool)))
+        .map(|dependency| WorkflowCompanion {
+            tool_name: dependency.tool_name,
+            before_tool: dependency.before_tool,
+            callable_as_tool: dependency.callable_as_tool,
+            required_for_guided_sequence: dependency.required_for_guided_sequence,
+            tool_already_selected: selected.contains(dependency.tool_name),
+            reason: dependency.reason,
+        })
+        .collect())
+}
+
+fn topologically_sorted_dependencies(
+    dependencies: Vec<WorkflowDependency>,
+) -> Result<Vec<WorkflowDependency>, &'static str> {
+    let mut deduplicated = BTreeMap::new();
+    for dependency in dependencies {
+        deduplicated
+            .entry((dependency.tool_name, dependency.before_tool))
+            .or_insert(dependency);
+    }
+    let dependencies = deduplicated.into_values().collect::<Vec<_>>();
+    let mut nodes = BTreeSet::new();
+    let mut outgoing = BTreeMap::<&str, BTreeSet<&str>>::new();
+    let mut indegree = BTreeMap::<&str, usize>::new();
+    for dependency in dependencies.iter().copied() {
+        nodes.insert(dependency.tool_name);
+        nodes.insert(dependency.before_tool);
+        outgoing
+            .entry(dependency.tool_name)
+            .or_default()
+            .insert(dependency.before_tool);
+        *indegree.entry(dependency.before_tool).or_default() += 1;
+        indegree.entry(dependency.tool_name).or_default();
+    }
+
+    let mut ready = nodes
+        .iter()
+        .copied()
+        .filter(|node| indegree.get(node).copied().unwrap_or_default() == 0)
+        .collect::<BTreeSet<_>>();
+    let mut ordered_nodes = Vec::with_capacity(nodes.len());
+    while let Some(node) = ready.pop_first() {
+        ordered_nodes.push(node);
+        if let Some(successors) = outgoing.get(node) {
+            for successor in successors {
+                let successor_indegree = indegree
+                    .get_mut(successor)
+                    .expect("workflow successor has an indegree entry");
+                *successor_indegree -= 1;
+                if *successor_indegree == 0 {
+                    ready.insert(successor);
+                }
+            }
+        }
+    }
+    if ordered_nodes.len() != nodes.len() {
+        return Err("provider workflow dependency graph contains a cycle");
+    }
+
+    let node_order = ordered_nodes
+        .into_iter()
+        .enumerate()
+        .map(|(index, node)| (node, index))
+        .collect::<BTreeMap<_, _>>();
+    let mut dependencies = dependencies;
+    dependencies.sort_by_key(|dependency| {
+        (
+            *node_order
+                .get(dependency.before_tool)
+                .expect("workflow target has a topological position"),
+            *node_order
+                .get(dependency.tool_name)
+                .expect("workflow source has a topological position"),
+            dependency.tool_name,
+            dependency.before_tool,
+        )
+    });
+    Ok(dependencies)
+}
+
+#[cfg(test)]
+fn workflow_companions(
+    results: &[ToolSearchResult],
+    query: Option<&str>,
+) -> Vec<WorkflowCompanion> {
+    compose_workflow_companions(results, query).expect("static workflow graph must be acyclic")
+}
+
+fn is_ad_unit_retirement_intent(query: Option<&str>) -> bool {
+    let Some(query) = query else {
+        return false;
+    };
+    let normalized = query.to_ascii_lowercase().replace(['-', '_'], " ");
+    normalized.contains("ad unit")
+        && normalized.split_whitespace().any(|term| {
+            matches!(
+                term,
+                "archive"
+                    | "archiving"
+                    | "deactivate"
+                    | "deactivating"
+                    | "deactivation"
+                    | "retire"
+                    | "retiring"
+                    | "retirement"
+            )
+        })
+}
+
+struct NormalizedReportDiscoveryQuery {
+    text: String,
+    clause_text: String,
+    canonical_operations: BTreeSet<String>,
+    invalid_canonical_reference: bool,
+}
+
+fn normalize_report_discovery_query(query: &str) -> NormalizedReportDiscoveryQuery {
+    let bytes = query.as_bytes();
+    let mut canonical_operations = BTreeSet::new();
+    let mut valid_spans = Vec::new();
+    let mut search_start = 0;
+    while let Some(relative_start) = query[search_start..].find("networks/") {
+        let start = search_start + relative_start;
+        let mut end = start;
+        while end < bytes.len()
+            && (bytes[end].is_ascii_alphanumeric() || matches!(bytes[end], b'/' | b'-' | b'_'))
+        {
+            end += 1;
+        }
+        let before_is_boundary = start == 0
+            || bytes[start - 1].is_ascii_whitespace()
+            || matches!(
+                bytes[start - 1],
+                b'=' | b'`' | b'\'' | b'"' | b'(' | b'[' | b'{' | b',' | b':'
+            );
+        let punctuation_is_terminal = end < bytes.len()
+            && matches!(bytes[end], b',' | b'.' | b';' | b':' | b'!' | b'?')
+            && (end + 1 == bytes.len()
+                || bytes[end + 1].is_ascii_whitespace()
+                || matches!(bytes[end + 1], b'`' | b'\'' | b'"' | b')' | b']' | b'}'));
+        let after_is_boundary = end == bytes.len()
+            || bytes[end].is_ascii_whitespace()
+            || matches!(bytes[end], b'`' | b'\'' | b'"' | b')' | b']' | b'}')
+            || punctuation_is_terminal;
+        let candidate = &query[start..end];
+        if before_is_boundary && after_is_boundary && validate_operation_name(candidate).is_ok() {
+            canonical_operations.insert(candidate.to_string());
+            valid_spans.push((start, end));
+            search_start = end;
+        } else {
+            search_start = start + "networks/".len();
+        }
+    }
+
+    let lowercase_query = query.to_ascii_lowercase();
+    let canonical_marker_count = lowercase_query
+        .match_indices("/operations/reports/runs/")
+        .count();
+    let invalid_canonical_reference = canonical_marker_count != valid_spans.len();
+    let mut redacted = String::with_capacity(query.len());
+    let mut cursor = 0;
+    for (start, end) in valid_spans {
+        redacted.push_str(&query[cursor..start]);
+        redacted.push(' ');
+        redacted.push_str(CANONICAL_REPORT_OPERATION_TERM);
+        redacted.push(' ');
+        cursor = end;
+    }
+    redacted.push_str(&query[cursor..]);
+
+    let clause_text = redacted.to_ascii_lowercase();
+    NormalizedReportDiscoveryQuery {
+        text: clause_text.replace(['-', '_'], " "),
+        clause_text,
+        canonical_operations,
+        invalid_canonical_reference,
+    }
+}
+
+fn report_discovery_intent(query: Option<&str>) -> ReportDiscoveryIntent {
+    let Some(query) = query else {
+        return ReportDiscoveryIntent::Unspecified;
+    };
+    let normalized_query = normalize_report_discovery_query(query);
+    let canonical_operation_count = normalized_query.canonical_operations.len();
+    let clause_text = normalized_query.clause_text;
+    let normalized = normalized_query.text;
+    let terms = normalized
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .filter(|term| !term.is_empty())
+        .collect::<Vec<_>>();
+    let term_set = terms.iter().copied().collect::<BTreeSet<_>>();
+    let report_context = canonical_operation_count > 0
+        || term_set.contains("report")
+        || term_set.contains("reports")
+        || normalized.contains("campaign delivery audit");
+    if normalized_query.invalid_canonical_reference
+        || query_blocks_report_authority(&terms, &normalized)
+    {
+        return ReportDiscoveryIntent::Unspecified;
+    }
+    if report_context
+        && !report_reference_identities_are_coherent(&terms, canonical_operation_count)
+    {
+        return ReportDiscoveryIntent::Unspecified;
+    }
+    let new_run_action = report_start_action_tail(&terms, report_context, &clause_text);
+    let (has_new_run_action_object, clear_new_run_action, rejected_new_run_action) =
+        match new_run_action {
+            ReportStartActionTail::NoCandidate => (false, false, false),
+            ReportStartActionTail::Candidate { tail_start_index } => {
+                match report_start_tail_safety(&terms, tail_start_index, &clause_text) {
+                    ReportStartTailSafety::Safe => (true, true, false),
+                    ReportStartTailSafety::Unsupported => (true, false, false),
+                    ReportStartTailSafety::Rejected => (true, false, true),
+                }
+            }
+            ReportStartActionTail::Rejected => (true, false, true),
+        };
+    if rejected_new_run_action {
+        return ReportDiscoveryIntent::Unspecified;
+    }
+    let explicit_existing_operation_reference = has_explicit_existing_report_operation_reference(
+        &terms,
+        report_context,
+        canonical_operation_count > 0,
+        has_new_run_action_object,
+    );
+    let report_run_noun_reference = has_explicit_existing_report_run_reference(
+        &terms,
+        report_context,
+        has_new_run_action_object,
+    );
+    if (explicit_existing_operation_reference || report_run_noun_reference)
+        && report_reference_query_is_authoritative(&terms)
+    {
+        return ReportDiscoveryIntent::ExistingOperationContinuation;
+    }
+
+    if clear_new_run_action {
+        ReportDiscoveryIntent::ExplicitNewRun
+    } else if !has_new_run_action_object && has_scoped_report_continuation(&terms) {
+        ReportDiscoveryIntent::ExistingOperationContinuation
+    } else {
+        ReportDiscoveryIntent::Unspecified
+    }
+}
+
+fn report_poll_discovery_is_authoritative(query: Option<&str>) -> bool {
+    if has_report_result_retrieval_request(query) {
+        return has_clear_report_result_retrieval(query);
+    }
+    report_discovery_intent(query) == ReportDiscoveryIntent::ExistingOperationContinuation
+        || has_clear_report_result_retrieval(query)
+}
+
+fn has_report_result_retrieval_request(query: Option<&str>) -> bool {
+    let Some(query) = query else {
+        return false;
+    };
+    let normalized = normalize_report_discovery_query(query).text;
+    let terms = normalized
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .filter(|term| !term.is_empty())
+        .collect::<Vec<_>>();
+    let Some(terms) = report_result_retrieval_clause(&terms) else {
+        return false;
+    };
+    terms
+        .iter()
+        .any(|term| matches!(*term, "report" | "reports"))
+        && terms
+            .iter()
+            .any(|term| matches!(*term, "result" | "results"))
+        && terms
+            .iter()
+            .any(|term| matches!(*term, "page" | "pages" | "row" | "rows"))
+}
+
+fn report_result_retrieval_clause<'a>(terms: &'a [&'a str]) -> Option<&'a [&'a str]> {
+    let terms = strip_report_directive_prefix(terms);
+    let retrieval_index = terms
+        .iter()
+        .position(|term| is_report_result_retrieval_action(term))?;
+    if retrieval_index == 0 {
+        return Some(terms);
+    }
+    let selection_clause = terms[..retrieval_index].strip_suffix(&["then"])?;
+    report_selection_clause_is_authoritative(selection_clause).then_some(&terms[retrieval_index..])
+}
+
+fn is_report_result_retrieval_action(term: &str) -> bool {
+    matches!(
+        term,
+        "fetch" | "get" | "list" | "retrieve" | "show" | "view"
+    )
+}
+
+fn has_clear_report_result_retrieval(query: Option<&str>) -> bool {
+    let Some(query) = query else {
+        return false;
+    };
+    let normalized_query = normalize_report_discovery_query(query);
+    let canonical_operation_count = normalized_query.canonical_operations.len();
+    let clause_text = normalized_query.clause_text;
+    let normalized = normalized_query.text;
+    let terms = normalized
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .filter(|term| !term.is_empty())
+        .collect::<Vec<_>>();
+    if normalized_query.invalid_canonical_reference
+        || report_range_has_invalid_separator(&clause_text, 0, clause_text.len(), false)
+        || query_blocks_report_authority(&terms, &normalized)
+        || !report_reference_identities_are_coherent(&terms, canonical_operation_count)
+    {
+        return false;
+    }
+    let Some(terms) = report_result_retrieval_clause(&terms) else {
+        return false;
+    };
+    let has_report = terms
+        .iter()
+        .any(|term| matches!(*term, "report" | "reports"));
+    let has_result = terms
+        .iter()
+        .any(|term| matches!(*term, "result" | "results"));
+    let has_page_or_rows = terms
+        .iter()
+        .any(|term| matches!(*term, "page" | "pages" | "row" | "rows"));
+    let has_completed_result = terms
+        .iter()
+        .any(|term| matches!(*term, "complete" | "completed"));
+    has_report
+        && has_result
+        && has_page_or_rows
+        && has_completed_result
+        && terms.iter().all(|term| {
+            is_numeric_term(term)
+                || is_report_determiner(term)
+                || is_report_object_modifier(term)
+                || is_existing_reference_modifier(term)
+                || matches!(
+                    *term,
+                    "fetch"
+                        | "get"
+                        | "list"
+                        | "retrieve"
+                        | "show"
+                        | "view"
+                        | "report"
+                        | "reports"
+                        | "result"
+                        | "results"
+                        | "page"
+                        | "pages"
+                        | "row"
+                        | "rows"
+                        | "first"
+                        | "next"
+                        | "completed"
+                        | "complete"
+                        | "from"
+                        | "for"
+                        | "of"
+                        | "its"
+                        | "name"
+                        | "id"
+                        | "me"
+                        | "now"
+                        | "please"
+                        | CANONICAL_REPORT_OPERATION_TERM
+                )
+        })
+}
+
+fn has_explicit_existing_report_operation_reference(
+    terms: &[&str],
+    report_context: bool,
+    has_canonical_operation: bool,
+    has_new_run_action_object: bool,
+) -> bool {
+    if has_canonical_operation {
+        return true;
+    }
+    if !report_context {
+        return false;
+    }
+    terms.iter().enumerate().any(|(index, term)| {
+        if !matches!(*term, "operation" | "operations") {
+            return false;
+        }
+        if !operation_has_report_binding(terms, index) {
+            return false;
+        }
+        let previous = index.checked_sub(1).map(|previous| terms[previous]);
+        let next = terms.get(index + 1).copied();
+        let preceding_report_modifier = matches!(previous, Some("report" | "reports"))
+            && index
+                .checked_sub(2)
+                .map(|modifier| terms[modifier])
+                .is_some_and(is_existing_reference_modifier);
+        let explicit_existing_modifier =
+            previous.is_some_and(is_existing_reference_modifier) || preceding_report_modifier;
+        let direct_numeric_identity = next.is_some_and(is_numeric_term);
+        let labelled_identity = matches!(next, Some("name" | "handle" | "id"));
+        let labelled_identity_has_value =
+            labelled_identity && terms.get(index + 2).copied().is_some_and(is_numeric_term);
+        explicit_existing_modifier
+            || direct_numeric_identity
+            || labelled_identity_has_value
+            || (labelled_identity && !has_new_run_action_object)
+    })
+}
+
+fn has_explicit_existing_report_run_reference(
+    terms: &[&str],
+    report_context: bool,
+    has_new_run_action_object: bool,
+) -> bool {
+    if !report_context {
+        return false;
+    }
+    terms.iter().enumerate().any(|(index, term)| {
+        if !matches!(*term, "run" | "runs") {
+            return false;
+        }
+        if report_run_has_pronoun_action_object(terms, index) {
+            return false;
+        }
+        if reference_has_non_report_relation_target(terms, index) {
+            return false;
+        }
+        if !run_has_report_binding(terms, index) {
+            return false;
+        }
+        let previous = index.checked_sub(1).map(|previous| terms[previous]);
+        let next = terms.get(index + 1).copied();
+        let labelled_identity = next == Some("id");
+        let labelled_identity_has_value =
+            labelled_identity && terms.get(index + 2).copied().is_some_and(is_numeric_term);
+        let preceding_report_modifier = matches!(previous, Some("report" | "reports"))
+            && index
+                .checked_sub(2)
+                .map(|modifier| terms[modifier])
+                .is_some_and(is_existing_reference_modifier);
+        let explicit_identity = next.is_some_and(is_numeric_term)
+            || labelled_identity_has_value
+            || previous.is_some_and(is_existing_reference_modifier)
+            || preceding_report_modifier;
+        if explicit_identity {
+            return true;
+        }
+        if labelled_identity && !has_new_run_action_object {
+            return true;
+        }
+        if reference_has_reverse_report_binding(terms, index) {
+            return true;
+        }
+        if has_new_run_action_object {
+            return false;
+        }
+        true
+    })
+}
+
+fn report_run_has_pronoun_action_object(terms: &[&str], index: usize) -> bool {
+    let next = terms.get(index + 1);
+    matches!(next, Some(&"it" | &"this" | &"that"))
+}
+
+fn run_has_report_binding(terms: &[&str], run_index: usize) -> bool {
+    if reference_has_non_report_relation_target(terms, run_index) {
+        return false;
+    }
+    if run_index > 0
+        && matches!(terms[run_index - 1], "report" | "reports")
+        && report_term_is_reference_anchor(terms, run_index - 1)
+    {
+        return true;
+    }
+    if let Some(report_index) = (0..run_index).rev().find(|index| {
+        matches!(terms[*index], "report" | "reports")
+            && report_term_is_reference_anchor(terms, *index)
+    }) && terms[report_index + 1..run_index]
+        .iter()
+        .all(|term| is_report_operation_bridge_term(term))
+    {
+        return true;
+    }
+    let Some(report_index) = (run_index + 1..terms.len()).find(|index| {
+        matches!(terms[*index], "report" | "reports")
+            && report_term_is_reference_anchor(terms, *index)
+    }) else {
+        return false;
+    };
+    let bridge = &terms[run_index + 1..report_index];
+    bridge.iter().any(|term| matches!(*term, "for" | "of"))
+        && bridge
+            .iter()
+            .all(|term| is_report_reverse_bridge_term(term))
+}
+
+fn operation_has_report_binding(terms: &[&str], operation_index: usize) -> bool {
+    if reference_has_non_report_relation_target(terms, operation_index) {
+        return false;
+    }
+    if operation_index > 0
+        && matches!(terms[operation_index - 1], "report" | "reports")
+        && report_term_is_reference_anchor(terms, operation_index - 1)
+    {
+        return true;
+    }
+    if let Some(report_index) = (0..operation_index).rev().find(|index| {
+        matches!(terms[*index], "report" | "reports")
+            && report_term_is_reference_anchor(terms, *index)
+    }) && terms[report_index + 1..operation_index]
+        .iter()
+        .all(|term| is_report_operation_bridge_term(term))
+    {
+        return true;
+    }
+    let Some(report_index) = (operation_index + 1..terms.len()).find(|index| {
+        matches!(terms[*index], "report" | "reports")
+            && report_term_is_reference_anchor(terms, *index)
+    }) else {
+        return false;
+    };
+    let bridge = &terms[operation_index + 1..report_index];
+    bridge.iter().any(|term| matches!(*term, "for" | "of"))
+        && bridge
+            .iter()
+            .all(|term| is_report_reverse_bridge_term(term))
+}
+
+fn reference_has_non_report_relation_target(terms: &[&str], reference_index: usize) -> bool {
+    let tail = &terms[reference_index + 1..];
+    tail.iter().enumerate().any(|(relation_index, relation)| {
+        if !matches!(*relation, "for" | "of" | "with" | "to") {
+            return false;
+        }
+        let target_tail = &tail[relation_index + 1..];
+        let target_end = target_tail
+            .iter()
+            .enumerate()
+            .find_map(|(index, term)| {
+                if matches!(*term, "for" | "of" | "with" | "to")
+                    || (matches!(*term, "and" | "then")
+                        && report_relation_starts_new_clause(&target_tail[index + 1..]))
+                {
+                    Some(index)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(target_tail.len());
+        let target = &target_tail[..target_end];
+        !target.is_empty()
+            && target
+                .iter()
+                .any(|term| is_non_report_reference_domain(term))
+    })
+}
+
+fn report_relation_starts_new_clause(terms: &[&str]) -> bool {
+    strip_report_directive_prefix(terms)
+        .first()
+        .is_some_and(|term| report_relation_clause_action(term))
+}
+
+fn report_relation_clause_action(term: &str) -> bool {
+    is_report_start_action(term)
+        || matches!(
+            term,
+            "continue"
+                | "resume"
+                | "check"
+                | "poll"
+                | "monitor"
+                | "inspect"
+                | "view"
+                | "wait"
+                | "show"
+                | "use"
+                | "fetch"
+                | "get"
+                | "retrieve"
+                | "return"
+                | "select"
+                | "choose"
+        )
+}
+
+fn is_non_report_reference_domain(term: &str) -> bool {
+    matches!(
+        term,
+        "advertiser"
+            | "advertisers"
+            | "campaign"
+            | "campaigns"
+            | "network"
+            | "networks"
+            | "inventory"
+            | "ad"
+            | "ads"
+            | "unit"
+            | "units"
+            | "line"
+            | "item"
+            | "items"
+            | "order"
+            | "orders"
+            | "creative"
+            | "creatives"
+            | "placement"
+            | "placements"
+            | "yield"
+            | "exchange"
+            | "deployment"
+            | "server"
+    )
+}
+
+fn report_reference_identities_are_coherent(
+    terms: &[&str],
+    canonical_operation_count: usize,
+) -> bool {
+    canonical_operation_count <= 1
+        && canonical_operation_count + explicit_operation_run_identities(terms).len() <= 1
+        && !has_unbound_or_cross_domain_reference(terms)
+        && !has_unbound_non_operation_identity(terms)
+        && !has_unbound_canonical_reference(terms)
+}
+
+fn explicit_operation_run_identities(terms: &[&str]) -> BTreeSet<String> {
+    terms
+        .iter()
+        .enumerate()
+        .filter_map(|(index, term)| {
+            if !matches!(*term, "operation" | "operations" | "run" | "runs")
+                || !reference_has_explicit_identity(terms, index)
+                || reference_labels_canonical_operation(terms, index)
+            {
+                return None;
+            }
+            let next = terms.get(index + 1).copied();
+            if let Some(value) = next.filter(|term| is_numeric_term(term)) {
+                return Some(format!("value:{value}"));
+            }
+            if matches!(next, Some("name" | "handle" | "id")) {
+                if let Some(value) = terms.get(index + 2).copied().filter(|term| {
+                    is_numeric_term(term) || *term == CANONICAL_REPORT_OPERATION_TERM
+                }) {
+                    return Some(format!("value:{value}"));
+                }
+                return Some(format!("label:{index}"));
+            }
+            let previous = index.checked_sub(1).map(|previous| terms[previous]);
+            let modifier = previous
+                .filter(|term| is_existing_reference_modifier(term))
+                .or_else(|| {
+                    if matches!(previous, Some("report" | "reports")) {
+                        index
+                            .checked_sub(2)
+                            .map(|modifier| terms[modifier])
+                            .filter(|term| is_existing_reference_modifier(term))
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or("existing");
+            Some(format!("modifier:{modifier}:{term}"))
+        })
+        .collect()
+}
+
+fn reference_has_explicit_identity(terms: &[&str], reference_index: usize) -> bool {
+    let previous = reference_index
+        .checked_sub(1)
+        .map(|previous| terms[previous]);
+    let next = terms.get(reference_index + 1).copied();
+    let preceding_report_modifier = matches!(previous, Some("report" | "reports"))
+        && reference_index
+            .checked_sub(2)
+            .map(|modifier| terms[modifier])
+            .is_some_and(is_existing_reference_modifier);
+    next.is_some_and(is_numeric_term)
+        || matches!(next, Some("name" | "handle" | "id"))
+        || previous.is_some_and(is_existing_reference_modifier)
+        || preceding_report_modifier
+}
+
+fn reference_labels_canonical_operation(terms: &[&str], reference_index: usize) -> bool {
+    terms.get(reference_index + 1) == Some(&CANONICAL_REPORT_OPERATION_TERM)
+        || (terms
+            .get(reference_index + 1)
+            .is_some_and(|term| matches!(*term, "name" | "handle" | "id"))
+            && terms.get(reference_index + 2) == Some(&CANONICAL_REPORT_OPERATION_TERM))
+}
+
+fn reference_has_non_report_premodifier(terms: &[&str], reference_index: usize) -> bool {
+    for previous_index in (0..reference_index).rev() {
+        let previous = terms[previous_index];
+        if matches!(previous, "report" | "reports")
+            && report_term_is_reference_anchor(terms, previous_index)
+        {
+            return false;
+        }
+        if matches!(
+            previous,
+            "and"
+                | "then"
+                | "use"
+                | "show"
+                | "return"
+                | "fetch"
+                | "get"
+                | "retrieve"
+                | "start"
+                | "launch"
+                | "execute"
+                | "select"
+                | "choose"
+                | "please"
+                | "now"
+                | "me"
+                | "i"
+                | "we"
+                | "you"
+                | "want"
+                | "need"
+                | "can"
+                | "could"
+                | "would"
+                | "will"
+                | "s"
+                | "its"
+                | "most"
+                | "new"
+                | "for"
+                | "of"
+                | "to"
+                | "with"
+                | "status"
+                | "result"
+                | "results"
+                | "row"
+                | "rows"
+                | "page"
+                | "pages"
+                | "first"
+                | CANONICAL_REPORT_OPERATION_TERM
+        ) || is_report_continuation_term(previous)
+            || is_report_determiner(previous)
+            || is_existing_reference_modifier(previous)
+        {
+            continue;
+        }
+        return true;
+    }
+    false
+}
+
+fn has_unbound_canonical_reference(terms: &[&str]) -> bool {
+    terms.iter().enumerate().any(|(index, term)| {
+        if *term != CANONICAL_REPORT_OPERATION_TERM {
+            return false;
+        }
+        if reference_has_non_report_relation_target(terms, index) {
+            return true;
+        }
+        let mut cursor = index;
+        while cursor > 0 {
+            let previous_index = cursor - 1;
+            let previous = terms[previous_index];
+            if matches!(previous, "operation" | "operations" | "run" | "runs") {
+                return reference_has_non_report_premodifier(terms, previous_index);
+            }
+            if matches!(previous, "name" | "handle" | "id")
+                && previous_index > 0
+                && matches!(
+                    terms[previous_index - 1],
+                    "operation" | "operations" | "run" | "runs"
+                )
+            {
+                return reference_has_non_report_premodifier(terms, previous_index - 1);
+            }
+            if matches!(previous, "report" | "reports")
+                && report_term_is_reference_anchor(terms, previous_index)
+            {
+                return false;
+            }
+            if matches!(
+                previous,
+                "and"
+                    | "then"
+                    | "use"
+                    | "show"
+                    | "return"
+                    | "fetch"
+                    | "get"
+                    | "retrieve"
+                    | "start"
+                    | "launch"
+                    | "execute"
+                    | "select"
+                    | "choose"
+                    | "please"
+                    | "now"
+                    | "me"
+                    | "i"
+                    | "we"
+                    | "you"
+                    | "want"
+                    | "need"
+                    | "can"
+                    | "could"
+                    | "would"
+                    | "will"
+            ) || is_report_continuation_term(previous)
+                || matches!(previous, "s" | "its" | "most" | "new")
+                || is_report_determiner(previous)
+                || is_existing_reference_modifier(previous)
+                || matches!(
+                    previous,
+                    "for"
+                        | "of"
+                        | "to"
+                        | "with"
+                        | "result"
+                        | "results"
+                        | "row"
+                        | "rows"
+                        | "page"
+                        | "pages"
+                        | "first"
+                        | CANONICAL_REPORT_OPERATION_TERM
+                )
+            {
+                cursor = previous_index;
+                continue;
+            }
+            return true;
+        }
+        false
+    })
+}
+
+fn report_term_is_reference_anchor(terms: &[&str], index: usize) -> bool {
+    let clause_start = terms[..index]
+        .iter()
+        .rposition(|term| matches!(*term, "and" | "then"))
+        .map_or(0, |boundary| boundary + 1);
+    let clause_prefix = &terms[clause_start..index];
+    if (clause_start > 0 && clause_prefix.is_empty())
+        || (!clause_prefix.is_empty()
+            && strip_report_directive_prefix(clause_prefix)
+                .iter()
+                .all(|term| matches!(*term, "please" | "now")))
+    {
+        return false;
+    }
+    let previous = index.checked_sub(1).map(|previous| terms[previous]);
+    let next = terms.get(index + 1).copied();
+    !matches!(previous, Some("and" | "then"))
+        && !(index == 0 && matches!(next, Some("and" | "then")))
+}
+
+fn has_unbound_non_operation_identity(terms: &[&str]) -> bool {
+    terms.iter().enumerate().any(|(index, term)| {
+        if matches!(*term, "name" | "handle" | "id") {
+            return !index
+                .checked_sub(1)
+                .map(|previous| terms[previous])
+                .is_some_and(|previous| {
+                    matches!(previous, "operation" | "operations" | "run" | "runs")
+                });
+        }
+        if !is_numeric_term(term) {
+            return false;
+        }
+        let Some(previous) = index.checked_sub(1).map(|previous| terms[previous]) else {
+            return true;
+        };
+        if matches!(previous, "operation" | "operations" | "run" | "runs") {
+            return false;
+        }
+        if matches!(previous, "name" | "handle" | "id") {
+            return !index
+                .checked_sub(2)
+                .map(|reference| terms[reference])
+                .is_some_and(|reference| {
+                    matches!(reference, "operation" | "operations" | "run" | "runs")
+                });
+        }
+        !numeric_is_bounded_pagination_count(terms, index)
+    })
+}
+
+fn numeric_is_bounded_pagination_count(terms: &[&str], index: usize) -> bool {
+    let Some(previous) = index.checked_sub(1).map(|previous| terms[previous]) else {
+        return false;
+    };
+    if matches!(previous, "page" | "pages" | "row" | "rows") {
+        return true;
+    }
+    if !matches!(
+        previous,
+        "first" | "show" | "view" | "fetch" | "get" | "list" | "retrieve" | "return" | "me"
+    ) {
+        return false;
+    }
+    let mut found_unit = false;
+    for term in terms[index + 1..].iter().take(4).copied() {
+        if matches!(term, "page" | "pages" | "row" | "rows") {
+            found_unit = true;
+            break;
+        }
+        if !matches!(
+            term,
+            "the" | "of" | "its" | "report" | "reports" | "result" | "results"
+        ) {
+            return false;
+        }
+    }
+    if !found_unit {
+        return false;
+    }
+    for prefix in terms[..index].iter().rev().copied() {
+        if matches!(prefix, "and" | "then") {
+            return true;
+        }
+        if matches!(prefix, "report" | "reports") {
+            return true;
+        }
+        if matches!(
+            prefix,
+            "show"
+                | "view"
+                | "fetch"
+                | "get"
+                | "list"
+                | "retrieve"
+                | "return"
+                | "me"
+                | "first"
+                | "the"
+                | "its"
+                | "result"
+                | "results"
+                | "row"
+                | "rows"
+                | "page"
+                | "pages"
+        ) {
+            continue;
+        }
+        return false;
+    }
+    true
+}
+
+fn has_unbound_or_cross_domain_reference(terms: &[&str]) -> bool {
+    terms.iter().enumerate().any(|(index, term)| {
+        if !matches!(*term, "operation" | "operations" | "run" | "runs") {
+            return false;
+        }
+        if reference_has_non_report_relation_target(terms, index) {
+            return true;
+        }
+        let has_identity = reference_has_explicit_identity(terms, index)
+            || reference_labels_canonical_operation(terms, index);
+        if !has_identity {
+            return false;
+        }
+        if reference_has_non_report_premodifier(terms, index) {
+            return true;
+        }
+        if reference_labels_canonical_operation(terms, index) {
+            return false;
+        }
+        if matches!(*term, "operation" | "operations") {
+            !operation_has_report_binding(terms, index)
+        } else {
+            !run_has_report_binding(terms, index)
+        }
+    })
+}
+
+fn is_report_reverse_bridge_term(term: &str) -> bool {
+    is_numeric_term(term)
+        || is_report_reference_article(term)
+        || is_existing_reference_modifier(term)
+        || matches!(term, "name" | "handle" | "id" | "for" | "of")
+}
+
+fn reference_has_reverse_report_binding(terms: &[&str], reference_index: usize) -> bool {
+    let Some(report_index) = (reference_index + 1..terms.len()).find(|index| {
+        matches!(terms[*index], "report" | "reports")
+            && report_term_is_reference_anchor(terms, *index)
+    }) else {
+        return false;
+    };
+    let bridge = &terms[reference_index + 1..report_index];
+    bridge.iter().any(|term| matches!(*term, "for" | "of"))
+        && bridge
+            .iter()
+            .all(|term| is_report_reverse_bridge_term(term))
+}
+
+fn is_report_operation_bridge_term(term: &str) -> bool {
+    is_report_continuation_term(term)
+        || is_existing_reference_modifier(term)
+        || matches!(
+            term,
+            "and"
+                | "then"
+                | "the"
+                | "its"
+                | "this"
+                | "new"
+                | "s"
+                | "most"
+                | "show"
+                | "me"
+                | "fetch"
+                | "fetching"
+                | "get"
+                | "getting"
+                | "retrieve"
+                | "retrieving"
+                | "return"
+                | "returning"
+                | "use"
+        )
+}
+
+fn is_existing_reference_modifier(term: &str) -> bool {
+    matches!(
+        term,
+        "existing" | "current" | "latest" | "recent" | "active"
+    )
+}
+
+fn has_scoped_report_continuation(terms: &[&str]) -> bool {
+    if !report_reference_query_is_authoritative(terms) {
+        return false;
+    }
+    terms.iter().enumerate().any(|(continuation_index, term)| {
+        if !is_report_continuation_term(term) {
+            return false;
+        }
+        terms.iter().enumerate().any(|(report_index, report_term)| {
+            if !matches!(*report_term, "report" | "reports")
+                || !report_term_is_reference_anchor(terms, report_index)
+            {
+                return false;
+            }
+            let (start, end) = if continuation_index < report_index {
+                (continuation_index, report_index)
+            } else {
+                (report_index, continuation_index)
+            };
+            terms[start..=end]
+                .iter()
+                .all(|bridge_term| is_report_continuation_bridge_term(bridge_term))
+        })
+    })
+}
+
+fn query_blocks_report_authority(terms: &[&str], normalized: &str) -> bool {
+    normalized.contains("do not")
+        || normalized.contains("don't")
+        || normalized.contains("dont")
+        || terms.iter().any(|term| {
+            matches!(
+                *term,
+                "not"
+                    | "never"
+                    | "without"
+                    | "plan"
+                    | "planning"
+                    | "preview"
+                    | "previewing"
+                    | "simulate"
+                    | "simulation"
+                    | "safe"
+                    | "assess"
+                    | "assessment"
+                    | "whether"
+                    | "should"
+                    | "review"
+                    | "consider"
+                    | "considering"
+                    | "evaluate"
+                    | "evaluation"
+                    | "decide"
+                    | "decision"
+                    | "how"
+                    | "explain"
+                    | "explaining"
+                    | "example"
+                    | "examples"
+                    | "tutorial"
+                    | "guide"
+            )
+        })
+}
+
+fn is_report_continuation_bridge_term(term: &str) -> bool {
+    is_report_continuation_term(term)
+        || is_report_object_modifier(term)
+        || is_numeric_term(term)
+        || matches!(
+            term,
+            "report"
+                | "reports"
+                | "operation"
+                | "operations"
+                | "run"
+                | "runs"
+                | "name"
+                | "handle"
+                | "id"
+                | "and"
+                | "then"
+                | "for"
+                | "of"
+                | "to"
+                | "it"
+                | "its"
+                | "status"
+                | "result"
+                | "results"
+                | "existing"
+                | "recent"
+                | "active"
+        )
+}
+
+fn is_numeric_term(term: &str) -> bool {
+    !term.is_empty() && term.chars().all(|character| character.is_ascii_digit())
+}
+
+fn is_report_reference_article(term: &str) -> bool {
+    is_report_determiner(term) || term == "saved"
+}
+
+enum ReportStartActionTail {
+    NoCandidate,
+    Candidate { tail_start_index: usize },
+    Rejected,
+}
+
+enum ReportStartTailSafety {
+    Safe,
+    Unsupported,
+    Rejected,
+}
+
+fn report_start_action_tail(
+    terms: &[&str],
+    report_context: bool,
+    clause_text: &str,
+) -> ReportStartActionTail {
+    if !report_context {
+        return ReportStartActionTail::NoCandidate;
+    }
+    let term_spans = ascii_alphanumeric_term_spans(clause_text);
+    for (index, term) in terms.iter().enumerate() {
+        if !is_report_start_action(term) {
+            continue;
+        }
+        let object_terms = &terms[index + 1..];
+        let Some(consumed) = report_start_object_end(object_terms) else {
+            continue;
+        };
+        let report_index = index + consumed;
+        let tail_start_index = report_index + 1;
+        if has_non_execution_report_language(terms, index, clause_text, &term_spans)
+            || report_action_object_crosses_clause_boundary(
+                clause_text,
+                &term_spans,
+                index,
+                report_index,
+            )
+        {
+            return ReportStartActionTail::Rejected;
+        }
+        return ReportStartActionTail::Candidate { tail_start_index };
+    }
+    ReportStartActionTail::NoCandidate
+}
+
+fn report_start_object_end(object_terms: &[&str]) -> Option<usize> {
+    if let Some(consumed) = campaign_delivery_audit_report_object_end(object_terms) {
+        return Some(consumed);
+    }
+    for (candidate_index, candidate) in object_terms.iter().enumerate() {
+        if matches!(*candidate, "report" | "reports") {
+            return Some(candidate_index + 1);
+        }
+        if !is_report_object_modifier(candidate) {
+            break;
+        }
+    }
+    None
+}
+
+fn ascii_alphanumeric_term_spans(text: &str) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
+    let mut start = None;
+    for (index, character) in text.char_indices() {
+        if character.is_ascii_alphanumeric() {
+            start.get_or_insert(index);
+        } else if let Some(start) = start.take() {
+            spans.push((start, index));
+        }
+    }
+    if let Some(start) = start {
+        spans.push((start, text.len()));
+    }
+    spans
+}
+
+fn report_action_object_crosses_clause_boundary(
+    normalized: &str,
+    term_spans: &[(usize, usize)],
+    action_index: usize,
+    report_index: usize,
+) -> bool {
+    let (Some((_, action_end)), Some((report_start, _))) =
+        (term_spans.get(action_index), term_spans.get(report_index))
+    else {
+        return true;
+    };
+    report_range_has_invalid_separator(normalized, *action_end, *report_start, false)
+}
+
+fn report_range_has_invalid_separator(
+    normalized: &str,
+    start: usize,
+    end: usize,
+    allow_comma: bool,
+) -> bool {
+    normalized[start..end]
+        .char_indices()
+        .any(|(offset, character)| {
+            if character.is_ascii_alphanumeric() || matches!(character, ' ' | '\t') {
+                return false;
+            }
+            if allow_comma && character == ',' {
+                return false;
+            }
+            let absolute_index = start + offset;
+            if matches!(character, '-' | '_' | '\'') {
+                let previous = normalized[..absolute_index].chars().next_back();
+                let next = normalized[absolute_index + character.len_utf8()..]
+                    .chars()
+                    .next();
+                if previous.is_some_and(|term| term.is_ascii_alphanumeric())
+                    && next.is_some_and(|term| term.is_ascii_alphanumeric())
+                {
+                    return false;
+                }
+            }
+            true
+        })
+}
+
+fn is_report_start_action(term: &str) -> bool {
+    matches!(term, "start" | "run" | "launch" | "execute")
+}
+
+fn has_non_execution_report_language(
+    terms: &[&str],
+    action_index: usize,
+    clause_text: &str,
+    term_spans: &[(usize, usize)],
+) -> bool {
+    query_blocks_report_authority(terms, clause_text)
+        || report_action_prefix_has_invalid_separator(clause_text, term_spans, action_index)
+        || !report_action_prefix_is_authoritative(
+            &terms[..action_index],
+            clause_text,
+            term_spans,
+            action_index,
+        )
+}
+
+fn report_action_prefix_has_invalid_separator(
+    clause_text: &str,
+    term_spans: &[(usize, usize)],
+    action_index: usize,
+) -> bool {
+    if action_index == 0 {
+        return false;
+    }
+    let (Some((prefix_start, _)), Some((action_start, _))) =
+        (term_spans.first(), term_spans.get(action_index))
+    else {
+        return true;
+    };
+    report_range_has_invalid_separator(clause_text, *prefix_start, *action_start, true)
+}
+
+fn report_action_prefix_is_authoritative(
+    prefix: &[&str],
+    clause_text: &str,
+    term_spans: &[(usize, usize)],
+    action_index: usize,
+) -> bool {
+    let clause = strip_report_directive_prefix(prefix);
+    if clause.is_empty() || matches!(clause, ["please"] | ["now"]) {
+        return true;
+    }
+    if matches!(
+        clause,
+        ["for", "the", "current" | "latest" | "selected", "network"]
+            | ["for", "current" | "latest" | "selected", "network"]
+    ) {
+        let clause_start = action_index - clause.len();
+        return !report_action_object_crosses_clause_boundary(
+            clause_text,
+            term_spans,
+            clause_start,
+            action_index - 1,
+        );
+    }
+    let Some(selection_clause) = clause.strip_suffix(&["then"]) else {
+        return false;
+    };
+    if !report_selection_clause_is_authoritative(selection_clause) {
+        return false;
+    }
+    let Some(selection_index) = prefix
+        .iter()
+        .position(|term| matches!(*term, "select" | "choose"))
+    else {
+        return false;
+    };
+    let Some(report_index) = prefix
+        .iter()
+        .rposition(|term| matches!(*term, "report" | "reports"))
+    else {
+        return false;
+    };
+    !report_action_object_crosses_clause_boundary(
+        clause_text,
+        term_spans,
+        selection_index,
+        report_index,
+    )
+}
+
+fn strip_report_directive_prefix<'a>(mut terms: &'a [&'a str]) -> &'a [&'a str] {
+    loop {
+        if let Some(rest) = terms
+            .strip_prefix(&["please"])
+            .or_else(|| terms.strip_prefix(&["now"]))
+        {
+            terms = rest;
+            continue;
+        }
+        if let Some(rest) = terms
+            .strip_prefix(&["can", "you"])
+            .or_else(|| terms.strip_prefix(&["could", "you"]))
+            .or_else(|| terms.strip_prefix(&["would", "you"]))
+            .or_else(|| terms.strip_prefix(&["will", "you"]))
+        {
+            terms = rest;
+            continue;
+        }
+        if let Some(rest) = terms
+            .strip_prefix(&["i", "want", "to"])
+            .or_else(|| terms.strip_prefix(&["i", "need", "to"]))
+            .or_else(|| terms.strip_prefix(&["we", "want", "to"]))
+            .or_else(|| terms.strip_prefix(&["we", "need", "to"]))
+            .or_else(|| terms.strip_prefix(&["i", "want", "you", "to"]))
+            .or_else(|| terms.strip_prefix(&["i", "need", "you", "to"]))
+            .or_else(|| terms.strip_prefix(&["we", "want", "you", "to"]))
+            .or_else(|| terms.strip_prefix(&["we", "need", "you", "to"]))
+        {
+            terms = rest;
+            continue;
+        }
+        return terms;
+    }
+}
+
+fn report_selection_clause_is_authoritative(terms: &[&str]) -> bool {
+    let terms = strip_report_directive_prefix(terms);
+    let Some(object_terms) = terms
+        .strip_prefix(&["select"])
+        .or_else(|| terms.strip_prefix(&["choose"]))
+    else {
+        return false;
+    };
+    let mut found_report = false;
+    for term in object_terms {
+        if matches!(*term, "report" | "reports") {
+            if found_report {
+                return false;
+            }
+            found_report = true;
+        } else if !is_report_object_modifier(term) {
+            return false;
+        }
+    }
+    found_report
+}
+
+fn report_reference_query_is_authoritative(terms: &[&str]) -> bool {
+    let terms = strip_report_directive_prefix(terms);
+    let Some(first) = terms.first() else {
+        return false;
+    };
+    if !(is_report_object_modifier(first)
+        || is_existing_reference_modifier(first)
+        || matches!(
+            *first,
+            "most"
+                | "report"
+                | "reports"
+                | "operation"
+                | "operations"
+                | "run"
+                | "runs"
+                | "network"
+                | "networks"
+                | "start"
+                | "launch"
+                | "execute"
+                | "continue"
+                | "resume"
+                | "check"
+                | "poll"
+                | "polling"
+                | "monitor"
+                | "monitoring"
+                | "inspect"
+                | "inspecting"
+                | "view"
+                | "viewing"
+                | "wait"
+                | "waiting"
+                | "show"
+                | "use"
+                | "select"
+                | "choose"
+                | "fetch"
+                | "get"
+                | "retrieve"
+                | "return"
+                | CANONICAL_REPORT_OPERATION_TERM
+        ))
+    {
+        return false;
+    }
+    terms.iter().all(|term| {
+        is_numeric_term(term)
+            || is_report_object_modifier(term)
+            || is_existing_reference_modifier(term)
+            || is_report_continuation_term(term)
+            || matches!(
+                *term,
+                "s" | "most"
+                    | "report"
+                    | "reports"
+                    | "operation"
+                    | "operations"
+                    | "run"
+                    | "runs"
+                    | "name"
+                    | "handle"
+                    | "id"
+                    | "and"
+                    | "then"
+                    | "for"
+                    | "of"
+                    | "to"
+                    | "with"
+                    | "it"
+                    | "its"
+                    | "is"
+                    | "status"
+                    | "result"
+                    | "results"
+                    | "show"
+                    | "showing"
+                    | "me"
+                    | "use"
+                    | "select"
+                    | "selected"
+                    | "choose"
+                    | "start"
+                    | "launch"
+                    | "execute"
+                    | "fetch"
+                    | "fetching"
+                    | "get"
+                    | "getting"
+                    | "retrieve"
+                    | "retrieving"
+                    | "return"
+                    | "returning"
+                    | "first"
+                    | "page"
+                    | "pages"
+                    | "row"
+                    | "rows"
+                    | "immediately"
+                    | "asynchronously"
+                    | "async"
+                    | "until"
+                    | "completion"
+                    | "complete"
+                    | "completed"
+                    | "done"
+                    | "finish"
+                    | "finishes"
+                    | "finishing"
+                    | "network"
+                    | "networks"
+                    | "now"
+                    | "please"
+                    | CANONICAL_REPORT_OPERATION_TERM
+            )
+    })
+}
+
+fn campaign_delivery_audit_report_object_end(terms: &[&str]) -> Option<usize> {
+    let mut index = usize::from(matches!(terms.first(), Some(&"a" | &"an" | &"the")));
+    if terms.get(index..index + 3) != Some(&["campaign", "delivery", "audit"]) {
+        return None;
+    }
+    index += 3;
+    if terms.get(index) != Some(&"with") {
+        return None;
+    }
+    index += 1;
+    if terms
+        .get(index)
+        .is_some_and(|term| is_report_determiner(term))
+    {
+        index += 1;
+    }
+    if terms.get(index) == Some(&"saved") {
+        index += 1;
+    }
+    matches!(terms.get(index), Some(&"report" | &"reports")).then_some(index + 1)
+}
+
+fn report_start_tail_safety(
+    all_terms: &[&str],
+    tail_start_index: usize,
+    clause_text: &str,
+) -> ReportStartTailSafety {
+    let Some(terms) = all_terms.get(tail_start_index..) else {
+        return ReportStartTailSafety::Rejected;
+    };
+    if terms.is_empty() {
+        return ReportStartTailSafety::Safe;
+    }
+    let term_spans = ascii_alphanumeric_term_spans(clause_text);
+    let Some((_, report_end)) = tail_start_index
+        .checked_sub(1)
+        .and_then(|report_index| term_spans.get(report_index))
+    else {
+        return ReportStartTailSafety::Rejected;
+    };
+    let Some((_, tail_end)) = term_spans.get(tail_start_index + terms.len() - 1) else {
+        return ReportStartTailSafety::Rejected;
+    };
+    if report_range_has_invalid_separator(clause_text, *report_end, *tail_end, true) {
+        return ReportStartTailSafety::Rejected;
+    }
+    if terms.iter().enumerate().any(|(tail_index, term)| {
+        let index = tail_start_index + tail_index;
+        is_report_start_action(term)
+            && (*term != "run"
+                || !report_tail_run_is_noun(all_terms, index, clause_text, &term_spans))
+    }) {
+        return ReportStartTailSafety::Rejected;
+    }
+    if terms.iter().all(|term| matches!(*term, "now" | "please")) {
+        return ReportStartTailSafety::Safe;
+    }
+    if terms
+        .iter()
+        .all(|term| matches!(*term, "asynchronously" | "async" | "now" | "please"))
+    {
+        return ReportStartTailSafety::Safe;
+    }
+    let starts_as_continuation = matches!(terms.first(), Some(&"and" | &"then" | &"until"));
+    let has_continuation_action = terms.iter().any(|term| {
+        is_report_continuation_term(term)
+            || matches!(
+                *term,
+                "show"
+                    | "showing"
+                    | "return"
+                    | "returning"
+                    | "fetch"
+                    | "fetching"
+                    | "get"
+                    | "getting"
+                    | "retrieve"
+                    | "retrieving"
+            )
+    });
+    if starts_as_continuation
+        && has_continuation_action
+        && terms.iter().all(|term| {
+            is_report_continuation_term(term)
+                || is_numeric_term(term)
+                || matches!(
+                    *term,
+                    "and"
+                        | "then"
+                        | "until"
+                        | "show"
+                        | "showing"
+                        | "return"
+                        | "returning"
+                        | "fetch"
+                        | "fetching"
+                        | "get"
+                        | "getting"
+                        | "retrieve"
+                        | "retrieving"
+                        | "it"
+                        | "is"
+                        | "its"
+                        | "this"
+                        | "the"
+                        | "new"
+                        | "result"
+                        | "results"
+                        | "status"
+                        | "operation"
+                        | "report"
+                        | "reports"
+                        | "run"
+                        | "runs"
+                        | "id"
+                        | "name"
+                        | "handle"
+                        | "first"
+                        | "page"
+                        | "pages"
+                        | "row"
+                        | "rows"
+                        | "immediately"
+                        | "for"
+                        | "of"
+                        | "to"
+                        | "completion"
+                        | "complete"
+                        | "completed"
+                        | "done"
+                        | "finish"
+                        | "finishes"
+                        | "finishing"
+                        | "now"
+                        | "please"
+                )
+        })
+    {
+        ReportStartTailSafety::Safe
+    } else {
+        ReportStartTailSafety::Unsupported
+    }
+}
+
+fn report_tail_run_is_noun(
+    terms: &[&str],
+    index: usize,
+    clause_text: &str,
+    term_spans: &[(usize, usize)],
+) -> bool {
+    let previous = index
+        .checked_sub(1)
+        .and_then(|previous| terms.get(previous));
+    let next = terms.get(index + 1);
+    let previous_is_adjacent_noun = previous.is_some_and(|term| {
+        is_report_determiner(term)
+            || matches!(
+                *term,
+                "its" | "new" | "current" | "latest" | "recent" | "existing" | "report"
+            )
+    }) && index.checked_sub(1).is_some_and(|previous_index| {
+        report_terms_have_only_word_separator(clause_text, term_spans, previous_index, index)
+    });
+    let next_is_adjacent_noun = next
+        .is_some_and(|term| matches!(*term, "id" | "name" | "handle" | "of"))
+        && report_terms_have_only_word_separator(clause_text, term_spans, index, index + 1);
+    previous_is_adjacent_noun || next_is_adjacent_noun
+}
+
+fn report_terms_have_only_word_separator(
+    clause_text: &str,
+    term_spans: &[(usize, usize)],
+    left_index: usize,
+    right_index: usize,
+) -> bool {
+    let (Some((_, left_end)), Some((right_start, _))) =
+        (term_spans.get(left_index), term_spans.get(right_index))
+    else {
+        return false;
+    };
+    !report_range_has_invalid_separator(clause_text, *left_end, *right_start, false)
+}
+
+fn is_report_determiner(term: &str) -> bool {
+    matches!(
+        term,
+        "a" | "an" | "the" | "one" | "my" | "our" | "your" | "this" | "that" | "another"
+    )
+}
+
+fn is_report_object_modifier(term: &str) -> bool {
+    matches!(
+        term,
+        "a" | "an"
+            | "the"
+            | "one"
+            | "new"
+            | "saved"
+            | "this"
+            | "that"
+            | "my"
+            | "our"
+            | "your"
+            | "another"
+            | "latest"
+            | "current"
+            | "daily"
+            | "weekly"
+            | "monthly"
+            | "quarter"
+            | "quarterly"
+            | "annual"
+            | "campaign"
+            | "delivery"
+            | "audit"
+            | "performance"
+            | "inventory"
+            | "revenue"
+            | "sales"
+            | "advertiser"
+            | "google"
+            | "ad"
+            | "manager"
+    )
+}
+
+fn is_report_continuation_term(term: &str) -> bool {
+    matches!(
+        term,
+        "continue"
+            | "continuation"
+            | "resume"
+            | "status"
+            | "check"
+            | "checking"
+            | "poll"
+            | "polling"
+            | "monitor"
+            | "monitoring"
+            | "inspect"
+            | "inspecting"
+            | "view"
+            | "viewing"
+            | "wait"
+            | "waiting"
+    )
+}
+
+pub(crate) fn companion_tool_names(companions: &[WorkflowCompanion]) -> Vec<&'static str> {
+    let mut injected_names = BTreeSet::new();
+    companions
+        .iter()
+        .filter(|companion| companion.callable_as_tool)
+        .filter(|companion| !companion.tool_already_selected)
+        .filter(|companion| injected_names.insert(companion.tool_name))
+        .map(|companion| companion.tool_name)
+        .collect()
+}
+
+pub(crate) fn companion_result_records(companions: &[WorkflowCompanion]) -> Vec<Value> {
+    companions
+        .iter()
+        .map(|companion| {
+            json!({
+                "type": "workflow_companion",
+                "name": companion.tool_name,
+                "relation": "before",
+                "before_tool": companion.before_tool,
+                "callable_as_tool": companion.callable_as_tool,
+                "selection_semantics": if companion.callable_as_tool {
+                    "callable_companion"
+                } else {
+                    "condition_only"
+                },
+                "invocation_condition": if !companion.callable_as_tool
+                    && companion.tool_name == "gam_report_run"
+                {
+                    Value::String("only_when_no_existing_operation_name".to_string())
+                } else {
+                    Value::Null
+                },
+                "tool_already_selected": companion.tool_already_selected,
+                "required": companion.required_for_guided_sequence,
+                "required_for_guided_sequence": companion.required_for_guided_sequence,
+                "required_semantics": "guided_sequence_compatibility_alias",
+                "server_call_enforced": false,
+                "reason": companion.reason,
+                "effect": if !companion.callable_as_tool
+                    && companion.tool_name == "gam_report_run"
+                {
+                    Value::String("starts_upstream_job".to_string())
+                } else {
+                    Value::Null
+                },
+                "mutation_performed": false,
+                "safety": "non_mutating_guidance",
+            })
+        })
+        .collect()
+}
+
+pub(crate) fn provider_guidance_allowed(summary: &ToolSearchMatchSummary) -> bool {
+    search_semantics_fail_closed_reasons(summary).is_empty()
+}
+
+pub(crate) fn resolve_report_discovery(
+    results: &mut Vec<ToolSearchResult>,
+    companions: &[WorkflowCompanion],
+    query: Option<&str>,
+    active_group: Option<&str>,
+    group_filter_supplied: bool,
+    read_only: Option<bool>,
+) -> ReportDiscoveryResolution {
+    let intent = report_discovery_intent(query);
+    let report_poll_authorized = report_poll_discovery_is_authoritative(query);
+    let report_result_rows_authorized = has_clear_report_result_retrieval(query);
+    let contextual_companions = companions
+        .iter()
+        .filter(|companion| !companion.callable_as_tool && companion.tool_already_selected)
+        .map(|companion| (companion.tool_name, *companion))
+        .collect::<BTreeMap<_, _>>();
+    let mut retained = Vec::with_capacity(results.len());
+    let mut condition_only = Vec::new();
+    for (index, result) in std::mem::take(results).into_iter().enumerate() {
+        let contextual_companion = contextual_companions.get(result.name.as_str());
+        let is_report_run = result.name == "gam_report_run";
+        let is_report_poll = result.name == "gam_report_operation_poll";
+        let is_report_result_rows = result.name == "gam_report_result_rows";
+        let report_run_callable = is_report_run
+            && read_only == Some(false)
+            && intent == ReportDiscoveryIntent::ExplicitNewRun
+            && contextual_companion.is_none();
+        if is_report_run && !report_run_callable {
+            let companion_before_tool = contextual_companion.map(|companion| companion.before_tool);
+            condition_only.push(json!({
+                "type": "condition_only_match",
+                "name": result.name,
+                "rank": index + 1,
+                "group": result.group,
+                "description": result.description,
+                "registered_read_only": result.read_only,
+                "registered_risk_posture": result.risk_posture,
+                "relation": "condition",
+                "selection_semantics": "condition_only",
+                "callable_as_tool": false,
+                "schema_exposed": false,
+                "tool_already_selected": true,
+                "required_for_guided_sequence": contextual_companion
+                    .is_some_and(|companion| companion.required_for_guided_sequence),
+                "server_call_enforced": false,
+                "before_tool": if intent == ReportDiscoveryIntent::ExistingOperationContinuation {
+                    None
+                } else {
+                    companion_before_tool
+                },
+                "invocation_condition": "explicit_new_run_intent_and_read_only_false",
+                "effect": "starts_upstream_job",
+                "report_intent": intent.as_str(),
+                "reason": if intent == ReportDiscoveryIntent::ExistingOperationContinuation {
+                    "The bounded discovery query expresses continuation of an existing report operation. Starting a new report run would create duplicate upstream work, so use the GET-only poll alternative."
+                } else if read_only != Some(false) {
+                    "Starting a report creates an upstream job and requires an explicit read_only=false discovery filter plus explicit new-run intent."
+                } else {
+                    "Starting a report creates an upstream job. The bounded discovery query did not express explicit new-run intent, so this match is not callable."
+                },
+            }));
+        } else if is_report_poll && !report_poll_authorized {
+            condition_only.push(json!({
+                "type": "condition_only_match",
+                "name": result.name,
+                "rank": index + 1,
+                "group": result.group,
+                "description": result.description,
+                "registered_read_only": result.read_only,
+                "registered_risk_posture": result.risk_posture,
+                "relation": "condition",
+                "selection_semantics": "condition_only",
+                "callable_as_tool": false,
+                "schema_exposed": false,
+                "tool_already_selected": true,
+                "required_for_guided_sequence": false,
+                "server_call_enforced": false,
+                "before_tool": Value::Null,
+                "invocation_condition": "explicit_existing_report_operation_intent",
+                "effect": "polls_existing_operation_with_get",
+                "report_intent": intent.as_str(),
+                "reason": "Polling an existing report operation requires a bounded affirmative report-continuation request or a locally bound existing report operation or run reference. The discovery query did not establish that authority, so this direct match is not callable.",
+            }));
+        } else if is_report_result_rows && !report_result_rows_authorized {
+            condition_only.push(json!({
+                "type": "condition_only_match",
+                "name": result.name,
+                "rank": index + 1,
+                "group": result.group,
+                "description": result.description,
+                "registered_read_only": result.read_only,
+                "registered_risk_posture": result.risk_posture,
+                "relation": "condition",
+                "selection_semantics": "condition_only",
+                "callable_as_tool": false,
+                "schema_exposed": false,
+                "tool_already_selected": true,
+                "required_for_guided_sequence": false,
+                "server_call_enforced": false,
+                "before_tool": Value::Null,
+                "invocation_condition": "explicit_completed_report_result_retrieval_intent",
+                "effect": "fetches_existing_report_result_rows_with_get",
+                "report_intent": intent.as_str(),
+                "reason": "Fetching report result rows requires a bounded affirmative request for rows or a page from a completed report result. The discovery query did not establish that authority, so this direct match is not callable.",
+            }));
+        } else {
+            retained.push(result);
+        }
+    }
+    *results = retained;
+    let mut resolution = ReportDiscoveryResolution {
+        records: condition_only,
+        callable_alternatives: Vec::new(),
+    };
+    let report_group_selected = !group_filter_supplied || active_group == Some("reports");
+    if report_poll_authorized
+        && intent == ReportDiscoveryIntent::ExistingOperationContinuation
+        && report_group_selected
+        && read_only == Some(false)
+    {
+        resolution
+            .callable_alternatives
+            .push("gam_report_operation_poll");
+        resolution.records.push(json!({
+            "type": "intent_safe_alternative",
+            "name": "gam_report_operation_poll",
+            "relation": "safe_alternative",
+            "callable_as_tool": true,
+            "schema_exposed": true,
+            "selection_semantics": "callable_safe_alternative",
+            "registered_read_only": true,
+            "active_filter_read_only": false,
+            "active_filter_exception": "continuation_safety",
+            "report_intent": intent.as_str(),
+            "effect": "polls_existing_operation_with_get",
+            "starts_upstream_job": false,
+            "safe_method": "GET",
+            "reason": "The bounded discovery query asks to continue an existing report operation. The active read_only=false filter excludes the registered read-only poll tool, so discovery exposes that safe callable alternative without replaying gam_report_run.",
+        }));
+    }
+    resolution
+}
+
+pub(crate) fn recovery_result_record(
+    inventory: &ToolInventory,
+    filter: &ToolSearchFilter,
+    summary: &ToolSearchMatchSummary,
+) -> Option<Value> {
+    if summary.total_matches > 0 {
+        return None;
+    }
+    let fail_closed_reasons = search_semantics_fail_closed_reasons(summary);
+    let mut example_queries = if fail_closed_reasons.is_empty() {
+        validated_recovery_example_queries(inventory, filter)
+    } else {
+        Vec::new()
+    };
+    let example_query_total = example_queries.len();
+    example_queries.truncate(MAX_RECOVERY_EXAMPLE_QUERIES);
+    let local_state_alternatives = if fail_closed_reasons.is_empty() {
+        local_state_alternatives(inventory, filter)
+    } else {
+        Vec::new()
+    };
+    let mut guidance = vec![
+        "Retry with one outcome phrase and one or two Google Ad Manager nouns.",
+        "Remove an incorrect group filter or choose one of the available groups.",
+        "Keep read_only=true when you want non-mutating tools; do not relax it merely to force a match.",
+        "Request include_schema=true only after discovery has narrowed the complete direct-plus-companion selection to no more than five tools.",
+    ];
+    if !local_state_alternatives.is_empty() {
+        guidance.push(
+            "For a deliberate scratchpad workflow, review local_state_alternatives before explicitly opting into bounded MCP-local state changes.",
+        );
+    }
+    let group_input_invalid = fail_closed_reasons
+        .iter()
+        .any(|reason| reason == "group_input");
+    let recognized_group = if group_input_invalid {
+        None
+    } else {
+        recognized_group_filter(inventory, filter.group.as_deref())
+    };
+    let group_supplied = group_input_invalid || filter.group.is_some();
+    let group_recognized =
+        !group_input_invalid && (filter.group.is_none() || recognized_group.is_some());
+    let mut groups = available_groups(inventory, filter.read_only);
+    let group_total = groups.len();
+    groups.truncate(MAX_RECOVERY_GROUPS);
+    let mut recovery = json!({
+        "type": "search_recovery",
+        "status": "no_matches",
+        "fail_closed": !fail_closed_reasons.is_empty(),
+        "reason_codes": fail_closed_reasons,
+        "active_filter": {
+            "group": recognized_group,
+            "group_supplied": group_supplied,
+            "group_recognized": group_recognized,
+            "read_only": filter.read_only,
+        },
+        "available_groups": groups,
+        "available_group_counts": {
+            "total": group_total,
+            "returned": std::cmp::min(group_total, MAX_RECOVERY_GROUPS),
+            "truncated": group_total > MAX_RECOVERY_GROUPS,
+        },
+        "retry": {
+            "example_queries_validated_under_active_filter": true,
+            "guidance": guidance,
+            "example_queries": example_queries,
+            "example_query_counts": {
+                "total": example_query_total,
+                "returned": std::cmp::min(example_query_total, MAX_RECOVERY_EXAMPLE_QUERIES),
+                "truncated": example_query_total > MAX_RECOVERY_EXAMPLE_QUERIES,
+            },
+        },
+    });
+    if !local_state_alternatives.is_empty()
+        && let Value::Object(recovery) = &mut recovery
+    {
+        recovery.insert(
+            "local_state_alternatives".to_string(),
+            Value::Array(local_state_alternatives),
+        );
+    }
+    Some(recovery)
+}
+
+pub(crate) fn supplemental_local_state_alternative_records(
+    inventory: &ToolInventory,
+    filter: &ToolSearchFilter,
+    summary: &ToolSearchMatchSummary,
+) -> Vec<Value> {
+    if summary.total_matches == 0 || !search_semantics_fail_closed_reasons(summary).is_empty() {
+        return Vec::new();
+    }
+
+    local_state_alternatives(inventory, filter)
+}
+
+fn search_semantics_fail_closed_reasons(summary: &ToolSearchMatchSummary) -> Vec<String> {
+    let mut reasons = summary
+        .truncation_reasons
+        .iter()
+        .filter(|reason| {
+            matches!(
+                reason.as_str(),
+                "query_input"
+                    | "group_input"
+                    | "excluded_query_terms"
+                    | "query_intent_ambiguous"
+                    | "result_metadata"
+            )
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if !summary.excluded_query_terms.is_empty()
+        && !reasons
+            .iter()
+            .any(|reason| reason == "excluded_query_terms")
+    {
+        reasons.push("excluded_query_terms".to_string());
+    }
+    reasons
+}
+
+fn local_state_alternatives(inventory: &ToolInventory, filter: &ToolSearchFilter) -> Vec<Value> {
+    let scratchpad_intent = filter.group.as_deref() == Some("scratchpad")
+        || filter.query.as_deref().is_some_and(|query| {
+            query
+                .to_ascii_lowercase()
+                .split(|character: char| !character.is_ascii_alphanumeric())
+                .any(|term| term == "scratchpad")
+        });
+    if !scratchpad_intent || filter.read_only != Some(true) {
+        return Vec::new();
+    }
+
+    let mut eligible_tools = Vec::new();
+    let mut destructive_tools = Vec::new();
+    let mut local_only_tools = Vec::new();
+    let mut rest_read_tools = Vec::new();
+    let mut manage_scope_read_tools = Vec::new();
+    for capability in inventory.capabilities().into_iter().filter(|capability| {
+        capability.group() == Some("scratchpad")
+            && !capability.read_only()
+            && inventory.is_allowed(
+                capability.name(),
+                ToolOperation::List,
+                &ToolInventoryPolicy::strict(),
+            )
+    }) {
+        let name = capability.name().to_string();
+        eligible_tools.push(name.clone());
+        if SCRATCHPAD_MANAGE_SCOPE_READ_TOOLS.contains(&capability.name()) {
+            manage_scope_read_tools.push(name.clone());
+        } else if SCRATCHPAD_REST_READ_TOOLS.contains(&capability.name()) {
+            rest_read_tools.push(name.clone());
+        } else {
+            local_only_tools.push(name.clone());
+        }
+        if capability.risk_posture().is_some_and(|posture| {
+            posture.operation_class == GuardedActionOperationClass::Destructive
+        }) {
+            destructive_tools.push(name);
+        }
+    }
+    eligible_tools.sort();
+    destructive_tools.sort();
+    local_only_tools.sort();
+    rest_read_tools.sort();
+    manage_scope_read_tools.sort();
+
+    let eligible_tool_total = eligible_tools.len();
+    let destructive_tool_total = destructive_tools.len();
+    let local_only_tool_total = local_only_tools.len();
+    let rest_read_tool_total = rest_read_tools.len();
+    let manage_scope_read_tool_total = manage_scope_read_tools.len();
+    eligible_tools.truncate(MAX_RECOVERY_LOCAL_STATE_TOOLS);
+    destructive_tools.truncate(MAX_RECOVERY_LOCAL_STATE_TOOLS);
+    local_only_tools.truncate(MAX_RECOVERY_LOCAL_STATE_TOOLS);
+    rest_read_tools.truncate(MAX_RECOVERY_LOCAL_STATE_TOOLS);
+    manage_scope_read_tools.truncate(MAX_RECOVERY_LOCAL_STATE_TOOLS);
+
+    vec![json!({
+        "type": "filter_alternative",
+        "status": "available_by_explicit_opt_in",
+        "reason_code": "active_filter_excludes_local_state_tools",
+        "mutation_scope": "local_mcp_scratchpad_state",
+        "discovery_retry_calls_upstream": false,
+        "upstream_gam_reads_possible": true,
+        "upstream_gam_mutation": false,
+        "runtime_write_enablement_required": false,
+        "local_state_writes_enabled_by_default": true,
+        "requires_explicit_operator_intent": true,
+        "retry_filter": {
+            "group": "scratchpad",
+            "read_only": false,
+        },
+        "rediscovery_call": {
+            "tool": "find_tools",
+            "arguments": {
+                "query": "scratchpad session analysis",
+                "group": "scratchpad",
+                "read_only": false,
+                "limit": 10,
+                "include_schema": false,
+            },
+            "calls_upstream": false,
+        },
+        "eligible_tools": eligible_tools,
+        "eligible_tool_counts": {
+            "total": eligible_tool_total,
+            "returned": std::cmp::min(eligible_tool_total, MAX_RECOVERY_LOCAL_STATE_TOOLS),
+            "truncated": eligible_tool_total > MAX_RECOVERY_LOCAL_STATE_TOOLS,
+        },
+        "tool_access_classes": [
+            {
+                "class": "local_only",
+                "tools": local_only_tools,
+                "tool_counts": bounded_count(local_only_tool_total, MAX_RECOVERY_LOCAL_STATE_TOOLS),
+                "upstream_call": false,
+                "scope_required": null,
+                "manage_scope_required": false
+            },
+            {
+                "class": "gam_rest_read",
+                "tools": rest_read_tools,
+                "tool_counts": bounded_count(rest_read_tool_total, MAX_RECOVERY_LOCAL_STATE_TOOLS),
+                "upstream_call": true,
+                "scope_required": "https://www.googleapis.com/auth/admanager.readonly",
+                "manage_scope_required": false
+            },
+            {
+                "class": "gam_soap_read",
+                "tools": manage_scope_read_tools,
+                "tool_counts": bounded_count(manage_scope_read_tool_total, MAX_RECOVERY_LOCAL_STATE_TOOLS),
+                "upstream_call": true,
+                "scope_required": "https://www.googleapis.com/auth/admanager",
+                "manage_scope_required": true
+            }
+        ],
+        "destructive_tools": destructive_tools,
+        "destructive_tool_counts": bounded_count(destructive_tool_total, MAX_RECOVERY_LOCAL_STATE_TOOLS),
+        "guidance": [
+            "This explicit filter enables bounded local scratchpad session state only; it does not authorize or perform a Google Ad Manager mutation.",
+            "Scratchpad open, query, list, ingest, and export calls may create, refresh, or prune local session state; ingest tools can also perform upstream GAM reads under the scope shown in tool_access_classes.",
+            "Close-session and drop-table tools remove local state and remain distinctly labelled destructive."
+        ]
+    })]
+}
+
+fn bounded_count(total: usize, limit: usize) -> Value {
+    json!({
+        "total": total,
+        "returned": std::cmp::min(total, limit),
+        "truncated": total > limit,
+    })
+}
+
+fn validated_recovery_example_queries(
+    inventory: &ToolInventory,
+    filter: &ToolSearchFilter,
+) -> Vec<&'static str> {
+    REPRESENTATIVE_DISCOVERY_CANDIDATES
+        .iter()
+        .filter(|candidate| candidate.no_match_recovery)
+        .filter(|candidate| {
+            filter
+                .group
+                .as_deref()
+                .is_none_or(|group| candidate.group == group)
+        })
+        .filter(|candidate| {
+            filter
+                .read_only
+                .is_none_or(|read_only| candidate.read_only == read_only)
+        })
+        .filter(|candidate| candidate.read_only || filter.read_only == Some(false))
+        .filter(|candidate| {
+            let ranked = inventory.search_ranked(
+                &ToolSearchFilter {
+                    query: Some(candidate.query.to_string()),
+                    group: filter.group.clone(),
+                    read_only: filter.read_only,
+                    limit: Some(1),
+                },
+                ToolOperation::List,
+                &ToolInventoryPolicy::strict(),
+            );
+            ranked
+                .response
+                .results
+                .first()
+                .is_some_and(|result| result.name == candidate.expected_tool)
+        })
+        .map(|candidate| candidate.query)
+        .collect()
+}
+
+fn available_groups(inventory: &ToolInventory, read_only: Option<bool>) -> Vec<String> {
+    let mut groups = inventory
+        .capabilities()
+        .into_iter()
+        .filter(|capability| {
+            inventory.is_allowed(
+                capability.name(),
+                ToolOperation::List,
+                &ToolInventoryPolicy::strict(),
+            )
+        })
+        .filter(|capability| read_only.is_none_or(|read_only| capability.read_only() == read_only))
+        .filter_map(|capability| capability.group().map(str::to_string))
+        .collect::<Vec<_>>();
+    groups.sort();
+    groups.dedup();
+    groups
+}
+
+pub(crate) fn recognized_group_filter(
+    inventory: &ToolInventory,
+    group: Option<&str>,
+) -> Option<String> {
+    let group = group?.trim();
+    if group.is_empty() {
+        return None;
+    }
+    inventory
+        .capabilities()
+        .into_iter()
+        .filter(|capability| {
+            inventory.is_allowed(
+                capability.name(),
+                ToolOperation::List,
+                &ToolInventoryPolicy::strict(),
+            )
+        })
+        .any(|capability| capability.group() == Some(group))
+        .then(|| group.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        MAX_RECOVERY_GROUPS, REPRESENTATIVE_DISCOVERY_CANDIDATES, ReportDiscoveryIntent,
+        WorkflowCompanion, WorkflowDependency, available_groups, companion_result_records,
+        companion_tool_names, provider_guidance_allowed, recognized_group_filter,
+        recovery_result_record, report_discovery_intent, resolve_report_discovery,
+        supplemental_local_state_alternative_records, topologically_sorted_dependencies,
+        workflow_companions,
+    };
+    use crate::tool_surface::build_tool_inventory;
+    use mcp_toolkit_core::tool_inventory::{
+        ToolCapability, ToolExposure, ToolInventory, ToolInventoryPolicy, ToolOperation,
+        ToolSearchFilter, ToolSearchResult,
+    };
+    use serde_json::Value;
+    use std::collections::BTreeSet;
+
+    #[test]
+    fn representative_workflows_are_rank_one_without_caller_hints() {
+        let inventory = build_tool_inventory().expect("inventory");
+        for candidate in REPRESENTATIVE_DISCOVERY_CANDIDATES {
+            let ranked = inventory.search_ranked(
+                &ToolSearchFilter {
+                    query: Some(candidate.query.to_string()),
+                    group: None,
+                    read_only: None,
+                    limit: Some(1),
+                },
+                ToolOperation::List,
+                &ToolInventoryPolicy::strict(),
+            );
+            let first =
+                ranked.response.results.first().unwrap_or_else(|| {
+                    panic!("query '{}' returned no direct tool", candidate.query)
+                });
+            assert_eq!(
+                first.name.as_str(),
+                candidate.expected_tool,
+                "query '{}' ranked the wrong tool first without caller hints",
+                candidate.query
+            );
+        }
+    }
+
+    #[test]
+    fn no_match_recovery_catalog_never_contains_report_run() {
+        assert!(
+            REPRESENTATIVE_DISCOVERY_CANDIDATES
+                .iter()
+                .filter(|candidate| candidate.no_match_recovery)
+                .all(|candidate| candidate.expected_tool != "gam_report_run")
+        );
+        assert!(
+            REPRESENTATIVE_DISCOVERY_CANDIDATES
+                .iter()
+                .any(|candidate| candidate.expected_tool == "gam_report_run")
+        );
+    }
+
+    #[test]
+    fn representative_workflows_are_rank_one_under_declared_filters() {
+        let inventory = build_tool_inventory().expect("inventory");
+        let mut covered_filter_classes = BTreeSet::new();
+        for candidate in REPRESENTATIVE_DISCOVERY_CANDIDATES {
+            covered_filter_classes.insert((candidate.group, candidate.read_only));
+            let ranked = inventory.search_ranked(
+                &ToolSearchFilter {
+                    query: Some(candidate.query.to_string()),
+                    group: Some(candidate.group.to_string()),
+                    read_only: Some(candidate.read_only),
+                    limit: Some(1),
+                },
+                ToolOperation::List,
+                &ToolInventoryPolicy::strict(),
+            );
+            let first =
+                ranked.response.results.first().unwrap_or_else(|| {
+                    panic!("query '{}' returned no direct tool", candidate.query)
+                });
+            assert_eq!(
+                first.name.as_str(),
+                candidate.expected_tool,
+                "query '{}' ranked the wrong tool first",
+                candidate.query
+            );
+            assert_eq!(first.group.as_deref(), Some(candidate.group));
+            assert_eq!(first.read_only, candidate.read_only);
+
+            let prerequisites = companion_tool_names(&workflow_companions(
+                &ranked.response.results,
+                Some(candidate.query),
+            ));
+            match candidate.expected_tool {
+                "gam_soap_trafficking_plan" => {
+                    assert_eq!(prerequisites, vec!["gam_soap_payload_build"])
+                }
+                "gam_soap_trafficking_apply" => assert_eq!(
+                    prerequisites,
+                    vec!["gam_soap_payload_build", "gam_soap_trafficking_plan"]
+                ),
+                "gam_report_run" => {
+                    assert_eq!(
+                        prerequisites,
+                        vec!["gam_networks_list", "gam_network_catalog_list"]
+                    )
+                }
+                "gam_report_operation_poll" => assert!(prerequisites.is_empty()),
+                "gam_report_result_rows" => {
+                    assert_eq!(prerequisites, vec!["gam_report_operation_poll"])
+                }
+                "gam_rest_write_plan"
+                    if candidate.query.contains("archive an ad unit")
+                        || candidate.query.contains("deactivate an ad unit") =>
+                {
+                    assert_eq!(
+                        prerequisites,
+                        vec![
+                            "gam_networks_list",
+                            "gam_network_catalog_list",
+                            "gam_ad_unit_dependency_probe",
+                            "gam_ad_unit_retirement_assessment",
+                        ]
+                    )
+                }
+                _ => {}
+            }
+        }
+        let current_filter_classes = inventory
+            .capabilities()
+            .into_iter()
+            .filter_map(|capability| {
+                capability
+                    .group()
+                    .map(|group| (group, capability.read_only()))
+            })
+            .collect::<BTreeSet<_>>();
+        assert_eq!(covered_filter_classes, current_filter_classes);
+    }
+
+    #[test]
+    fn report_rows_keep_existing_operation_calls_separate_from_cold_start_guidance() {
+        let results = [result("gam_report_result_rows")];
+        let companions =
+            workflow_companions(&results, Some("fetch rows from a completed report result"));
+        assert_eq!(
+            companion_tool_names(&companions),
+            vec!["gam_report_operation_poll"]
+        );
+        assert_eq!(
+            companion_edges(&companions),
+            vec![
+                ("gam_report_run", "gam_report_operation_poll", false, false,),
+                (
+                    "gam_report_operation_poll",
+                    "gam_report_result_rows",
+                    false,
+                    false,
+                ),
+            ]
+        );
+        let records = companion_result_records(&companions);
+        assert_eq!(records[0]["name"], "gam_report_run");
+        assert_eq!(records[0]["callable_as_tool"], false);
+        assert_eq!(records[0]["selection_semantics"], "condition_only");
+        assert_eq!(
+            records[0]["invocation_condition"],
+            "only_when_no_existing_operation_name"
+        );
+        assert!(
+            records[0]["reason"]
+                .as_str()
+                .is_some_and(|reason| reason.contains("Do not call gam_report_run"))
+        );
+        assert_eq!(records[1]["callable_as_tool"], true);
+    }
+
+    #[test]
+    fn report_poll_companions_require_bounded_continuation_or_result_authority() {
+        let results = [
+            result("gam_report_operation_poll"),
+            result("gam_report_result_rows"),
+        ];
+        let ambiguous =
+            workflow_companions(&results, Some("would polling the report operation help"));
+        assert!(
+            ambiguous.iter().all(|companion| {
+                companion.tool_name != "gam_report_operation_poll"
+                    && companion.before_tool != "gam_report_operation_poll"
+            }),
+            "an unauthorized lower-ranked workflow reintroduced report polling"
+        );
+
+        let authorized_results = [result("gam_report_result_rows")];
+        let authorized = workflow_companions(
+            &authorized_results,
+            Some("fetch rows from a completed report result"),
+        );
+        assert_eq!(
+            companion_tool_names(&authorized),
+            vec!["gam_report_operation_poll"]
+        );
+
+        let identity_laundering = workflow_companions(
+            &authorized_results,
+            Some("show report result rows for advertiser id 123"),
+        );
+        assert!(
+            identity_laundering.iter().all(|companion| {
+                companion.tool_name != "gam_report_operation_poll"
+                    && companion.before_tool != "gam_report_operation_poll"
+            }),
+            "an unrelated identity authorized a report-poll companion"
+        );
+        let pagination_laundering = workflow_companions(
+            &authorized_results,
+            Some("show report result rows for advertiser 123, page 2"),
+        );
+        assert!(
+            pagination_laundering.iter().all(|companion| {
+                companion.tool_name != "gam_report_operation_poll"
+                    && companion.before_tool != "gam_report_operation_poll"
+            }),
+            "pagination syntax laundered an unrelated identity into a poll companion"
+        );
+    }
+
+    #[test]
+    fn destructive_ad_unit_intent_adds_evidence_first_retirement_chain() {
+        let results = [result("gam_rest_write_plan")];
+        let companions = workflow_companions(&results, Some("archive an ad unit"));
+        assert_eq!(
+            companion_tool_names(&companions),
+            vec![
+                "gam_networks_list",
+                "gam_network_catalog_list",
+                "gam_ad_unit_dependency_probe",
+                "gam_ad_unit_retirement_assessment",
+            ]
+        );
+        assert_eq!(
+            companion_edges(&companions),
+            vec![
+                ("gam_networks_list", "gam_network_catalog_list", true, false),
+                (
+                    "gam_network_catalog_list",
+                    "gam_ad_unit_dependency_probe",
+                    true,
+                    false,
+                ),
+                (
+                    "gam_ad_unit_dependency_probe",
+                    "gam_ad_unit_retirement_assessment",
+                    true,
+                    false,
+                ),
+                (
+                    "gam_ad_unit_retirement_assessment",
+                    "gam_rest_write_plan",
+                    true,
+                    false,
+                ),
+            ]
+        );
+
+        assert!(workflow_companions(&results, Some("create an ad unit")).is_empty());
+    }
+
+    #[test]
+    fn ad_unit_apply_composes_then_topologically_orders_the_complete_chain() {
+        let results = [result("gam_rest_write_apply")];
+        let companions = workflow_companions(&results, Some("archive an ad unit"));
+        assert_eq!(
+            companion_edges(&companions),
+            vec![
+                ("gam_networks_list", "gam_network_catalog_list", true, false),
+                (
+                    "gam_network_catalog_list",
+                    "gam_ad_unit_dependency_probe",
+                    true,
+                    false,
+                ),
+                (
+                    "gam_ad_unit_dependency_probe",
+                    "gam_ad_unit_retirement_assessment",
+                    true,
+                    false,
+                ),
+                (
+                    "gam_ad_unit_retirement_assessment",
+                    "gam_rest_write_plan",
+                    true,
+                    false,
+                ),
+                ("gam_rest_write_plan", "gam_rest_write_apply", true, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn workflow_dependency_cycles_fail_closed() {
+        let dependencies = vec![
+            WorkflowDependency {
+                tool_name: "tool_a",
+                before_tool: "tool_b",
+                callable_as_tool: true,
+                required_for_guided_sequence: true,
+                reason: "test edge",
+            },
+            WorkflowDependency {
+                tool_name: "tool_b",
+                before_tool: "tool_a",
+                callable_as_tool: true,
+                required_for_guided_sequence: true,
+                reason: "test edge",
+            },
+        ];
+        assert_eq!(
+            topologically_sorted_dependencies(dependencies),
+            Err("provider workflow dependency graph contains a cycle")
+        );
+    }
+
+    #[test]
+    fn report_run_is_condition_only_when_a_continuation_is_selected() {
+        let mut results = vec![result("gam_report_run"), result("gam_report_result_rows")];
+        let companions =
+            workflow_companions(&results, Some("fetch rows from a completed report result"));
+        let resolution = resolve_report_discovery(
+            &mut results,
+            &companions,
+            Some("fetch rows from a completed report result"),
+            None,
+            false,
+            Some(false),
+        );
+        assert_eq!(
+            results
+                .iter()
+                .map(|result| result.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["gam_report_result_rows"]
+        );
+        assert_eq!(resolution.records[0]["name"], "gam_report_run");
+        assert_eq!(resolution.records[0]["callable_as_tool"], false);
+        assert_eq!(resolution.records[0]["schema_exposed"], false);
+        assert_eq!(resolution.records[0]["effect"], "starts_upstream_job");
+        assert_eq!(
+            resolution.records[0]["before_tool"],
+            "gam_report_operation_poll"
+        );
+        assert!(
+            resolution.records[0]
+                .get("explicit_executable_recovery")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn direct_report_run_requires_explicit_new_run_intent_and_write_like_filter() {
+        let mut results = vec![result("gam_report_run")];
+        let query = "start a campaign delivery audit with a saved report";
+        let companions = workflow_companions(&results, Some(query));
+        let resolution = resolve_report_discovery(
+            &mut results,
+            &companions,
+            Some(query),
+            None,
+            false,
+            Some(false),
+        );
+        assert!(resolution.records.is_empty());
+        assert_eq!(results[0].name, "gam_report_run");
+
+        let mut results = vec![result("gam_report_run")];
+        let companions = workflow_companions(&results, Some("saved report delivery audit"));
+        let resolution = resolve_report_discovery(
+            &mut results,
+            &companions,
+            Some("saved report delivery audit"),
+            None,
+            false,
+            Some(false),
+        );
+        assert!(results.is_empty());
+        assert_eq!(resolution.records[0]["report_intent"], "unspecified");
+    }
+
+    #[test]
+    fn direct_report_poll_requires_authoritative_existing_operation_intent() {
+        for query in [
+            "would polling the report operation help",
+            "should I poll the report operation",
+            "tell me what happens if I poll the report operation",
+            "will we poll report operation 123",
+            "show report result rows for advertiser id 123",
+            "show report result rows for advertiser 123, page 2",
+            "show the campaign\u{ff1b} report result rows",
+        ] {
+            let mut results = vec![result("gam_report_operation_poll")];
+            let resolution = resolve_report_discovery(
+                &mut results,
+                &[],
+                Some(query),
+                Some("reports"),
+                true,
+                Some(true),
+            );
+            assert!(
+                results.is_empty(),
+                "ambiguous poll remained callable: {query}"
+            );
+            assert_eq!(resolution.records.len(), 1);
+            assert_eq!(resolution.records[0]["name"], "gam_report_operation_poll");
+            assert_eq!(resolution.records[0]["callable_as_tool"], false);
+            assert_eq!(resolution.records[0]["schema_exposed"], false);
+            assert_eq!(resolution.records[0]["report_intent"], "unspecified");
+        }
+
+        let query = "select the report then fetch the latest report run result rows";
+        let mut results = vec![result("gam_report_operation_poll")];
+        let resolution = resolve_report_discovery(
+            &mut results,
+            &[],
+            Some(query),
+            Some("reports"),
+            true,
+            Some(false),
+        );
+        assert!(results.is_empty(), "nonterminal rows request exposed poll");
+        assert_eq!(resolution.records.len(), 1);
+        assert_eq!(resolution.records[0]["name"], "gam_report_operation_poll");
+        assert_eq!(resolution.records[0]["callable_as_tool"], false);
+        assert_eq!(resolution.records[0]["schema_exposed"], false);
+
+        let query = "continue waiting for an existing report operation";
+        let mut results = vec![result("gam_report_operation_poll")];
+        let resolution = resolve_report_discovery(
+            &mut results,
+            &[],
+            Some(query),
+            Some("reports"),
+            true,
+            Some(true),
+        );
+        assert!(resolution.records.is_empty());
+        assert_eq!(results[0].name, "gam_report_operation_poll");
+
+        for query in [
+            "fetch rows from a completed report result",
+            "show me rows from a completed report result",
+            "show first 100 rows from a completed report result",
+            "view 100 rows from a completed report result",
+            "view the first 100 of its rows from a completed report result",
+            "select the report then fetch rows from a completed report result",
+        ] {
+            let mut results = vec![result("gam_report_operation_poll")];
+            let resolution = resolve_report_discovery(
+                &mut results,
+                &[],
+                Some(query),
+                Some("reports"),
+                true,
+                Some(true),
+            );
+            assert!(
+                resolution.records.is_empty(),
+                "poll was contradicted: {query}"
+            );
+            assert_eq!(results[0].name, "gam_report_operation_poll");
+        }
+    }
+
+    #[test]
+    fn existing_operation_intent_replaces_write_filtered_report_run_with_safe_poll() {
+        let mut results = vec![result("gam_report_run")];
+        let query = "continue waiting for an existing report operation";
+        let companions = workflow_companions(&results, Some(query));
+        let resolution = resolve_report_discovery(
+            &mut results,
+            &companions,
+            Some(query),
+            Some("reports"),
+            true,
+            Some(false),
+        );
+        assert!(results.is_empty());
+        assert_eq!(resolution.records[0]["name"], "gam_report_run");
+        assert!(resolution.records[0]["before_tool"].is_null());
+        assert_eq!(resolution.records[0]["relation"], "condition");
+        assert_eq!(
+            resolution.callable_alternatives,
+            vec!["gam_report_operation_poll"]
+        );
+        assert_eq!(resolution.records[1]["relation"], "safe_alternative");
+        assert_eq!(resolution.records[1]["safe_method"], "GET");
+        assert!(
+            !resolution.records[1]
+                .to_string()
+                .contains("automatic_replay")
+        );
+    }
+
+    #[test]
+    fn existing_operation_intent_adds_safe_poll_without_a_ranked_report_start() {
+        let mut results = vec![result("gam_soap_trafficking_apply")];
+        let query = "check the status of an existing report operation";
+        let companions = workflow_companions(&results, Some(query));
+        let resolution = resolve_report_discovery(
+            &mut results,
+            &companions,
+            Some(query),
+            Some("reports"),
+            true,
+            Some(false),
+        );
+        assert_eq!(
+            resolution.callable_alternatives,
+            vec!["gam_report_operation_poll"]
+        );
+        assert_eq!(resolution.records.len(), 1);
+        assert_eq!(resolution.records[0]["type"], "intent_safe_alternative");
+        assert_eq!(resolution.records[0]["name"], "gam_report_operation_poll");
+        assert_eq!(results[0].name, "gam_soap_trafficking_apply");
+    }
+
+    #[test]
+    fn existing_operation_intent_does_not_cross_an_unrelated_explicit_group() {
+        let mut results = vec![result("gam_soap_trafficking_apply")];
+        let query = "check the status of an existing report operation";
+        let companions = workflow_companions(&results, Some(query));
+        let resolution = resolve_report_discovery(
+            &mut results,
+            &companions,
+            Some(query),
+            Some("trafficking"),
+            true,
+            Some(false),
+        );
+        assert!(resolution.callable_alternatives.is_empty());
+        assert!(resolution.records.is_empty());
+        assert_eq!(results[0].name, "gam_soap_trafficking_apply");
+    }
+
+    #[test]
+    fn report_run_noun_phrases_are_poll_only_under_write_like_filter() {
+        for query in [
+            "report run",
+            "latest report run",
+            "current report run",
+            "the latest report run",
+            "the report's most recent run",
+            "show the current report run",
+            "report runs",
+            "start the latest report run",
+            "latest run of the report",
+            "latest run of the current report",
+            "current run for the saved report",
+            "current run for this report",
+            "show the latest run for my saved report",
+            "show me the current report run",
+            "operation 123 for my saved report",
+            "show the current run of the report",
+            "run of the report",
+            "start a report, then poll the current run",
+            "start a report and check operation 123",
+            "start a report and use run id 123",
+            "start a new report then poll the current run",
+            "current report operation",
+            "use the latest report operation",
+            "check the report and return its operation id",
+            "get the status of report operation 123",
+            "retrieve existing report operation 123",
+            "poll report operation 123 and fetch the first 100 rows",
+            "check the report and retrieve its operation id",
+            "poll report operation 123 and get the first 100 report result rows",
+            "poll report operation 123 to completion",
+            "check the report and show me its operation id",
+            "poll report operation 123 and get the first 100 of its result rows",
+            "check operation 123 for the current report and poll to completion",
+            "check report operation 123 to completion and show inventory report rows",
+            "check report operation 123 to completion and please show inventory report rows",
+            "check report operation 123 to completion and please now show inventory report rows",
+        ] {
+            let mut results = vec![result("gam_report_run")];
+            let companions = workflow_companions(&results, Some(query));
+            let resolution = resolve_report_discovery(
+                &mut results,
+                &companions,
+                Some(query),
+                Some("reports"),
+                true,
+                Some(false),
+            );
+            assert!(
+                results.is_empty(),
+                "report start remained callable: {query}"
+            );
+            assert_eq!(
+                resolution.records[0]["report_intent"], "existing_operation_continuation",
+                "noun phrase did not fail closed: {query}"
+            );
+            assert_eq!(resolution.records[0]["callable_as_tool"], false);
+            assert_eq!(
+                resolution.callable_alternatives,
+                vec!["gam_report_operation_poll"],
+                "GET-only continuation missing: {query}"
+            );
+        }
+    }
+
+    #[test]
+    fn broad_report_continuation_language_never_classifies_as_a_new_run() {
+        for query in [
+            "continue the saved report operation",
+            "show report run status",
+            "resume a report operation",
+            "check the campaign delivery report",
+            "poll the report operation handle",
+            "inspect the report operation handle",
+            "monitor operation_name for the report",
+            "wait for the existing report operation",
+            "networks/123/operations/reports/runs/789",
+            "networks/123/operations/reports/runs/run_456-abc",
+            "check operation handle `networks/123/operations/reports/runs/789`",
+            "check operation_name=networks/123/operations/reports/runs/789",
+            "check networks/123/operations/reports/runs/789 and poll networks/123/operations/reports/runs/789",
+            "start monitoring the report operation",
+            "start checking the report status",
+            "start polling the report operation",
+            "check run status for the report",
+            "monitor the report's latest run",
+            "inspect the latest report run",
+            "report run",
+            "latest report run",
+            "current report run",
+            "the latest report run",
+            "the report's most recent run",
+            "show the current report run",
+            "report runs",
+            "start the latest report run",
+            "latest run of the report",
+            "current run for the saved report",
+            "show the current run of the report",
+            "run of the report",
+            "start a report, then poll the current run",
+            "start a report and check operation 123",
+            "start a report and use run id 123",
+            "start a new report then poll the current run",
+            "current report operation",
+            "use the latest report operation",
+        ] {
+            assert_eq!(
+                report_discovery_intent(Some(query)),
+                ReportDiscoveryIntent::ExistingOperationContinuation,
+                "query classified unsafely: {query}"
+            );
+        }
+        assert_eq!(
+            report_discovery_intent(Some("start a campaign delivery audit with a saved report")),
+            ReportDiscoveryIntent::ExplicitNewRun
+        );
+        assert_eq!(
+            report_discovery_intent(Some("run a saved report and wait for completion")),
+            ReportDiscoveryIntent::ExplicitNewRun
+        );
+        for query in [
+            "start a report",
+            "run the report",
+            "run the current-quarter delivery report",
+            "run the current_quarter delivery report",
+            "run the latest report",
+            "run this report",
+            "start my saved report",
+            "launch another report",
+            "for the current network, run the saved report",
+            "launch a saved report",
+            "execute the report",
+            "start a saved report then monitor its status",
+            "run the campaign delivery report and check its status",
+            "launch a report and inspect it until completion",
+            "execute the report then monitor the result",
+            "start a report then poll it until completion",
+            "start a report then poll the new run",
+            "run the report then show its result",
+            "run the report now",
+            "select the report, then run the saved report",
+            "start a report then poll the report operation",
+            "start a report then wait until it is complete",
+            "start a report and return immediately",
+            "start a report, then fetch the first result page",
+            "start a report and fetch the first page of results",
+            "start a report asynchronously",
+            "start a report and return the run id",
+            "start a report and show the operation id",
+            "start a report and return its operation handle",
+            "start a report and fetch the first 100 rows",
+            "start a report and get its operation id",
+            "start a report and retrieve its first 100 result rows",
+            "start a report and get the first 100 of its result rows",
+            "start a report and retrieve its operation id for polling",
+            "start a campaign delivery audit with my saved report",
+            "launch the saved report and check its status",
+            "can you start a report",
+            "I need you to run a saved report",
+            "please select the report then run the saved report",
+        ] {
+            assert_eq!(
+                report_discovery_intent(Some(query)),
+                ReportDiscoveryIntent::ExplicitNewRun,
+                "compound new-run query classified unsafely: {query}"
+            );
+        }
+        for query in [
+            "start a report then monitor the existing operation",
+            "run the report and check operation handle networks/123/operations/reports/runs/789",
+            "run the report and check operation handle networks/123/operations/reports/runs/run_456-abc",
+        ] {
+            assert_eq!(
+                report_discovery_intent(Some(query)),
+                ReportDiscoveryIntent::ExistingOperationContinuation,
+                "explicit existing-operation reference was ignored: {query}"
+            );
+        }
+        for query in [
+            "start planning the saved report",
+            "execute a query against the report",
+            "start server for the report",
+            "show me how to run a report",
+            "start a report planning session",
+            "start a campaign with a report",
+            "start a report server",
+            "start a report campaign",
+            "start a report and email the results",
+            "execute line-item operation 123",
+            "check line-item operation 123",
+            "continue waiting",
+            "is it safe to run a report",
+            "is it safe, then run a report",
+            "assess whether we should run a report",
+            "check line-item operation 123 and plan a report",
+            "show me how to select the report, then run the saved report",
+            "tell me what happens if I select the report and then run the saved report",
+            "then run the saved report",
+            "select the ad unit then run the saved report",
+            "will we run a saved report",
+            "would we select the report then run the saved report",
+            "will we poll report operation 123",
+            "should I poll the report operation",
+            "would polling the report operation help",
+            "tell me what happens if I poll the report operation",
+            "tell me what happens if I use report operation 123",
+            "would using report operation 123 help",
+            "summarize the report and use operation 123 for the line item",
+            "summarize the report and use operation 123 for the ad unit",
+            "use operation 123 for the ad unit and check the report",
+            "check the report and use operation 123 for the advertiser",
+            "use network operation 123 and check the report",
+            "use network operation 123 for my saved report",
+            "use advertiser operation 123 for my saved report",
+            "use advertiser's current operation 123 for my saved report",
+            "advertiser's operation: networks/123/operations/reports/runs/789",
+            "campaign=networks/123/operations/reports/runs/789",
+            "advertiser_get_current_operation=networks/123/operations/reports/runs/789",
+            "check report operation networks/123/operations/reports/runs/789 and advertiser get operation networks/123/operations/reports/runs/789",
+            "check operation_name=networks/123/operations/reports/runs/789 with advertiser",
+            "check operation_name=networks/123/operations/reports/runs/789 with the report to advertiser",
+            "check operation_name=networks/123/operations/reports/runs/789 then use it for advertiser",
+            "check report operation 123 with campaign",
+            "check report operation 123 with inventory",
+            "check report operation 123 to advertiser",
+            "check report operation networks/123/operations/reports/runs/789 and advertiser operation networks/123/operations/reports/runs/789",
+            "check report operation 123 and report operation 456",
+            "check report operation 123 and 456",
+            "check networks/111/operations/reports/runs/456 and networks/222/operations/reports/runs/789",
+            "inspect deployment run 123 and summarize a report",
+            "summarize the report and use run 123 for the deployment",
+            "use the deployment run for the line item and summarize the report",
+            "use report run 123 for the deployment",
+            "check the report and use run 123 for the advertiser",
+            "check the report for network run 123",
+            "show report result rows for advertiser id 123",
+            "show report result rows for advertiser 123, page 2",
+            "check operation_name=networks/123/operations/reports/runs/789?x=1",
+            "check operation_name=networks/123/operations/reports/runs/789.report",
+            "check networks/123/operations/reports/runs/789 and networks/123/operations/reports/runs/789.report",
+            "check https://example.invalid/networks/123/operations/reports/runs/789",
+            "start a report and get its operation id and use it",
+            "check the advertiser, then report and retrieve its operation_name=networks/123/operations/reports/runs/789",
+            "check the advertiser, then report and retrieve operation",
+            "start a report without waiting",
+            "start a report and check inventory",
+            "inspect inventory and report it",
+            "inspect inventory and report operation_name=networks/123/operations/reports/runs/789",
+            "check operation 123 for the report and its advertiser",
+            "check operation_name=networks/123/operations/reports/runs/789 for the report and its advertiser",
+            "check operation 123 for the report and its inventory",
+            "inspect inventory and please report operation 123",
+            "start a report and please report operation 123",
+            "inspect inventory and can you please report operation 123",
+            "start a report and now report operation 123",
+            "check operation 123 for the report and monitoring campaign",
+            "check operation 123 for the report and checking advertiser",
+            "launch the campaign; report now",
+            "launch the campaign, report now",
+            "launch the campaign. report now",
+            "launch the campaign: report now",
+            "launch the campaign - report now",
+            "launch the campaign (report now)",
+            "launch the campaign\u{ff1b} report now",
+            "launch the campaign\u{2014} report now",
+            "launch the campaign; report run",
+            "launch the campaign\u{2029}report now",
+            "launch the campaign\nreport now",
+            "select the campaign; report then run the saved report",
+            "select the campaign, report then run the saved report",
+            "select the campaign\u{ff1b} report then run the saved report",
+            "launch the campaign; report current run",
+            "launch the campaign; report run of the report",
+            "show the campaign\u{ff1b} report result rows",
+            "check report operation 123 to completion and run inventory report",
+            "start a report then poll it; run the report",
+            "start a report then poll it, run the report",
+            "start a report then poll it and start a new report",
+            "start a report then poll it and launch another report",
+            "start a report then poll it and execute the saved report",
+            "start a report then poll it and run it",
+            "start a report then poll it and run its report",
+            "start a report then poll the report, run it",
+            "start a report then poll report operation 123 and run it",
+            "start a report then poll report operation 123 and start it",
+            "start a report then poll report operation 123 and launch it",
+            "start a report then poll report operation 123 and execute it",
+            "select the report then run the saved report then fetch rows from a completed report result and start it",
+            "select the report then run it",
+            "select the report; run it",
+            "fetch rows from the active report result",
+        ] {
+            assert_eq!(
+                report_discovery_intent(Some(query)),
+                ReportDiscoveryIntent::Unspecified,
+                "unrelated action was treated as a report start: {query}"
+            );
+        }
+    }
+
+    #[test]
+    fn excluded_intent_metadata_suppresses_provider_guidance() {
+        let inventory = build_tool_inventory().expect("inventory");
+        let mut ranked = inventory.search_ranked(
+            &ToolSearchFilter {
+                query: Some("archive an ad unit".to_string()),
+                limit: Some(10),
+                ..ToolSearchFilter::default()
+            },
+            ToolOperation::List,
+            &ToolInventoryPolicy::strict(),
+        );
+        assert!(provider_guidance_allowed(&ranked.match_summary));
+        ranked
+            .match_summary
+            .truncation_reasons
+            .push("excluded_query_terms".to_string());
+        assert!(!provider_guidance_allowed(&ranked.match_summary));
+    }
+
+    #[test]
+    fn soap_plan_adds_optional_builder_dependency() {
+        let results = [result("gam_soap_trafficking_plan")];
+        let companions = workflow_companions(&results, None);
+        assert_eq!(
+            companion_edges(&companions),
+            vec![(
+                "gam_soap_payload_build",
+                "gam_soap_trafficking_plan",
+                false,
+                false,
+            )]
+        );
+        let records = companion_result_records(&companions);
+        assert_eq!(records[0]["required"], false);
+        assert_eq!(records[0]["required_for_guided_sequence"], false);
+        assert_eq!(
+            records[0]["required_semantics"],
+            "guided_sequence_compatibility_alias"
+        );
+        assert_eq!(records[0]["server_call_enforced"], false);
+        assert_eq!(records[0]["tool_already_selected"], false);
+        assert_eq!(records[0]["callable_as_tool"], true);
+        assert_eq!(records[0]["selection_semantics"], "callable_companion");
+    }
+
+    #[test]
+    fn soap_apply_adds_builder_then_plan_dependencies() {
+        let results = [result("gam_soap_trafficking_apply")];
+        let companions = workflow_companions(&results, None);
+        assert_eq!(
+            companion_tool_names(&companions),
+            vec!["gam_soap_payload_build", "gam_soap_trafficking_plan"]
+        );
+        assert_eq!(
+            companion_edges(&companions),
+            vec![
+                (
+                    "gam_soap_payload_build",
+                    "gam_soap_trafficking_plan",
+                    false,
+                    false,
+                ),
+                (
+                    "gam_soap_trafficking_plan",
+                    "gam_soap_trafficking_apply",
+                    true,
+                    false,
+                ),
+            ]
+        );
+        let records = companion_result_records(&companions);
+        assert_eq!(records[0]["before_tool"], "gam_soap_trafficking_plan");
+        assert_eq!(records[1]["before_tool"], "gam_soap_trafficking_apply");
+        assert!(records.iter().all(|record| {
+            record["relation"] == "before"
+                && record["server_call_enforced"] == false
+                && record["mutation_performed"] == false
+                && record["required"] == record["required_for_guided_sequence"]
+                && record["required_semantics"] == "guided_sequence_compatibility_alias"
+        }));
+        assert!(
+            records[0]["reason"]
+                .as_str()
+                .is_some_and(|reason| reason.contains("independently authored payload_xml"))
+        );
+        assert!(
+            records[1]["reason"]
+                .as_str()
+                .is_some_and(|reason| reason.contains("follow-up verification"))
+        );
+    }
+
+    #[test]
+    fn rest_and_yield_apply_add_required_guided_predecessors() {
+        let results = [
+            result("gam_rest_write_apply"),
+            result("gam_yield_group_exclusions_apply"),
+        ];
+        let companions = workflow_companions(&results, None);
+        assert_eq!(
+            companion_edges(&companions),
+            vec![
+                ("gam_rest_write_plan", "gam_rest_write_apply", true, false,),
+                (
+                    "gam_yield_group_exclusions_preview",
+                    "gam_yield_group_exclusions_apply",
+                    true,
+                    false,
+                ),
+            ]
+        );
+        let records = companion_result_records(&companions);
+        assert!(records.iter().all(|record| {
+            record["required_for_guided_sequence"] == true
+                && record["required"] == true
+                && record["required_semantics"] == "guided_sequence_compatibility_alias"
+                && record["server_call_enforced"] == false
+        }));
+        assert!(
+            records[0]["reason"]
+                .as_str()
+                .is_some_and(|reason| reason.contains("not a universal success gate"))
+        );
+        assert!(
+            records[1]["reason"].as_str().is_some_and(
+                |reason| reason.contains("requires descendant-safe post-apply readback")
+            )
+        );
+    }
+
+    #[test]
+    fn semantic_prerequisites_keep_edges_without_duplicate_injection() {
+        let plan_and_apply = [
+            result("gam_soap_trafficking_plan"),
+            result("gam_soap_trafficking_apply"),
+        ];
+        let companions = workflow_companions(&plan_and_apply, None);
+        assert_eq!(
+            companion_edges(&companions),
+            vec![
+                (
+                    "gam_soap_payload_build",
+                    "gam_soap_trafficking_plan",
+                    false,
+                    false,
+                ),
+                (
+                    "gam_soap_trafficking_plan",
+                    "gam_soap_trafficking_apply",
+                    true,
+                    true,
+                ),
+            ]
+        );
+        assert_eq!(
+            companion_tool_names(&companions),
+            vec!["gam_soap_payload_build"]
+        );
+
+        let complete_sequence = [
+            result("gam_soap_payload_build"),
+            result("gam_soap_trafficking_plan"),
+            result("gam_soap_trafficking_apply"),
+        ];
+        let companions = workflow_companions(&complete_sequence, None);
+        assert_eq!(
+            companion_edges(&companions),
+            vec![
+                (
+                    "gam_soap_payload_build",
+                    "gam_soap_trafficking_plan",
+                    false,
+                    true,
+                ),
+                (
+                    "gam_soap_trafficking_plan",
+                    "gam_soap_trafficking_apply",
+                    true,
+                    true,
+                ),
+            ]
+        );
+        assert!(companion_tool_names(&companions).is_empty());
+    }
+
+    #[test]
+    fn read_only_recovery_examples_are_filter_validated_and_non_mutating() {
+        let inventory = build_tool_inventory().expect("inventory");
+        let filter = ToolSearchFilter {
+            query: Some("quasar zeppelin".to_string()),
+            group: None,
+            read_only: Some(true),
+            limit: Some(10),
+        };
+        let recovery = recovery_for_filter(&inventory, &filter);
+        assert_eq!(recovery["status"], "no_matches");
+        assert_eq!(recovery["fail_closed"], false);
+        assert_eq!(recovery["active_filter"]["group"], serde_json::Value::Null);
+        assert_eq!(recovery["active_filter"]["read_only"], true);
+        assert!(recovery.get("local_state_alternatives").is_none());
+        assert_eq!(
+            recovery["retry"]["example_queries_validated_under_active_filter"],
+            true
+        );
+        let queries = recovery_queries(&recovery);
+        assert!(!queries.is_empty());
+        for query in queries {
+            let candidate = candidate_for_query(query);
+            assert!(candidate.read_only, "mutating recovery query: {query}");
+            assert_candidate_ranks_first(&inventory, candidate, None, Some(true));
+        }
+        assert!(recovery.to_string().contains("do not relax"));
+        assert!(
+            serde_json::to_vec(&recovery)
+                .expect("recovery serializes")
+                .len()
+                < 4 * 1024
+        );
+    }
+
+    #[test]
+    fn scratchpad_read_only_recovery_explains_local_state_opt_in() {
+        let inventory = build_tool_inventory().expect("inventory");
+        let recovery = recovery_for_filter(
+            &inventory,
+            &ToolSearchFilter {
+                query: Some("scratchpad".to_string()),
+                group: Some("scratchpad".to_string()),
+                read_only: Some(true),
+                limit: Some(100),
+            },
+        );
+        assert_eq!(recovery["status"], "no_matches");
+        assert_eq!(recovery["active_filter"]["group"], "scratchpad");
+        assert_eq!(recovery["active_filter"]["read_only"], true);
+        assert!(recovery_queries(&recovery).is_empty());
+        assert!(
+            recovery["available_groups"]
+                .as_array()
+                .is_some_and(|groups| !groups.contains(&serde_json::json!("scratchpad")))
+        );
+
+        let alternatives = recovery["local_state_alternatives"]
+            .as_array()
+            .expect("local-state alternatives");
+        assert_eq!(alternatives.len(), 1);
+        let alternative = &alternatives[0];
+        assert_eq!(
+            alternative["reason_code"],
+            "active_filter_excludes_local_state_tools"
+        );
+        assert_eq!(alternative["mutation_scope"], "local_mcp_scratchpad_state");
+        assert_eq!(alternative["discovery_retry_calls_upstream"], false);
+        assert_eq!(alternative["upstream_gam_reads_possible"], true);
+        assert_eq!(alternative["upstream_gam_mutation"], false);
+        assert_eq!(alternative["local_state_writes_enabled_by_default"], true);
+        assert!(alternative.get("upstream_manage_scope_required").is_none());
+        assert_eq!(alternative["retry_filter"]["group"], "scratchpad");
+        assert_eq!(alternative["retry_filter"]["read_only"], false);
+        assert_eq!(
+            alternative["eligible_tool_counts"],
+            serde_json::json!({"total":10,"returned":10,"truncated":false})
+        );
+        assert_eq!(
+            alternative["eligible_tools"],
+            serde_json::json!([
+                "gam_scratchpad_close_session",
+                "gam_scratchpad_drop_table",
+                "gam_scratchpad_export_evidence_bundle",
+                "gam_scratchpad_ingest_network_catalog",
+                "gam_scratchpad_ingest_report_result_rows",
+                "gam_scratchpad_ingest_soap_line_items",
+                "gam_scratchpad_list_sessions",
+                "gam_scratchpad_list_tables",
+                "gam_scratchpad_open_session",
+                "gam_scratchpad_query"
+            ])
+        );
+        assert_eq!(
+            alternative["destructive_tools"],
+            serde_json::json!(["gam_scratchpad_close_session", "gam_scratchpad_drop_table"])
+        );
+        assert_eq!(
+            alternative["destructive_tool_counts"],
+            serde_json::json!({"total":2,"returned":2,"truncated":false})
+        );
+        assert_eq!(
+            alternative["tool_access_classes"],
+            serde_json::json!([
+                {
+                    "class":"local_only",
+                    "tools":[
+                        "gam_scratchpad_close_session",
+                        "gam_scratchpad_drop_table",
+                        "gam_scratchpad_export_evidence_bundle",
+                        "gam_scratchpad_list_sessions",
+                        "gam_scratchpad_list_tables",
+                        "gam_scratchpad_open_session",
+                        "gam_scratchpad_query"
+                    ],
+                    "tool_counts":{"total":7,"returned":7,"truncated":false},
+                    "upstream_call":false,
+                    "scope_required":null,
+                    "manage_scope_required":false
+                },
+                {
+                    "class":"gam_rest_read",
+                    "tools":[
+                        "gam_scratchpad_ingest_network_catalog",
+                        "gam_scratchpad_ingest_report_result_rows"
+                    ],
+                    "tool_counts":{"total":2,"returned":2,"truncated":false},
+                    "upstream_call":true,
+                    "scope_required":"https://www.googleapis.com/auth/admanager.readonly",
+                    "manage_scope_required":false
+                },
+                {
+                    "class":"gam_soap_read",
+                    "tools":["gam_scratchpad_ingest_soap_line_items"],
+                    "tool_counts":{"total":1,"returned":1,"truncated":false},
+                    "upstream_call":true,
+                    "scope_required":"https://www.googleapis.com/auth/admanager",
+                    "manage_scope_required":true
+                }
+            ])
+        );
+        assert!(
+            recovery
+                .to_string()
+                .contains("local scratchpad session state only")
+        );
+        assert!(
+            serde_json::to_vec(&recovery)
+                .expect("scratchpad recovery serializes")
+                .len()
+                < 6 * 1024
+        );
+    }
+
+    #[test]
+    fn scratchpad_query_intent_recovers_without_internal_group_knowledge() {
+        let inventory = build_tool_inventory().expect("inventory");
+        let filter = ToolSearchFilter {
+            query: Some("open a scratchpad for delivery evidence".to_string()),
+            group: None,
+            read_only: Some(true),
+            limit: Some(20),
+        };
+        let ranked =
+            inventory.search_ranked(&filter, ToolOperation::List, &ToolInventoryPolicy::strict());
+        assert!(ranked.match_summary.total_matches > 0);
+        let alternatives = supplemental_local_state_alternative_records(
+            &inventory,
+            &filter,
+            &ranked.match_summary,
+        );
+        assert_eq!(
+            alternatives[0]["retry_filter"],
+            serde_json::json!({"group":"scratchpad","read_only":false})
+        );
+        assert_eq!(alternatives[0]["requires_explicit_operator_intent"], true);
+        assert_eq!(alternatives[0]["rediscovery_call"]["tool"], "find_tools");
+        assert_eq!(
+            alternatives[0]["rediscovery_call"]["arguments"],
+            serde_json::json!({
+                "query":"scratchpad session analysis",
+                "group":"scratchpad",
+                "read_only":false,
+                "limit":10,
+                "include_schema":false
+            })
+        );
+
+        let mut fail_closed_summary = ranked.match_summary;
+        fail_closed_summary
+            .truncation_reasons
+            .push("query_input".to_string());
+        assert!(
+            supplemental_local_state_alternative_records(
+                &inventory,
+                &filter,
+                &fail_closed_summary,
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn fail_closed_scratchpad_recovery_does_not_offer_local_state_opt_in() {
+        let inventory = build_tool_inventory().expect("inventory");
+        let filter = ToolSearchFilter {
+            query: Some(format!("scratchpad {}", "z".repeat(64 * 1024))),
+            group: Some("scratchpad".to_string()),
+            read_only: Some(true),
+            limit: Some(100),
+        };
+        let ranked =
+            inventory.search_ranked(&filter, ToolOperation::List, &ToolInventoryPolicy::strict());
+        assert_eq!(ranked.match_summary.total_matches, 0);
+        let recovery = recovery_result_record(&inventory, &filter, &ranked.match_summary)
+            .expect("fail-closed scratchpad recovery");
+        assert_eq!(recovery["fail_closed"], true);
+        assert!(recovery_queries(&recovery).is_empty());
+        assert!(recovery.get("local_state_alternatives").is_none());
+    }
+
+    #[test]
+    fn mutating_trafficking_recovery_examples_are_exact_and_executable() {
+        let inventory = build_tool_inventory().expect("inventory");
+        let filter = ToolSearchFilter {
+            query: Some("quasar zeppelin".to_string()),
+            group: Some("trafficking".to_string()),
+            read_only: Some(false),
+            limit: Some(10),
+        };
+        let recovery = recovery_for_filter(&inventory, &filter);
+        assert_eq!(recovery["active_filter"]["group"], "trafficking");
+        assert_eq!(recovery["active_filter"]["read_only"], false);
+        assert_eq!(
+            recovery_queries(&recovery),
+            vec![
+                "apply an allowlisted REST write",
+                "apply a SOAP trafficking creative operation",
+                "apply descendant-safe yield group exclusions",
+            ]
+        );
+        for query in recovery_queries(&recovery) {
+            let candidate = candidate_for_query(query);
+            assert!(!candidate.read_only);
+            assert_eq!(candidate.group, "trafficking");
+            assert_candidate_ranks_first(&inventory, candidate, Some("trafficking"), Some(false));
+        }
+        assert!(
+            serde_json::to_vec(&recovery)
+                .expect("recovery serializes")
+                .len()
+                < 4 * 1024
+        );
+    }
+
+    #[test]
+    fn stateful_recovery_excludes_report_starts_and_keeps_safe_continuations() {
+        let inventory = build_tool_inventory().expect("inventory");
+
+        let reports = recovery_for_filter(
+            &inventory,
+            &ToolSearchFilter {
+                query: Some("quasar zeppelin".to_string()),
+                group: Some("reports".to_string()),
+                read_only: Some(true),
+                limit: Some(10),
+            },
+        );
+        assert_eq!(
+            recovery_queries(&reports),
+            vec![
+                "continue waiting for an existing report operation",
+                "fetch rows from a completed report result",
+            ]
+        );
+
+        let report_starts = recovery_for_filter(
+            &inventory,
+            &ToolSearchFilter {
+                query: Some("quasar zeppelin".to_string()),
+                group: Some("reports".to_string()),
+                read_only: Some(false),
+                limit: Some(10),
+            },
+        );
+        assert_eq!(recovery_queries(&report_starts), Vec::<&str>::new());
+        assert!(!report_starts.to_string().contains("gam_report_run"));
+        assert!(
+            !report_starts
+                .to_string()
+                .contains("start a campaign delivery audit")
+        );
+
+        let scratchpad = recovery_for_filter(
+            &inventory,
+            &ToolSearchFilter {
+                query: Some("quasar zeppelin".to_string()),
+                group: Some("scratchpad".to_string()),
+                read_only: Some(false),
+                limit: Some(10),
+            },
+        );
+        assert_eq!(
+            recovery_queries(&scratchpad),
+            vec![
+                "open a scratchpad session for delivery analysis",
+                "ingest line item delivery into an existing scratchpad session",
+            ]
+        );
+    }
+
+    #[test]
+    fn invalid_group_recovery_has_no_examples_and_valid_alternatives() {
+        let inventory = build_tool_inventory().expect("inventory");
+        let filter = ToolSearchFilter {
+            query: Some("quasar zeppelin".to_string()),
+            group: Some("missing-group".to_string()),
+            read_only: Some(true),
+            limit: Some(10),
+        };
+        let recovery = recovery_for_filter(&inventory, &filter);
+        assert_eq!(recovery["active_filter"]["group"], serde_json::Value::Null);
+        assert_eq!(recovery["active_filter"]["group_supplied"], true);
+        assert_eq!(recovery["active_filter"]["group_recognized"], false);
+        assert_eq!(recovery["active_filter"]["read_only"], true);
+        assert!(recovery_queries(&recovery).is_empty());
+        assert!(
+            recovery["retry"]["guidance"]
+                .as_array()
+                .is_some_and(|guidance| guidance.iter().any(|line| {
+                    line.as_str()
+                        .is_some_and(|line| line.contains("no more than five tools"))
+                }))
+        );
+        assert_eq!(
+            recovery["available_groups"],
+            serde_json::json!([
+                "catalog",
+                "discovery",
+                "networks",
+                "reports",
+                "setup",
+                "trafficking",
+            ])
+        );
+    }
+
+    #[test]
+    fn available_groups_scan_the_complete_list_visible_inventory() {
+        let mut capabilities = (0..105)
+            .map(|index| {
+                ToolCapability::new(format!("visible.{index:03}"))
+                    .with_group("catalog")
+                    .with_read_only(true)
+            })
+            .collect::<Vec<_>>();
+        capabilities.push(
+            ToolCapability::new("zz.late")
+                .with_group("late-group")
+                .with_read_only(true),
+        );
+        capabilities.push(
+            ToolCapability::new("zz.write")
+                .with_group("write-group")
+                .with_read_only(false),
+        );
+        capabilities.push(
+            ToolCapability::new("zz.call-only")
+                .with_group("call-only-group")
+                .with_read_only(true)
+                .with_exposure(ToolExposure::CallOnly),
+        );
+        capabilities.push(
+            ToolCapability::new("zz.disabled")
+                .with_group("disabled-group")
+                .with_read_only(true)
+                .with_exposure(ToolExposure::Disabled),
+        );
+        let inventory = ToolInventory::from_capabilities(capabilities).expect("inventory");
+
+        assert_eq!(
+            available_groups(&inventory, Some(true)),
+            vec!["catalog", "late-group"]
+        );
+        assert_eq!(
+            available_groups(&inventory, Some(false)),
+            vec!["write-group"]
+        );
+        assert_eq!(
+            available_groups(&inventory, None),
+            vec!["catalog", "late-group", "write-group"]
+        );
+    }
+
+    #[test]
+    fn recovery_caps_dynamic_group_lists_and_reports_truncation() {
+        let capabilities = (0..20)
+            .map(|index| {
+                ToolCapability::new(format!("visible.{index:03}"))
+                    .with_group(format!("group-{index:03}"))
+                    .with_read_only(true)
+            })
+            .collect::<Vec<_>>();
+        let inventory = ToolInventory::from_capabilities(capabilities).expect("inventory");
+        let recovery = recovery_for_filter(
+            &inventory,
+            &ToolSearchFilter {
+                query: Some("quasar zeppelin".to_string()),
+                group: None,
+                read_only: Some(true),
+                limit: Some(20),
+            },
+        );
+        assert_eq!(
+            recovery["available_groups"]
+                .as_array()
+                .expect("bounded groups")
+                .len(),
+            MAX_RECOVERY_GROUPS
+        );
+        assert_eq!(
+            recovery["available_group_counts"],
+            serde_json::json!({"total":20,"returned":16,"truncated":true})
+        );
+    }
+
+    #[test]
+    fn recognized_group_filter_returns_only_strict_list_visible_group_literals() {
+        let inventory = build_tool_inventory().expect("inventory");
+        assert_eq!(
+            recognized_group_filter(&inventory, Some(" trafficking ")),
+            Some("trafficking".to_string())
+        );
+        assert_eq!(
+            recognized_group_filter(&inventory, Some("leading-secret-marker")),
+            None
+        );
+        assert_eq!(recognized_group_filter(&inventory, None), None);
+    }
+
+    #[test]
+    fn ambiguous_recovery_remains_fail_closed() {
+        let inventory = build_tool_inventory().expect("inventory");
+        let ambiguous_filter = ToolSearchFilter {
+            query: Some("campaign without".to_string()),
+            limit: Some(10),
+            ..ToolSearchFilter::default()
+        };
+        let ambiguous = inventory.search_ranked(
+            &ambiguous_filter,
+            ToolOperation::List,
+            &ToolInventoryPolicy::strict(),
+        );
+        let ambiguous_recovery =
+            recovery_result_record(&inventory, &ambiguous_filter, &ambiguous.match_summary)
+                .expect("fail-closed recovery");
+        assert_eq!(ambiguous_recovery["fail_closed"], true);
+        assert!(
+            ambiguous_recovery["reason_codes"].as_array().is_some_and(
+                |reasons| reasons.contains(&serde_json::json!("query_intent_ambiguous"))
+            )
+        );
+        assert!(recovery_queries(&ambiguous_recovery).is_empty());
+    }
+
+    #[test]
+    fn recovery_without_explicit_mutation_filter_never_suggests_apply() {
+        let inventory = build_tool_inventory().expect("inventory");
+        let filter = ToolSearchFilter {
+            query: Some("quasar zeppelin".to_string()),
+            group: None,
+            read_only: None,
+            limit: Some(10),
+        };
+        let recovery = recovery_for_filter(&inventory, &filter);
+        for query in recovery_queries(&recovery) {
+            assert!(
+                candidate_for_query(query).read_only,
+                "implicit mutation recovery query: {query}"
+            );
+        }
+    }
+
+    fn result(name: &str) -> ToolSearchResult {
+        ToolSearchResult {
+            name: name.to_string(),
+            group: Some("trafficking".to_string()),
+            read_only: false,
+            description: None,
+            keywords: Vec::new(),
+            risk_posture: None,
+        }
+    }
+
+    fn recovery_for_filter(inventory: &ToolInventory, filter: &ToolSearchFilter) -> Value {
+        let ranked =
+            inventory.search_ranked(filter, ToolOperation::List, &ToolInventoryPolicy::strict());
+        assert_eq!(ranked.match_summary.total_matches, 0);
+        recovery_result_record(inventory, filter, &ranked.match_summary).expect("recovery")
+    }
+
+    fn recovery_queries(recovery: &Value) -> Vec<&str> {
+        recovery["retry"]["example_queries"]
+            .as_array()
+            .expect("example queries")
+            .iter()
+            .map(|query| query.as_str().expect("example query"))
+            .collect()
+    }
+
+    fn candidate_for_query(query: &str) -> super::RepresentativeDiscoveryCandidate {
+        REPRESENTATIVE_DISCOVERY_CANDIDATES
+            .iter()
+            .copied()
+            .find(|candidate| candidate.query == query)
+            .unwrap_or_else(|| panic!("unknown recovery query: {query}"))
+    }
+
+    fn assert_candidate_ranks_first(
+        inventory: &ToolInventory,
+        candidate: super::RepresentativeDiscoveryCandidate,
+        group: Option<&str>,
+        read_only: Option<bool>,
+    ) {
+        let ranked = inventory.search_ranked(
+            &ToolSearchFilter {
+                query: Some(candidate.query.to_string()),
+                group: group.map(str::to_string),
+                read_only,
+                limit: Some(1),
+            },
+            ToolOperation::List,
+            &ToolInventoryPolicy::strict(),
+        );
+        assert_eq!(
+            ranked
+                .response
+                .results
+                .first()
+                .map(|result| result.name.as_str()),
+            Some(candidate.expected_tool),
+            "recovery query did not reproduce rank one: {}",
+            candidate.query
+        );
+    }
+
+    fn companion_edges(
+        companions: &[WorkflowCompanion],
+    ) -> Vec<(&'static str, &'static str, bool, bool)> {
+        companions
+            .iter()
+            .map(|companion| {
+                (
+                    companion.tool_name,
+                    companion.before_tool,
+                    companion.required_for_guided_sequence,
+                    companion.tool_already_selected,
+                )
+            })
+            .collect()
+    }
+}
