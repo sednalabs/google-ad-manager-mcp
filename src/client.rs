@@ -2175,6 +2175,14 @@ fn soap_mutation_response_matches(
 
     let mut header_seen = false;
     let mut body = None;
+    // Comments and processing instructions are XML markup, so permit them; non-whitespace
+    // text (including CDATA, which roxmltree exposes as text) is envelope content and invalid.
+    if envelope
+        .children()
+        .any(|node| node.is_text() && node.text().is_some_and(|text| !text.trim().is_empty()))
+    {
+        return false;
+    }
     for child in envelope.children().filter(|node| node.is_element()) {
         match (child.tag_name().namespace(), child.tag_name().name()) {
             (Some(SOAP_ENVELOPE_NAMESPACE), "Header") if !header_seen && body.is_none() => {
@@ -2194,6 +2202,12 @@ fn soap_mutation_response_matches(
             && ((node.tag_name().name() == "Fault" || node.tag_name().name() == "Body")
                 && node.tag_name().namespace() == Some(SOAP_ENVELOPE_NAMESPACE))
     }) {
+        return false;
+    }
+    if body
+        .children()
+        .any(|node| node.is_text() && node.text().is_some_and(|text| !text.trim().is_empty()))
+    {
         return false;
     }
 
@@ -3050,6 +3064,12 @@ mod tests {
                 r#"<soap:Envelope xmlns:soap="{SOAP_ENVELOPE_NAMESPACE}" xmlns:gam="{namespace}" xmlns:evil="urn:evil"><evil:metadata/><soap:Body><gam:updateOrdersResponse/></soap:Body></soap:Envelope>"#
             ),
             &format!(
+                r#"<soap:Envelope xmlns:soap="{SOAP_ENVELOPE_NAMESPACE}" xmlns:gam="{namespace}">unexpected<soap:Body><gam:updateOrdersResponse/></soap:Body></soap:Envelope>"#
+            ),
+            &format!(
+                r#"<soap:Envelope xmlns:soap="{SOAP_ENVELOPE_NAMESPACE}" xmlns:gam="{namespace}"><![CDATA[unexpected]]><soap:Body><gam:updateOrdersResponse/></soap:Body></soap:Envelope>"#
+            ),
+            &format!(
                 r#"<soap:Envelope xmlns:soap="{SOAP_ENVELOPE_NAMESPACE}" xmlns:gam="{namespace}"><soap:Header/><soap:Header/><soap:Body><gam:updateOrdersResponse/></soap:Body></soap:Envelope>"#
             ),
             &format!(
@@ -3057,6 +3077,12 @@ mod tests {
             ),
             &format!(
                 r#"<soap:Envelope xmlns:soap="{SOAP_ENVELOPE_NAMESPACE}" xmlns:gam="{namespace}"><soap:Body><gam:updateOrdersResponse/><gam:unexpected/></soap:Body></soap:Envelope>"#
+            ),
+            &format!(
+                r#"<soap:Envelope xmlns:soap="{SOAP_ENVELOPE_NAMESPACE}" xmlns:gam="{namespace}"><soap:Body>unexpected<gam:updateOrdersResponse/></soap:Body></soap:Envelope>"#
+            ),
+            &format!(
+                r#"<soap:Envelope xmlns:soap="{SOAP_ENVELOPE_NAMESPACE}" xmlns:gam="{namespace}"><soap:Body><![CDATA[unexpected]]><gam:updateOrdersResponse/></soap:Body></soap:Envelope>"#
             ),
             &format!(
                 r#"<!DOCTYPE soap:Envelope><soap:Envelope xmlns:soap="{SOAP_ENVELOPE_NAMESPACE}" xmlns:gam="{namespace}"><soap:Body><gam:updateOrdersResponse/></soap:Body></soap:Envelope>"#
