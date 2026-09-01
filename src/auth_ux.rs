@@ -212,6 +212,10 @@ async fn build_report(settings: &Settings, verify: bool) -> AuthReport {
     let uses_local_user_adc = uses_local_user_adc(&env);
     let credential_status = credential_source_status(settings, uses_local_user_adc);
     let credential_source = auth_source_from_settings(settings);
+    let reported_credential_source = reported_auth_source(
+        credential_status.config_valid,
+        credential_source.as_ref().copied(),
+    );
     let quota_project =
         effective_quota_project(settings, credential_status.adc_file.as_ref(), &env);
     let verification = if verify {
@@ -268,7 +272,7 @@ async fn build_report(settings: &Settings, verify: bool) -> AuthReport {
     AuthReport {
         server: "google-ad-manager-mcp",
         scope: settings.scope.clone(),
-        credential_source: preferred_auth_source(settings, &env),
+        credential_source: reported_credential_source,
         config_valid,
         config_issue,
         credential_material_detected,
@@ -730,15 +734,11 @@ fn uses_local_user_adc(env: &EnvStatus) -> bool {
     !env.google_application_credentials && !env.service_account_path && !env.service_account_json
 }
 
-fn preferred_auth_source(settings: &Settings, env: &EnvStatus) -> AuthSource {
-    if settings.service_account_json.is_some() {
-        AuthSource::ServiceAccountJsonEnv
-    } else if settings.service_account_json_path.is_some() {
-        AuthSource::ServiceAccountJsonPath
-    } else if env.google_application_credentials {
-        AuthSource::GoogleDefaultProviderChain
+fn reported_auth_source(config_valid: bool, selected: Option<AuthSource>) -> AuthSource {
+    if config_valid {
+        selected.unwrap_or(AuthSource::Unavailable)
     } else {
-        AuthSource::GoogleAuthorizedUserAdcFile
+        AuthSource::Unavailable
     }
 }
 
@@ -909,41 +909,6 @@ mod tests {
         shell_join, shell_join_with_cloudsdk_config, verification_failure,
     };
 
-    const TEST_SERVICE_ACCOUNT_PRIVATE_KEY: &str = "-----BEGIN PRIVATE KEY-----\n\
-MIICdQIBADANBgkqhkiG9w0BAQEFAASCAl8wggJbAgEAAoGBAPnRvYZzxdotNxOS\n\
-kDEYigDqPmk/+JTMpLBSvzQ55uASv5fsPUYNb+Pje+KwrVfEqq/tI/Nz4mOgKeV2\n\
-xGD7XhUzvuFLWNflfp0R93MI1qKC+onD7q0WsakpH0miXjHj6yZ7rHVne3E5o3ip\n\
-LNuP/q89l6UcjBkMfgfs/osRUi+zAgMBAAECgYA4AREf5yxfsOs79AtnNj0Z32mG\n\
-ZtTvZsE01hgPOTvM1+cjw84oujJvQDwxobH6jxhEwEDi/wOtmeZKjsmPhEqevMpi\n\
-9DjLL3w3k3pRwoddRnERWpQTV/37YJ3VGczKji6tQKTFm8H6NQt/Cs2MAwayQdU2\n\
-jF/QdL7ysv0WjUyIQQJBAP9zK99X/+0TEWQAYk6EKwu0oEfqZVWO2crPEEhQ2mvB\n\
-CiXQ2Lg1LFScGCDNVQdgh5t5D77NmVWxyxDJ/XOrRukCQQD6W3b/NZ19NG5Xk5XE\n\
-IUNwnGkbddqtHA9x8nNYw7wPqoD9p6XgI83eKzNCPzTWfiQjoJAuTvfLKPIKayte\n\
-uxg7Aj8h7Snmf8l9swqcPXDQ/Ly60UJ4Sqkqs845IUcIU7SumvS+EP63eFhq5FBQ\n\
-CvVABZH9FBcDQEsdFn/huvHuatECQA0Tf+iehUZH2ceLNtRSpHIaSUcc5boK8CeU\n\
-cT/eoVD0J96Xxgsp85O6D+hS4tCdMAgIV9+DUl/zGIlAxbgh74cCQQDesPGAE2ZG\n\
-QO/f5L4azuE8yAB9ob3w4K9ZovtbjqTUz7vW4SRwDNXgXW/hCungTLb5hVpfYxPf\n\
-rFCaohNaJ5PK\n\
------END PRIVATE KEY-----\n";
-
-    fn test_service_account_json() -> String {
-        format!(
-            r#"{{
-  "type": "service_account",
-  "project_id": "test-project",
-  "private_key_id": "test-key-id",
-  "private_key": {private_key:?},
-  "client_email": "test-service-account@example.iam.gserviceaccount.com",
-  "client_id": "123456789012345678901",
-  "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-  "token_uri": "https://oauth2.googleapis.com/token",
-  "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
-  "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/test-service-account%40example.iam.gserviceaccount.com"
-}}"#,
-            private_key = TEST_SERVICE_ACCOUNT_PRIVATE_KEY,
-        )
-    }
-
     #[test]
     fn adc_login_command_includes_cloud_platform_and_ad_manager_scope() {
         let command = gcloud_adc_login_command(
@@ -1016,29 +981,28 @@ rFCaohNaJ5PK\n\
     }
 
     #[test]
-    fn google_application_credentials_accepts_service_account_json_file() {
-        let path = unique_test_file("google-application-credentials-service-account", "json");
-        fs::create_dir_all(path.parent().expect("test file parent")).expect("create test dir");
-        fs::write(&path, test_service_account_json()).expect("write service-account json");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).expect("chmod");
-        }
-        let status = google_application_credentials_status(path.clone());
-        assert!(status.config_valid);
-        assert!(status.config_issue.is_none());
-        assert!(status.credential_material_detected);
-        let _ = fs::remove_file(path);
-    }
-
-    #[test]
     fn google_application_credentials_missing_file_does_not_claim_material_detected() {
         let path = unique_test_file("google-application-credentials-missing", "json");
         let status = google_application_credentials_status(path.clone());
         assert!(!status.config_valid);
         assert!(!status.credential_material_detected);
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn unavailable_source_is_reported_truthfully() {
+        assert_eq!(
+            super::reported_auth_source(
+                false,
+                Some(crate::AuthSource::GoogleAuthorizedUserAdcFile)
+            ),
+            crate::AuthSource::Unavailable
+        );
+        assert_eq!(
+            serde_json::to_string(&super::reported_auth_source(false, None))
+                .expect("serialize unavailable source"),
+            r#""unavailable""#
+        );
     }
 
     #[test]

@@ -1,13 +1,12 @@
 //! Thin authenticated adapter for Google Ad Manager REST APIs.
 
-use std::io::ErrorKind;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gcp_auth::{CustomServiceAccount, TokenProvider};
 use mcp_toolkit_auth::upstream_oauth::{
-    RefreshTokenProvider, UpstreamOAuthError, google_authorized_user_adc_from_file,
+    RefreshTokenProvider, google_authorized_user_adc_from_file,
 };
 use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderValue, USER_AGENT};
 use reqwest::{Client, Method, RequestBuilder};
@@ -1340,16 +1339,12 @@ impl AdManagerClient {
         };
 
         let scopes = vec![self.scope.as_ref().to_string()];
-        let adc = match google_authorized_user_adc_from_file(path, scopes) {
-            Ok(adc) => adc,
-            Err(err) if google_adc_file_missing(&err) => return Ok(None),
-            Err(err) => {
-                return Err(AdManagerError::AuthBootstrap(format!(
-                    "failed to load authorized-user ADC at '{}': {err}",
-                    path.display()
-                )));
-            }
-        };
+        let adc = google_authorized_user_adc_from_file(path, scopes).map_err(|err| {
+            AdManagerError::AuthBootstrap(format!(
+                "failed to load authorized-user ADC at '{}': {err}",
+                path.display()
+            ))
+        })?;
         let provider = RefreshTokenProvider::new(adc.into_refresh_config())
             .map(Arc::new)
             .map_err(|err| AdManagerError::AuthBootstrap(err.to_string()))?;
@@ -1406,8 +1401,8 @@ fn auth_source_for_mode(auth_mode: &UpstreamAuthMode) -> AuthSource {
         UpstreamAuthMode::AuthorizedUserAdcFile(_) => AuthSource::GoogleAuthorizedUserAdcFile,
         UpstreamAuthMode::ServiceAccountJsonPath(_) => AuthSource::ServiceAccountJsonPath,
         UpstreamAuthMode::ServiceAccountJsonEnv(_) => AuthSource::ServiceAccountJsonEnv,
-        // Keep the public source enum backward-compatible while ensuring that
-        // token acquisition still fails closed for an unconfigured client.
+        // The crate is still alpha; this explicit state prevents diagnostics
+        // from claiming that an unavailable credential source is usable.
         UpstreamAuthMode::Unavailable(_) => AuthSource::Unavailable,
     }
 }
@@ -1437,10 +1432,7 @@ fn select_auth_mode(settings: &Settings) -> Result<UpstreamAuthMode, AdManagerEr
         return Ok(UpstreamAuthMode::Adc);
     }
 
-    if let Some(path) = selected_adc_file(settings.shared_adc)
-        .map(|selected| selected.path)
-        .filter(|path| path.is_file())
-    {
+    if let Some(path) = selected_adc_file(settings.shared_adc).map(|selected| selected.path) {
         return Ok(UpstreamAuthMode::AuthorizedUserAdcFile(path));
     }
 
@@ -1448,13 +1440,6 @@ fn select_auth_mode(settings: &Settings) -> Result<UpstreamAuthMode, AdManagerEr
         "no usable credential source was configured; provide a service-account credential, set GOOGLE_APPLICATION_CREDENTIALS, or create the selected ADC file"
             .to_string(),
     ))
-}
-
-fn google_adc_file_missing(err: &UpstreamOAuthError) -> bool {
-    matches!(
-        err,
-        UpstreamOAuthError::Io { source, .. } if source.kind() == ErrorKind::NotFound
-    )
 }
 
 fn absolute_api_url(
@@ -2124,11 +2109,30 @@ pub(crate) fn soap_error_message(result: &SoapTraffickingApplyResult) -> String 
 
 pub(crate) fn soap_apply_failed(result: &SoapTraffickingApplyResult) -> bool {
     result.upstream_status >= 400
+        || result.response_truncated
+        || contains_xml_open_tag(&result.upstream_response_xml, "Fault")
         || result
             .soap_fault
             .as_deref()
             .map(str::trim)
             .is_some_and(|value| !value.is_empty())
+}
+
+fn contains_xml_open_tag(value: &str, tag: &str) -> bool {
+    let mut cursor = 0;
+    while let Some(relative_start) = value[cursor..].find('<') {
+        let start = cursor + relative_start;
+        let Some((closing, name_end)) = xml_tag_name_end(value, start) else {
+            cursor = xml_markup_end(value, start);
+            continue;
+        };
+        let name_start = start + 1 + usize::from(closing);
+        if !closing && xml_local_name(&value[name_start..name_end]) == tag {
+            return true;
+        }
+        cursor = xml_tag_end(value, start).map_or(value.len(), |end| end + 1);
+    }
+    false
 }
 
 pub(crate) fn soap_error_message_with_truncation(
@@ -2873,6 +2877,31 @@ mod tests {
             soap_fault: extract_xml_tag(xml, "faultstring"),
         };
         assert!(soap_apply_failed(&result));
+    }
+
+    #[test]
+    fn soap_apply_fails_closed_for_truncated_or_unclosed_faults() {
+        let unclosed_fault = r#"<λ:Fault xmlns:λ="urn:soap>fault"><λ:faultstring>denied"#;
+        let malformed = SoapTraffickingApplyResult {
+            upstream_status: 200,
+            upstream_response_xml: unclosed_fault.to_string(),
+            response_truncated: false,
+            request_id: None,
+            response_time: None,
+            soap_fault: extract_xml_tag(unclosed_fault, "faultstring"),
+        };
+        assert!(malformed.soap_fault.is_none());
+        assert!(soap_apply_failed(&malformed));
+
+        let truncated = SoapTraffickingApplyResult {
+            upstream_status: 200,
+            upstream_response_xml: "<Envelope><Body>partial...".to_string(),
+            response_truncated: true,
+            request_id: None,
+            response_time: None,
+            soap_fault: None,
+        };
+        assert!(soap_apply_failed(&truncated));
     }
 
     #[test]

@@ -146,6 +146,11 @@ The public `CatalogCollection` enum is non-exhaustive. New curated collections
 may be added while the crate remains alpha, and downstream callers should keep a
 fallback arm for exhaustive matches.
 
+The public `AuthSource` enum is also non-exhaustive. This alpha release adds the
+`unavailable` state so status output cannot claim a usable credential source
+when configuration validation has failed. Existing exhaustive matches must add
+a fallback arm while the crate remains pre-stable.
+
 `gam_exchange_protection_probe` layers a product-neutral proof workflow over
 those catalog reads and SOAP YieldGroupService reads. It reports partial proof
 states for capped, blocked, or unsupported protection surfaces instead of

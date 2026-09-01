@@ -451,10 +451,6 @@ fn parse_write_mode(value: &str) -> Result<GuardedActionRuntimeMode, AdManagerEr
     }
 }
 
-pub fn adc_credentials_path() -> Option<PathBuf> {
-    server_adc_credentials_path().or_else(conventional_adc_credentials_path)
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdcSelectionSource {
     ServerSpecificDefault,
