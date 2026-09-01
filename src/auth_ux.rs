@@ -214,7 +214,7 @@ async fn build_report(settings: &Settings, verify: bool) -> AuthReport {
     let credential_source = auth_source_from_settings(settings);
     let reported_credential_source = reported_auth_source(
         credential_status.config_valid,
-        credential_source.as_ref().copied(),
+        credential_source.as_ref().copied().ok(),
     );
     let quota_project =
         effective_quota_project(settings, credential_status.adc_file.as_ref(), &env);
@@ -742,6 +742,22 @@ fn reported_auth_source(config_valid: bool, selected: Option<AuthSource>) -> Aut
     }
 }
 
+pub(crate) fn validated_auth_source(settings: &Settings) -> AuthSource {
+    let env = EnvStatus {
+        google_application_credentials: std::env::var_os("GOOGLE_APPLICATION_CREDENTIALS")
+            .is_some(),
+        service_account_path: settings.service_account_json_path.is_some(),
+        service_account_json: settings.service_account_json.is_some(),
+        quota_project: settings.quota_project.is_some(),
+        shared_adc: settings.shared_adc,
+    };
+    let status = credential_source_status(settings, uses_local_user_adc(&env));
+    reported_auth_source(
+        status.config_valid,
+        auth_source_from_settings(settings).ok(),
+    )
+}
+
 fn selected_adc_missing_step(adc_file: &AdcFileStatus) -> String {
     match adc_file.selection_source {
         "server_specific_default" => format!(
@@ -909,6 +925,52 @@ mod tests {
         shell_join, shell_join_with_cloudsdk_config, verification_failure,
     };
 
+    // Test-only generated 2048-bit key with no external identity or authority.
+    const TEST_SERVICE_ACCOUNT_PRIVATE_KEY: &str = r#"-----BEGIN PRIVATE KEY-----
+MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQCipY/z9r4eloUL
+51qos5sGp8StxDLW8wo015Zd9QZOH9qJfJztgIDJpAQuf3/9jw1Z6JP5E5nOyYGa
+9mYMyiND/YP6PajkHSNy0sJ/0Fsymf8M8KVBejOILzgtlswfLxZeaTjLVtnXMfSC
+QeGfKdcFdKHG7kR/ljip22o5aBavm9jonEHU1gWfF2CDiIY/YFcl8SFwMkgSxy0L
+y7dPthhvOgHZZE+KQFOYoqkC26I24GC+TWU7NOcQ3HcghYjVsmqPUaiS1KMSlh90
+JDIH3vgcHvNQepn9VMXyWY44XPmbZqy3JYRlsiFMIH1utPtlkkK7DvrdIYfhSoKv
+itq7uurBAgMBAAECggEAFCY8ojWkMfflvabItXOitf1cwUY4Iibz0b4Pk85CHLWX
+hkbYzheIXPKjzfrfqVLqjYPhqQ7DlDmkg8UYuWblXYvvqLWw0anGdXgkvl7anXc0
+gK7jWixAbBOlewhee1KDC+kvLwmwbRd0OhrdT7GIQNXFIPbtp3y9wlU7YKdDgDe0
+mUNxfbLvrtRD/0D7vp5jI+DHB5X1BdrFurygoduOHiIOQB8taVevmWf3BewzU/VF
+6yPSGF5I4SmIaQd0ZIqd3YCmMCwrbY06wb2w6hvJLGnpAFRDClKjFzVyCzT5PiCA
+B9zQs+inwFX/+u3cmyc5LLVprglDL5gkTe7OiP0oQQKBgQDjb7EGF1R/pZfOmOUo
+yiRal+b1DNRRBlND6PqqBz4tWqr7xXtjie+ACme9pNwX6t3EYuWsAw8DDU0OLFDc
+LvyKEg32lKuNJLaywqJIxQM3twk8yP1SV1nCgNdh3Puktn0vzkgR3MSVqgSkpbB2
+L3SItWttUVwbx3cuyZ4/Uzo6qQKBgQC3EtH8GzPZunAgEscW95xaUdFzuzZ4FE95
+V7bemhih6CBGXSSPycusQ9zBHoTwnCSa5MMn6ys+PdECBOPQ0T7Vq6FaHyFvrNXM
+Q8P6vFM+u7KhLNxtwDl2mXD7HdTIrDo72Yu7mdE1tiuaMs8fHRX9wLGSa0vM37wv
+6z/dmSIWWQKBgQDb9g64PGINngKG3dprq6yjLVxCTakdv8dR24ZqYNzikljhbSob
+p7DJHccdY881FoJqx9cmmEKxifCnL3b4rDyz8Cgu/bQ4qnRDyPeY92lYPh6h+iT9
+uNtnwKIN1OJPd+r1DEUpeWFq+ebJsjFK7DSBbyw5qsExYKVEy9vPlNexGQKBgQCr
+8zZdd2NdBjrYNSrfzJQDVUPIUrfXUyROUW+GZu/p6m+eB1AW6a+uTlMi5DpzEAVl
+oqYWcVC9dixAnD0p3c8Ju9miHwk1rf1ljOSfNZFuo7ckoVEsmFagqYAvrJY2IWXU
+3wDapJ+WtlL/0uctTxFftERUxQh+FkrYKzpiNbmJiQKBgDVTcX+FMk4KpfMRJRDa
+lSiQ6gMViABsH1fSdfZOWb9A2Ng54e7W+s/YcWO4wxxJTkt/3OJ8r+6cClChJiGl
+kvD+Ch5Kug6TGdYBczUNoK0EVKiOA8fZ+4a+ny9AeDzcV9XetVk14M2FPKPkOySR
+sbhtpi32ZJCvwpBEP6g7HaOR
+-----END PRIVATE KEY-----"#;
+
+    fn test_service_account_json() -> String {
+        serde_json::json!({
+            "type": "service_account",
+            "project_id": "test-project",
+            "private_key_id": "test-key-id",
+            "private_key": TEST_SERVICE_ACCOUNT_PRIVATE_KEY,
+            "client_email": "test-service-account@example.iam.gserviceaccount.com",
+            "client_id": "123456789012345678901",
+            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+            "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/test-service-account%40example.iam.gserviceaccount.com"
+        })
+        .to_string()
+    }
+
     #[test]
     fn adc_login_command_includes_cloud_platform_and_ad_manager_scope() {
         let command = gcloud_adc_login_command(
@@ -977,6 +1039,23 @@ mod tests {
                 .as_deref()
                 .is_some_and(|issue| issue.contains("authorized-user ADC"))
         );
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn google_application_credentials_accepts_service_account_json_file() {
+        let path = unique_test_file("google-application-credentials-service-account", "json");
+        fs::create_dir_all(path.parent().expect("test file parent")).expect("create test dir");
+        fs::write(&path, test_service_account_json()).expect("write service-account json");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).expect("chmod");
+        }
+        let status = google_application_credentials_status(path.clone());
+        assert!(status.config_valid, "{:#?}", status.config_issue);
+        assert!(status.config_issue.is_none());
+        assert!(status.credential_material_detected);
         let _ = fs::remove_file(path);
     }
 

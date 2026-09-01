@@ -658,7 +658,7 @@ impl AdManagerServer {
         Ok(contract::success(
             json!({
                 "requested_scope": self.client().scope(),
-                "auth_source_candidate": self.client().auth_source().as_str(),
+                "auth_source_candidate": crate::auth_ux::validated_auth_source(self.settings()).as_str(),
                 "quota_project_configured": self.client().quota_project_configured(),
                 "credential_material_detected": credential_material_detected(self.settings()),
                 "detected": {
@@ -1656,7 +1656,9 @@ impl AdManagerServer {
             Ok(value) => value,
             Err(err) => return Ok(contract::error(err, started)),
         };
-        if crate::client::soap_apply_failed(&applied) {
+        if crate::client::soap_apply_failed(&applied)
+            || (plan.mutating && crate::client::soap_mutation_apply_failed(&applied))
+        {
             return Ok(contract::error_with_detail(
                 AdManagerError::UpstreamApi {
                     status: applied.upstream_status,
@@ -1836,7 +1838,7 @@ impl AdManagerServer {
                 Ok(value) => value,
                 Err(err) => return Ok(contract::error(err, started)),
             };
-            if crate::client::soap_apply_failed(&applied) {
+            if crate::client::soap_mutation_apply_failed(&applied) {
                 return Ok(contract::error_with_detail(
                     AdManagerError::UpstreamApi {
                         status: applied.upstream_status,

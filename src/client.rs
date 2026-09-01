@@ -2109,13 +2109,18 @@ pub(crate) fn soap_error_message(result: &SoapTraffickingApplyResult) -> String 
 
 pub(crate) fn soap_apply_failed(result: &SoapTraffickingApplyResult) -> bool {
     result.upstream_status >= 400
-        || result.response_truncated
         || contains_xml_open_tag(&result.upstream_response_xml, "Fault")
         || result
             .soap_fault
             .as_deref()
             .map(str::trim)
             .is_some_and(|value| !value.is_empty())
+}
+
+pub(crate) fn soap_mutation_apply_failed(result: &SoapTraffickingApplyResult) -> bool {
+    soap_apply_failed(result)
+        || result.response_truncated
+        || xml_response_contains_unterminated_markup(&result.upstream_response_xml)
 }
 
 fn contains_xml_open_tag(value: &str, tag: &str) -> bool {
@@ -2128,6 +2133,32 @@ fn contains_xml_open_tag(value: &str, tag: &str) -> bool {
         };
         let name_start = start + 1 + usize::from(closing);
         if !closing && xml_local_name(&value[name_start..name_end]) == tag {
+            return true;
+        }
+        cursor = xml_tag_end(value, start).map_or(value.len(), |end| end + 1);
+    }
+    false
+}
+
+fn xml_response_contains_unterminated_markup(value: &str) -> bool {
+    let mut cursor = 0;
+    while let Some(relative_start) = value[cursor..].find('<') {
+        let start = cursor + relative_start;
+        if value[start..].starts_with("<!--") {
+            if !value[start..].contains("-->") {
+                return true;
+            }
+            cursor = xml_markup_end(value, start);
+            continue;
+        }
+        if value[start..].starts_with("<![CDATA[") {
+            if !value[start..].contains("]]>") {
+                return true;
+            }
+            cursor = xml_markup_end(value, start);
+            continue;
+        }
+        if xml_tag_end(value, start).is_none() {
             return true;
         }
         cursor = xml_tag_end(value, start).map_or(value.len(), |end| end + 1);
@@ -2880,7 +2911,17 @@ mod tests {
     }
 
     #[test]
-    fn soap_apply_fails_closed_for_truncated_or_unclosed_faults() {
+    fn soap_apply_fails_closed_for_unclosed_faults() {
+        let incomplete_open = SoapTraffickingApplyResult {
+            upstream_status: 200,
+            upstream_response_xml: "<λ:Fault".to_string(),
+            response_truncated: false,
+            request_id: None,
+            response_time: None,
+            soap_fault: None,
+        };
+        assert!(soap_apply_failed(&incomplete_open));
+
         let unclosed_fault = r#"<λ:Fault xmlns:λ="urn:soap>fault"><λ:faultstring>denied"#;
         let malformed = SoapTraffickingApplyResult {
             upstream_status: 200,
@@ -2901,7 +2942,18 @@ mod tests {
             response_time: None,
             soap_fault: None,
         };
-        assert!(soap_apply_failed(&truncated));
+        assert!(!soap_apply_failed(&truncated));
+        assert!(soap_mutation_apply_failed(&truncated));
+
+        let malformed_before_fault = SoapTraffickingApplyResult {
+            upstream_status: 200,
+            upstream_response_xml: r#"<Envelope attr="unterminated<λ:Fault>"#.to_string(),
+            response_truncated: false,
+            request_id: None,
+            response_time: None,
+            soap_fault: None,
+        };
+        assert!(soap_mutation_apply_failed(&malformed_before_fault));
     }
 
     #[test]
