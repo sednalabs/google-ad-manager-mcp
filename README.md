@@ -84,7 +84,8 @@ google-ad-manager-mcp auth login --headless --quota-project <PROJECT_ID>
 The helper uses Google Application Default Credentials in a
 Google-Ad-Manager-specific gcloud config directory, requests the required
 `cloud-platform` ADC scope plus the read-only Ad Manager scope, sets the ADC
-quota project when provided, and verifies access with `networks.list`. Keeping
+quota project when provided, and can verify token acquisition without a data
+request. Keeping
 a server-specific ADC file prevents a login for another Google MCP from
 replacing this server's refresh token or scope grant.
 
@@ -93,14 +94,24 @@ You can inspect or script auth without starting an MCP session:
 ```bash
 google-ad-manager-mcp auth command --headless
 google-ad-manager-mcp auth status --verify-token
+google-ad-manager-mcp auth status --verify-access
 google-ad-manager-mcp auth doctor --verify-token --json
+google-ad-manager-mcp auth doctor --verify-access --json
 ```
 
 Then restart any stdio MCP client that keeps a long-lived child process and call:
 
 ```text
-gam_auth_status { "verify_access": true }
+gam_auth_status { "verify_token": true, "verify_access": true }
 ```
+
+`verify_token` performs token acquisition only; it does not call the Ad Manager
+API. `verify_access` implies the token check and then performs the low-cost
+`networks.list` probe. The response reports separate `token_check` and
+`access_check` results with explicit skipped reasons, while retaining the
+backward-compatible `verification` field for the access result. It also reports
+the selected ADC file, whether it is present and usable, and any ADC quota
+project metadata without returning credential material.
 
 After auth is proven:
 
@@ -167,6 +178,11 @@ For local user ADC, the runtime selects the server-specific credential file and
 does not silently fall back to conventional shared ADC. Set
 `GOOGLE_AD_MANAGER_MCP_SHARED_ADC=true` (or pass `--runtime-shared-adc`) only
 when you intentionally want the conventional shared file.
+
+`gam_auth_login_command` uses the shared Toolkit Google provider-auth contract
+and returns argv and shell forms for browser/headless login, client-id-file
+fallback, quota-project and API-enable commands, selected ADC paths, scopes,
+`after_login`, `next_steps`, and safe `notes`.
 
 If you already have a service account for the Google Ad Manager SOAP API, the
 official Ad Manager Beta docs say you can reuse it after enabling the Ad

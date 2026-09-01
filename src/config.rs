@@ -250,9 +250,13 @@ pub struct AuthCommandArgs {
 
 #[derive(Debug, Clone, Args)]
 pub struct AuthStatusCliArgs {
-    /// Acquire a Google access token and call networks.list. The token is never printed.
-    #[arg(long = "verify-token", alias = "verify-access")]
+    /// Acquire a Google access token without making an Ad Manager API call.
+    #[arg(long = "verify-token")]
     pub verify_token: bool,
+
+    /// Acquire a token and call the low-cost networks.list access probe.
+    #[arg(long = "verify-access")]
+    pub verify_access: bool,
 
     /// Emit machine-readable JSON.
     #[arg(long)]
@@ -261,9 +265,13 @@ pub struct AuthStatusCliArgs {
 
 #[derive(Debug, Clone, Args)]
 pub struct AuthDoctorArgs {
-    /// Acquire a Google access token and call networks.list. The token is never printed.
-    #[arg(long = "verify-token", alias = "verify-access")]
+    /// Acquire a Google access token without making an Ad Manager API call.
+    #[arg(long = "verify-token")]
     pub verify_token: bool,
+
+    /// Acquire a token and call the low-cost networks.list access probe.
+    #[arg(long = "verify-access")]
+    pub verify_access: bool,
 
     /// Emit machine-readable JSON.
     #[arg(long)]

@@ -55,6 +55,13 @@ ADC command construction, shell rendering, setup-plan generation, and common
 Google auth error classification to the shared toolkit instead of maintaining
 provider-specific copies.
 
+The MCP login helper consumes the toolkit's canonical
+`GoogleProviderAuthConfig::adc_login_command_contract` response so CLI and MCP
+surfaces share one auth-command shape. The dependency is refreshed to the
+current authoritative Toolkit `main` snapshot at integration time and retained
+in `Cargo.lock` for reproducible builds; stale historical Toolkit revisions are
+not carried forward.
+
 The toolkit auth stack currently brings in OAuth/browser-login dependencies
 including `reqwest` 0.13 and the platform-verifier WebPKI root bundle. The
 `CDLA-Permissive-2.0` exception for `webpki-root-certs` matches the existing

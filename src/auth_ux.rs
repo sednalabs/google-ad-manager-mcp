@@ -14,6 +14,7 @@ use mcp_toolkit_auth::upstream_oauth::{
     UpstreamOAuthError, google_authorized_user_adc_metadata_from_file,
 };
 use serde::Serialize;
+use serde_json::{Value, json};
 use tokio::process::Command;
 
 use crate::client::auth_source_from_settings;
@@ -137,7 +138,7 @@ async fn run_login(settings: &Settings, args: &AuthLoginArgs) -> Result<()> {
     let mut verify_settings = settings.clone();
     verify_settings.scope = scope;
     verify_settings.shared_adc = shared_adc;
-    let report = build_report(&verify_settings, !args.no_verify).await;
+    let report = build_report(&verify_settings, false, !args.no_verify).await;
     print_human_report(&report);
     if !args.no_verify && report.ready == "no" {
         return Err(anyhow!(
@@ -181,7 +182,7 @@ fn auth_command_shared_adc(settings: &Settings, shared_adc_flag: bool) -> bool {
 }
 
 async fn run_status(settings: &Settings, args: &AuthStatusCliArgs) -> Result<()> {
-    let report = build_report(settings, args.verify_token).await;
+    let report = build_report(settings, args.verify_token, args.verify_access).await;
     if args.json {
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
@@ -191,7 +192,7 @@ async fn run_status(settings: &Settings, args: &AuthStatusCliArgs) -> Result<()>
 }
 
 async fn run_doctor(settings: &Settings, args: &AuthDoctorArgs) -> Result<()> {
-    let report = build_report(settings, args.verify_token).await;
+    let report = build_report(settings, args.verify_token, args.verify_access).await;
     if args.json {
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
@@ -200,7 +201,7 @@ async fn run_doctor(settings: &Settings, args: &AuthDoctorArgs) -> Result<()> {
     Ok(())
 }
 
-async fn build_report(settings: &Settings, verify: bool) -> AuthReport {
+async fn build_report(settings: &Settings, verify_token: bool, verify_access: bool) -> AuthReport {
     let env = EnvStatus {
         google_application_credentials: std::env::var_os("GOOGLE_APPLICATION_CREDENTIALS")
             .is_some(),
@@ -218,7 +219,32 @@ async fn build_report(settings: &Settings, verify: bool) -> AuthReport {
     );
     let quota_project =
         effective_quota_project(settings, credential_status.adc_file.as_ref(), &env);
-    let verification = if verify {
+    let token_check = if verify_token || verify_access {
+        match credential_source.as_ref() {
+            Ok(_) => {
+                let client = AdManagerClient::from_settings(settings);
+                match client.verify_token().await {
+                    Ok(()) => VerificationReport {
+                        checked: true,
+                        ok: Some(true),
+                        sample_network_count: None,
+                        error: None,
+                        hint: None,
+                        reason: None,
+                    },
+                    Err(err) => verification_failure(&err),
+                }
+            }
+            Err(err) => verification_failure(err),
+        }
+    } else {
+        VerificationReport::skipped("not_requested")
+    };
+    let access_check = if !verify_access {
+        VerificationReport::skipped("not_requested")
+    } else if token_check.ok != Some(true) {
+        VerificationReport::skipped("token_check_failed")
+    } else {
         match credential_source.as_ref() {
             Ok(_) => {
                 let client = AdManagerClient::from_settings(settings);
@@ -232,20 +258,18 @@ async fn build_report(settings: &Settings, verify: bool) -> AuthReport {
                             .map(Vec::len),
                         error: None,
                         hint: None,
+                        reason: None,
                     },
                     Err(err) => verification_failure(&err),
                 }
             }
             Err(err) => verification_failure(err),
         }
+    };
+    let verification = if verify_access {
+        access_check.clone()
     } else {
-        VerificationReport {
-            checked: false,
-            ok: None,
-            sample_network_count: None,
-            error: None,
-            hint: None,
-        }
+        token_check.clone()
     };
 
     let config_issue = credential_status.config_issue.clone().or_else(|| {
@@ -255,19 +279,16 @@ async fn build_report(settings: &Settings, verify: bool) -> AuthReport {
             .map(|err| redact_secret_text(&err.to_string()))
     });
     let config_valid = credential_status.config_valid && credential_source.is_ok();
-    let ready = if !config_valid {
-        "no".to_string()
-    } else {
-        match verification.ok {
-            Some(true) => "yes",
-            Some(false) => "no",
-            None => "not_verified",
-        }
-        .to_string()
-    };
+    let ready = readiness(config_valid, &token_check, &access_check, &verification);
     let credential_material_detected =
         credential_status.credential_material_detected || verification.ok == Some(true);
-    let next_steps = next_steps(settings, &quota_project, &verification, &credential_status);
+    let next_steps = next_steps(
+        settings,
+        &quota_project,
+        &token_check,
+        &access_check,
+        &credential_status,
+    );
 
     AuthReport {
         server: "google-ad-manager-mcp",
@@ -280,9 +301,29 @@ async fn build_report(settings: &Settings, verify: bool) -> AuthReport {
         gcloud: gcloud_version().await,
         adc_file: credential_status.adc_file,
         env,
+        token_check,
+        access_check,
         verification,
         ready,
         next_steps,
+    }
+}
+
+fn readiness(
+    config_valid: bool,
+    token_check: &VerificationReport,
+    access_check: &VerificationReport,
+    verification: &VerificationReport,
+) -> String {
+    if !config_valid || token_check.ok == Some(false) || access_check.ok == Some(false) {
+        "no".to_string()
+    } else {
+        match verification.ok {
+            Some(true) => "yes",
+            Some(false) => "no",
+            None => "not_verified",
+        }
+        .to_string()
     }
 }
 
@@ -331,14 +372,15 @@ async fn gcloud_version() -> Option<String> {
 fn next_steps(
     settings: &Settings,
     quota_project: &QuotaProjectStatus,
-    verification: &VerificationReport,
+    token_check: &VerificationReport,
+    access_check: &VerificationReport,
     credential_status: &CredentialSourceStatus,
 ) -> Vec<String> {
     let mut steps = Vec::new();
     if let Some(step) = &credential_status.repair_step {
         steps.push(step.clone());
     }
-    if !verification.checked {
+    if !token_check.checked {
         let step = if credential_status.config_valid {
             "Run `google-ad-manager-mcp auth status --verify-token` when you are ready to prove access."
         } else {
@@ -346,13 +388,24 @@ fn next_steps(
         };
         steps.push(step.to_string());
     }
+    if token_check.checked && !access_check.checked {
+        steps.push(
+            "Run `google-ad-manager-mcp auth status --verify-access` when you are ready to prove Ad Manager network access."
+                .to_string(),
+        );
+    }
     if !quota_project.configured {
         steps.push(
             "Set `GOOGLE_AD_MANAGER_MCP_QUOTA_PROJECT=PROJECT_ID` in the MCP server environment; `auth login --quota-project PROJECT_ID` also sets the ADC quota project for Google tooling."
                 .to_string(),
         );
     }
-    if verification.ok == Some(false) {
+    if token_check.ok == Some(false) || access_check.ok == Some(false) {
+        let verification = if access_check.ok == Some(false) {
+            access_check
+        } else {
+            token_check
+        };
         let error = verification.error.as_deref().unwrap_or_default();
         if mentions_quota_project(error) {
             steps.push(
@@ -426,28 +479,35 @@ fn print_human_report(report: &AuthReport) {
         yes_no(report.env.quota_project),
         yes_no(report.env.shared_adc),
     );
-    if report.verification.checked {
-        if report.verification.ok == Some(true) {
-            println!(
-                "Verification: ok (sample_network_count={})",
-                report.verification.sample_network_count.unwrap_or(0)
-            );
-        } else {
-            println!("Verification: failed");
-            if let Some(error) = &report.verification.error {
-                println!("Error: {error}");
-            }
-            if let Some(hint) = &report.verification.hint {
-                println!("Hint: {hint}");
-            }
-        }
-    } else {
-        println!("Verification: not checked");
-    }
+    print_verification("Token check", &report.token_check);
+    print_verification("Access check", &report.access_check);
     println!("Ready: {}", report.ready);
     println!("Next steps:");
     for step in &report.next_steps {
         println!("- {step}");
+    }
+}
+
+fn print_verification(label: &str, verification: &VerificationReport) {
+    if !verification.checked {
+        println!(
+            "{label}: skipped ({})",
+            verification.reason.as_deref().unwrap_or("not_requested")
+        );
+    } else if verification.ok == Some(true) {
+        if let Some(count) = verification.sample_network_count {
+            println!("{label}: ok (sample_network_count={count})");
+        } else {
+            println!("{label}: ok");
+        }
+    } else {
+        println!("{label}: failed");
+        if let Some(error) = &verification.error {
+            println!("Error: {error}");
+        }
+        if let Some(hint) = &verification.hint {
+            println!("Hint: {hint}");
+        }
     }
 }
 
@@ -742,7 +802,11 @@ fn reported_auth_source(config_valid: bool, selected: Option<AuthSource>) -> Aut
     }
 }
 
-pub(crate) fn validated_auth_source(settings: &Settings) -> AuthSource {
+/// Returns the secret-safe, non-network authentication diagnostics shared by
+/// the CLI and MCP status surfaces. In particular, this reports which ADC
+/// file was selected, whether it is present/usable, and its quota-project
+/// metadata without exposing credential material.
+pub(crate) fn mcp_auth_diagnostics(settings: &Settings) -> Value {
     let env = EnvStatus {
         google_application_credentials: std::env::var_os("GOOGLE_APPLICATION_CREDENTIALS")
             .is_some(),
@@ -752,10 +816,19 @@ pub(crate) fn validated_auth_source(settings: &Settings) -> AuthSource {
         shared_adc: settings.shared_adc,
     };
     let status = credential_source_status(settings, uses_local_user_adc(&env));
-    reported_auth_source(
+    let auth_source = reported_auth_source(
         status.config_valid,
         auth_source_from_settings(settings).ok(),
-    )
+    );
+    let quota_project = effective_quota_project(settings, status.adc_file.as_ref(), &env);
+    json!({
+        "auth_source": auth_source.as_str(),
+        "config_valid": status.config_valid,
+        "config_issue": status.config_issue,
+        "credential_material_detected": status.credential_material_detected,
+        "adc_file": status.adc_file,
+        "quota_project": quota_project,
+    })
 }
 
 fn selected_adc_missing_step(adc_file: &AdcFileStatus) -> String {
@@ -850,6 +923,8 @@ struct AuthReport {
     gcloud: Option<String>,
     adc_file: Option<AdcFileStatus>,
     env: EnvStatus,
+    token_check: VerificationReport,
+    access_check: VerificationReport,
     verification: VerificationReport,
     ready: String,
     next_steps: Vec<String>,
@@ -898,16 +973,32 @@ fn verification_failure(err: &AdManagerError) -> VerificationReport {
         sample_network_count: None,
         error: Some(redact_secret_text(&err.to_string())),
         hint: Some(err.hint().to_string()),
+        reason: None,
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 struct VerificationReport {
     checked: bool,
     ok: Option<bool>,
     sample_network_count: Option<usize>,
     error: Option<String>,
     hint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+}
+
+impl VerificationReport {
+    fn skipped(reason: &'static str) -> Self {
+        Self {
+            checked: false,
+            ok: None,
+            sample_network_count: None,
+            error: None,
+            hint: None,
+            reason: Some(reason.to_string()),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1092,6 +1183,32 @@ sbhtpi32ZJCvwpBEP6g7HaOR
         let serialized = serde_json::to_string(&report).expect("serialize verification");
         assert!(serialized.contains("[redacted]"));
         assert!(!serialized.contains("opaque-secret"));
+    }
+
+    #[test]
+    fn skipped_verification_has_explicit_reason() {
+        let report = super::VerificationReport::skipped("token_check_failed");
+        let serialized = serde_json::to_string(&report).expect("serialize skipped verification");
+        assert!(serialized.contains(r#""checked":false"#));
+        assert!(serialized.contains(r#""reason":"token_check_failed"#));
+    }
+
+    #[test]
+    fn failed_token_with_skipped_access_is_not_ready() {
+        let token = verification_failure(&AdManagerError::AuthBootstrap(
+            "token acquisition failed".to_string(),
+        ));
+        let access = super::VerificationReport::skipped("token_check_failed");
+        let ready = super::readiness(true, &token, &access, &access);
+        assert_eq!(ready, "no");
+    }
+
+    #[test]
+    fn mcp_auth_diagnostics_exposes_safe_configuration_state() {
+        let diagnostics = super::mcp_auth_diagnostics(&Settings::default());
+        assert!(diagnostics.get("config_valid").is_some());
+        assert!(diagnostics.get("credential_material_detected").is_some());
+        assert!(diagnostics.get("quota_project").is_some());
     }
 
     fn unique_test_file(label: &str, extension: &str) -> PathBuf {

@@ -5,7 +5,7 @@ use std::time::Instant;
 use mcp_toolkit::rmcp::handler::server::wrapper::Parameters;
 use mcp_toolkit::rmcp::model::CallToolResult;
 use mcp_toolkit::rmcp::{self, tool, tool_router};
-use mcp_toolkit_auth::provider_auth::{GoogleProviderAuthConfig, google_adc_quota_project_command};
+use mcp_toolkit_auth::provider_auth::{GoogleProviderAuthConfig, GoogleProviderAuthLoginOptions};
 use mcp_toolkit_scratchpad::{
     ScratchpadIngestColumn, ScratchpadIngestMode, ScratchpadQueryProjection, ScratchpadSessionInfo,
     ScratchpadSessionSnapshot, ScratchpadTableInfo, run_scratchpad_blocking,
@@ -19,7 +19,6 @@ use crate::ad_unit_retirement::{
     AdUnitRetirementAssessmentArgs, MAX_DESCENDANT_PAGE_BYTES,
     assess_ad_unit_retirement_with_readers, response_bytes,
 };
-use crate::auth_ux::{gcloud_adc_login_command, shell_join_with_cloudsdk_config};
 use crate::client::{
     CatalogCollection, DEFAULT_SOAP_API_VERSION, RestWriteOperation, RestWritePlan,
     RestWriteResource, SoapTraffickingApplyResult, SoapTraffickingOperation, SoapTraffickingPlan,
@@ -60,6 +59,9 @@ pub struct GetStartedArgs {}
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct AuthStatusArgs {
+    /// When true, acquire an access token without making an Ad Manager API call.
+    #[serde(default)]
+    pub verify_token: bool,
     /// When true, make a live low-cost Ad Manager API call to prove access.
     #[serde(default)]
     pub verify_access: bool,
@@ -632,9 +634,27 @@ impl AdManagerServer {
         Parameters(args): Parameters<AuthStatusArgs>,
     ) -> Result<CallToolResult, McpError> {
         let started = Instant::now();
+        let verify_token = args.verify_token || args.verify_access;
         let verify_access = args.verify_access;
         let gcloud = gcloud_version().await;
-        let verification = if verify_access {
+        let token_check = if verify_token {
+            match self.client().verify_token().await {
+                Ok(()) => json!({"checked": true, "ok": true}),
+                Err(err) => json!({
+                    "checked": true,
+                    "ok": false,
+                    "error": contract::redact_secret_text(&err.to_string()),
+                    "hint": err.hint(),
+                }),
+            }
+        } else {
+            json!({"checked": false, "ok": null, "reason": "not_requested"})
+        };
+        let access_check = if !verify_access {
+            json!({"checked": false, "ok": null, "reason": "not_requested"})
+        } else if token_check.get("ok") != Some(&Value::Bool(true)) {
+            json!({"checked": false, "ok": null, "reason": "token_check_failed"})
+        } else {
             match self.client().list_networks(Some(1), None).await {
                 Ok(payload) => json!({
                     "checked": true,
@@ -648,19 +668,20 @@ impl AdManagerServer {
                     "hint": err.hint(),
                 }),
             }
-        } else {
-            json!({
-                "checked": false,
-                "ok": null
-            })
         };
+        let diagnostics = crate::auth_ux::mcp_auth_diagnostics(self.settings());
+        let verification = access_check.clone();
 
         Ok(contract::success(
             json!({
                 "requested_scope": self.client().scope(),
-                "auth_source_candidate": crate::auth_ux::validated_auth_source(self.settings()).as_str(),
+                "auth_source_candidate": diagnostics.get("auth_source").cloned().unwrap_or_else(|| json!("unavailable")),
+                "config_valid": diagnostics.get("config_valid").cloned().unwrap_or(Value::Bool(false)),
+                "config_issue": diagnostics.get("config_issue").cloned().unwrap_or(Value::Null),
                 "quota_project_configured": self.client().quota_project_configured(),
-                "credential_material_detected": credential_material_detected(self.settings()),
+                "credential_material_detected": diagnostics.get("credential_material_detected").cloned().unwrap_or(Value::Bool(false)),
+                "adc_file": diagnostics.get("adc_file").cloned().unwrap_or(Value::Null),
+                "quota_project": diagnostics.get("quota_project").cloned().unwrap_or(Value::Null),
                 "detected": {
                     "gcloud_available": gcloud.is_some(),
                     "gcloud_version": gcloud,
@@ -670,8 +691,10 @@ impl AdManagerServer {
                         "GOOGLE_AD_MANAGER_MCP_SERVICE_ACCOUNT_JSON": self.settings().service_account_json.is_some(),
                     }
                 },
+                "token_check": token_check,
+                "access_check": access_check,
                 "verification": verification,
-                "next_steps": auth_next_steps(self.client().scope(), verify_access),
+                "next_steps": auth_next_steps(self.client().scope(), verify_token, verify_access),
             }),
             started,
         ))
@@ -692,18 +715,7 @@ impl AdManagerServer {
         } else {
             self.client().scope()
         };
-        let setup_plan = ad_manager_provider_auth_config(requested_scope).adc_setup_plan();
-        let command = gcloud_adc_login_command(
-            requested_scope,
-            args.client_id_file.as_deref().map(std::path::Path::new),
-            no_launch_browser,
-        );
-        let headless_command = gcloud_adc_login_command(
-            requested_scope,
-            args.client_id_file.as_deref().map(std::path::Path::new),
-            true,
-        );
-        let shared_adc = args.shared_adc.unwrap_or(false);
+        let shared_adc = requested_shared_adc(self.settings().shared_adc, args.shared_adc);
         let cloudsdk_config = if shared_adc {
             None
         } else {
@@ -727,63 +739,40 @@ impl AdManagerServer {
             .quota_project
             .clone()
             .or_else(|| self.settings().quota_project.clone());
-        let follow_up_commands = quota_project
-            .as_deref()
-            .map(|project| {
-                vec![shell_join_with_cloudsdk_config(
-                    &google_adc_quota_project_command(project),
-                    cloudsdk_config.as_deref(),
-                )]
-            })
-            .unwrap_or_default();
-        let shell_command = shell_join_with_cloudsdk_config(&command, cloudsdk_config.as_deref());
-        let headless_shell_command =
-            shell_join_with_cloudsdk_config(&headless_command, cloudsdk_config.as_deref());
-        let client_id_file_command = setup_plan.login_with_client_id_file.argv.clone();
-        let client_id_file_shell_command =
-            shell_join_with_cloudsdk_config(&client_id_file_command, cloudsdk_config.as_deref());
-        let client_id_file_headless_command =
-            setup_plan.headless_login_with_client_id_file.argv.clone();
-        let client_id_file_headless_shell_command = shell_join_with_cloudsdk_config(
-            &client_id_file_headless_command,
-            cloudsdk_config.as_deref(),
+        let mut login_options = GoogleProviderAuthLoginOptions::new(requested_scope)
+            .with_headless(no_launch_browser)
+            .with_shared_adc(shared_adc)
+            .with_operator_scope_requested(requested_scope == MANAGE_SCOPE)
+            .with_after_login("Restart stdio MCP clients that keep long-lived server processes, then call gam_auth_status with verify_token=true or verify_access=true.");
+        if let Some(path) = args.client_id_file.clone() {
+            login_options = login_options.with_client_id_file(path);
+        }
+        if let Some(project) = quota_project.clone() {
+            login_options = login_options.with_quota_project(project);
+        }
+        if let Some(path) = cloudsdk_config.as_ref() {
+            login_options = login_options.with_cloudsdk_config(path.display().to_string());
+        }
+        if let Some(path) = credential_file.as_ref() {
+            login_options = login_options.with_credential_file(path.display().to_string());
+        }
+        let login_contract = ad_manager_provider_auth_config(requested_scope)
+            .adc_login_command_contract(&login_options);
+        let mut response = serde_json::to_value(&login_contract).expect("auth contract serializes");
+        let object = response.as_object_mut().expect("auth contract object");
+        object.insert(
+            "manage_scope".to_string(),
+            json!(requested_scope == MANAGE_SCOPE),
         );
-        let quota_project_command = shell_join_with_cloudsdk_config(
-            &setup_plan.quota_project.argv,
-            cloudsdk_config.as_deref(),
+        object.insert(
+            "setup_next_steps".to_string(),
+            json!(login_contract.next_steps),
         );
-        Ok(contract::success(
-            json!({
-                "command": command,
-                "shell_command": shell_command,
-                "headless_command": headless_command,
-                "headless_shell_command": headless_shell_command,
-                "client_id_file_command": client_id_file_command,
-                "client_id_file_shell_command": client_id_file_shell_command,
-                "client_id_file_headless_command": client_id_file_headless_command,
-                "client_id_file_headless_shell_command": client_id_file_headless_shell_command,
-                "quota_project_command": quota_project_command,
-                "api_enable_command": setup_plan.api_enable.as_ref().map(|command| command.shell.as_str()),
-                "adc_scopes": setup_plan.scopes.clone(),
-                "cloudsdk_config": cloudsdk_config.as_ref().map(|path| path.display().to_string()),
-                "credential_file": credential_file.as_ref().map(|path| path.display().to_string()),
-                "shared_adc": shared_adc,
-                "follow_up_commands": follow_up_commands,
-                "setup_next_steps": setup_plan.next_steps.clone(),
-                "scope": requested_scope,
-                "manage_scope": requested_scope == MANAGE_SCOPE,
-                "next_steps": setup_plan.next_steps.clone(),
-                "notes": [
-                    "By default this command writes a Google Ad Manager-specific ADC file for this OS user.",
-                    "Set shared_adc=true only when you intentionally want the conventional shared gcloud ADC file.",
-                    "No token or client secret is returned by this tool.",
-                    "Use manage_scope=true or --manage-scope when you need write-capable Ad Manager credentials for operator-approved apply.".to_string(),
-                    "Use the client-id-file command if Google rejects the Ad Manager scope during ADC login.",
-                    "For unattended deployments, prefer service-account or workload identity credentials over local user ADC.",
-                ]
-            }),
-            started,
-        ))
+        object.insert(
+            "follow_up_commands".to_string(),
+            json!(login_contract.follow_up_commands),
+        );
+        Ok(contract::success(response, started))
     }
 
     #[tool(
@@ -6720,7 +6709,7 @@ fn escape_markdown_cell(value: &str) -> String {
         .replace('\n', " ")
 }
 
-fn auth_next_steps(scope: &str, access_checked: bool) -> Vec<String> {
+fn auth_next_steps(scope: &str, token_checked: bool, access_checked: bool) -> Vec<String> {
     let setup_plan = ad_manager_provider_auth_config(scope).adc_setup_plan();
     let suggested_login = if scope == MANAGE_SCOPE {
         "google-ad-manager-mcp auth login --headless --manage-scope --quota-project <PROJECT_ID>"
@@ -6749,11 +6738,18 @@ fn auth_next_steps(scope: &str, access_checked: bool) -> Vec<String> {
             command.shell
         ));
     }
+    if !token_checked {
+        steps.push("Call gam_auth_status with verify_token=true to acquire a token without making an Ad Manager API call.".to_string());
+    }
     if !access_checked {
         steps.push("Call gam_auth_status with verify_access=true when you are ready to prove Ad Manager access.".to_string());
     }
     steps.push("Call gam_networks_list to discover the exact network code before using gam_network_catalog_list or gam_report_run.".to_string());
     steps
+}
+
+fn requested_shared_adc(configured: bool, requested: Option<bool>) -> bool {
+    requested.unwrap_or(configured)
 }
 
 fn ad_manager_provider_auth_config(scope: &str) -> GoogleProviderAuthConfig {
@@ -6768,12 +6764,6 @@ fn split_scopes(scope: &str) -> Vec<String> {
         .filter(|value| !value.is_empty())
         .map(str::to_string)
         .collect()
-}
-
-fn credential_material_detected(settings: &crate::Settings) -> bool {
-    std::env::var_os("GOOGLE_APPLICATION_CREDENTIALS").is_some()
-        || settings.service_account_json_path.is_some()
-        || settings.service_account_json.is_some()
 }
 
 async fn gcloud_version() -> Option<String> {
@@ -6793,6 +6783,30 @@ async fn gcloud_version() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shared_adc_request_uses_configured_default_and_explicit_override() {
+        assert!(!requested_shared_adc(false, None));
+        assert!(requested_shared_adc(true, None));
+        assert!(requested_shared_adc(false, Some(true)));
+        assert!(!requested_shared_adc(true, Some(false)));
+    }
+
+    #[test]
+    fn auth_status_next_steps_distinguish_token_and_access_checks() {
+        let token_steps = auth_next_steps(crate::DEFAULT_READONLY_SCOPE, false, false);
+        assert!(
+            token_steps
+                .iter()
+                .any(|step| step.contains("verify_token=true"))
+        );
+        let access_steps = auth_next_steps(crate::DEFAULT_READONLY_SCOPE, true, false);
+        assert!(
+            access_steps
+                .iter()
+                .any(|step| step.contains("verify_access=true"))
+        );
+    }
 
     fn values(value: Value) -> Map<String, Value> {
         value.as_object().expect("object").clone()

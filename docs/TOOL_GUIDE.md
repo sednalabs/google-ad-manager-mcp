@@ -9,8 +9,8 @@ All tools return Contract V1 envelopes: `ok/data/meta` on success and
 | --- | --- |
 | `find_tools` | Search tool metadata for deferred-loading or `tool_search` clients. |
 | `gam_get_started` | Return the recommended first-run flow and supported credential sources. |
-| `gam_auth_status` | Inspect configured auth inputs and optionally prove live Ad Manager access. |
-| `gam_auth_login_command` | Build a copyable ADC login command without running it. |
+| `gam_auth_status` | Inspect configured auth inputs, selected ADC/quota diagnostics, and optionally verify a token and live Ad Manager access. |
+| `gam_auth_login_command` | Build the shared Toolkit Google provider-auth contract with argv/shell login forms, headless and client-id-file variants, quota/API setup, and safe next steps without running it. |
 | `gam_networks_list` | List Ad Manager networks visible to the authenticated principal. |
 | `gam_network_catalog_list` | List one curated network collection: `ad_units`, `orders`, `line_items`, `placements`, `private_auctions`, `private_auction_deals`, or `reports`. |
 | `gam_exchange_protection_probe` | Read-only proof for exact ad-unit exchange/yield/protection exposure, with explicit partial-proof states. |

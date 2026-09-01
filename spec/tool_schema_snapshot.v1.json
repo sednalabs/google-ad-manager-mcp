@@ -411,6 +411,11 @@
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
+          "verify_token": {
+            "default": false,
+            "description": "When true, acquire an access token without making an Ad Manager API call.",
+            "type": "boolean"
+          },
           "verify_access": {
             "default": false,
             "description": "When true, make a live low-cost Ad Manager API call to prove access.",
