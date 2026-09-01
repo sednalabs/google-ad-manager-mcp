@@ -2173,20 +2173,27 @@ fn soap_mutation_response_matches(
         return false;
     }
 
-    let mut bodies = envelope
-        .children()
-        .filter(|node| node.is_element() && node.tag_name().name() == "Body");
-    let Some(body) = bodies.next() else {
+    let mut header_seen = false;
+    let mut body = None;
+    for child in envelope.children().filter(|node| node.is_element()) {
+        match (child.tag_name().namespace(), child.tag_name().name()) {
+            (Some(SOAP_ENVELOPE_NAMESPACE), "Header") if !header_seen && body.is_none() => {
+                header_seen = true;
+            }
+            (Some(SOAP_ENVELOPE_NAMESPACE), "Body") if body.is_none() => {
+                body = Some(child);
+            }
+            _ => return false,
+        }
+    }
+    let Some(body) = body else {
         return false;
     };
-    if body.tag_name().namespace() != Some(SOAP_ENVELOPE_NAMESPACE)
-        || bodies.next().is_some()
-        || body.descendants().any(|node| {
-            node.is_element()
-                && node.tag_name().name() == "Fault"
-                && node.tag_name().namespace() == Some(SOAP_ENVELOPE_NAMESPACE)
-        })
-    {
+    if body.descendants().any(|node| {
+        node.is_element()
+            && ((node.tag_name().name() == "Fault" || node.tag_name().name() == "Body")
+                && node.tag_name().namespace() == Some(SOAP_ENVELOPE_NAMESPACE))
+    }) {
         return false;
     }
 
@@ -3018,6 +3025,14 @@ mod tests {
             "updateOrders",
             namespace
         ));
+        let accepted_with_header = format!(
+            r#"<soap:Envelope xmlns:soap="{SOAP_ENVELOPE_NAMESPACE}" xmlns:gam="{namespace}"><soap:Header/><soap:Body><gam:updateOrdersResponse/></soap:Body></soap:Envelope>"#
+        );
+        assert!(!soap_mutation_apply_failed(
+            &result(&accepted_with_header),
+            "updateOrders",
+            namespace
+        ));
 
         for rejected in [
             "",
@@ -3030,6 +3045,15 @@ mod tests {
             ),
             &format!(
                 r#"<soap:Envelope xmlns:soap="{SOAP_ENVELOPE_NAMESPACE}" xmlns:gam="{namespace}" xmlns:other="urn:other"><soap:Body><gam:updateOrdersResponse/></soap:Body><other:Body/></soap:Envelope>"#
+            ),
+            &format!(
+                r#"<soap:Envelope xmlns:soap="{SOAP_ENVELOPE_NAMESPACE}" xmlns:gam="{namespace}" xmlns:evil="urn:evil"><evil:metadata/><soap:Body><gam:updateOrdersResponse/></soap:Body></soap:Envelope>"#
+            ),
+            &format!(
+                r#"<soap:Envelope xmlns:soap="{SOAP_ENVELOPE_NAMESPACE}" xmlns:gam="{namespace}"><soap:Header/><soap:Header/><soap:Body><gam:updateOrdersResponse/></soap:Body></soap:Envelope>"#
+            ),
+            &format!(
+                r#"<soap:Envelope xmlns:soap="{SOAP_ENVELOPE_NAMESPACE}" xmlns:gam="{namespace}"><soap:Body><gam:updateOrdersResponse/></soap:Body><soap:Header/></soap:Envelope>"#
             ),
             &format!(
                 r#"<soap:Envelope xmlns:soap="{SOAP_ENVELOPE_NAMESPACE}" xmlns:gam="{namespace}"><soap:Body><gam:updateOrdersResponse/><gam:unexpected/></soap:Body></soap:Envelope>"#
@@ -3049,6 +3073,15 @@ mod tests {
         );
         assert!(soap_mutation_apply_failed(
             &result(&fault),
+            "updateOrders",
+            namespace
+        ));
+
+        let nested_body = format!(
+            r#"<soap:Envelope xmlns:soap="{SOAP_ENVELOPE_NAMESPACE}" xmlns:gam="{namespace}"><soap:Body><gam:updateOrdersResponse><soap:Body/></gam:updateOrdersResponse></soap:Body></soap:Envelope>"#
+        );
+        assert!(soap_mutation_apply_failed(
+            &result(&nested_body),
             "updateOrders",
             namespace
         ));
