@@ -658,7 +658,7 @@ impl AdManagerServer {
         Ok(contract::success(
             json!({
                 "requested_scope": self.client().scope(),
-                "auth_source_candidate": self.client().auth_source().as_str(),
+                "auth_source_candidate": crate::auth_ux::validated_auth_source(self.settings()).as_str(),
                 "quota_project_configured": self.client().quota_project_configured(),
                 "credential_material_detected": credential_material_detected(self.settings()),
                 "detected": {
@@ -1656,7 +1656,14 @@ impl AdManagerServer {
             Ok(value) => value,
             Err(err) => return Ok(contract::error(err, started)),
         };
-        if applied.upstream_status >= 400 {
+        if crate::client::soap_apply_failed(&applied)
+            || (plan.mutating
+                && crate::client::soap_mutation_apply_failed(
+                    &applied,
+                    plan.method,
+                    &plan.namespace,
+                ))
+        {
             return Ok(contract::error_with_detail(
                 AdManagerError::UpstreamApi {
                     status: applied.upstream_status,
@@ -1836,7 +1843,11 @@ impl AdManagerServer {
                 Ok(value) => value,
                 Err(err) => return Ok(contract::error(err, started)),
             };
-            if applied.upstream_status >= 400 || applied.soap_fault.is_some() {
+            if crate::client::soap_mutation_apply_failed(
+                &applied,
+                update_request.method,
+                &update_request.namespace,
+            ) {
                 return Ok(contract::error_with_detail(
                     AdManagerError::UpstreamApi {
                         status: applied.upstream_status,
@@ -2287,7 +2298,7 @@ impl AdManagerServer {
             Ok(value) => value,
             Err(err) => return Ok(contract::error(err, started)),
         };
-        if applied.upstream_status >= 400 || applied.soap_fault.is_some() {
+        if crate::client::soap_apply_failed(&applied) {
             return Ok(contract::error_with_detail(
                 AdManagerError::UpstreamApi {
                     status: applied.upstream_status,
@@ -3325,7 +3336,7 @@ async fn probe_yield_groups(
         &payload_xml,
     )?;
     let applied = server.client().execute_soap_trafficking_plan(&plan).await?;
-    if applied.upstream_status >= 400 || applied.soap_fault.is_some() {
+    if crate::client::soap_apply_failed(&applied) {
         return Ok(blocked_yield_group_response(applied));
     }
 
@@ -3851,7 +3862,7 @@ where
             Ok(applied) => applied,
             Err(err) => return state.into_error_blocked_response(options, &err),
         };
-        if applied.upstream_status >= 400 || applied.soap_fault.is_some() {
+        if crate::client::soap_apply_failed(&applied) {
             return state.into_soap_blocked_response(options, applied);
         }
 
@@ -4989,7 +5000,7 @@ async fn build_yield_group_exclusion_draft(
         .client()
         .execute_soap_trafficking_plan(&read_plan)
         .await?;
-    if read_result.upstream_status >= 400 || read_result.soap_fault.is_some() {
+    if crate::client::soap_apply_failed(&read_result) {
         return Err(AdManagerError::UpstreamApi {
             status: read_result.upstream_status,
             message: crate::client::soap_error_message(&read_result),
