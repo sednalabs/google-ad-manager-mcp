@@ -14,8 +14,8 @@ if ($Version -eq "latest") {
     $Version = $release.tag_name
 }
 
-if ($Version -notmatch '^v[0-9]') {
-    throw "Release version must look like v0.1.1"
+if ($Version -notmatch '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?(\+[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$') {
+    throw "Release version must be a complete semantic version such as v0.1.1"
 }
 
 if (-not [Environment]::Is64BitOperatingSystem) {
@@ -48,14 +48,13 @@ try {
 
     $expanded = Join-Path $tempDir "expanded"
     Expand-Archive -Path $archivePath -DestinationPath $expanded
-    $binary = Get-ChildItem -Path $expanded -Filter "google-ad-manager-mcp.exe" -Recurse |
-        Select-Object -First 1
-    if (-not $binary) {
+    $binaryPath = Join-Path $expanded "google-ad-manager-mcp.exe"
+    if (-not (Test-Path -LiteralPath $binaryPath -PathType Leaf)) {
         throw "Release archive did not contain google-ad-manager-mcp.exe"
     }
 
     New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
-    Copy-Item $binary.FullName (Join-Path $InstallDir "google-ad-manager-mcp.exe") -Force
+    Copy-Item $binaryPath (Join-Path $InstallDir "google-ad-manager-mcp.exe") -Force
     Write-Host "Installed google-ad-manager-mcp $Version to $InstallDir\google-ad-manager-mcp.exe"
     Write-Host "Use this executable as the command in your MCP client configuration."
     if (($env:PATH -split ';') -notcontains $InstallDir) {

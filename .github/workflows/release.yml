@@ -51,6 +51,10 @@ jobs:
           )"
 
           if [[ "${GITHUB_EVENT_NAME}" == "push" ]]; then
+            if [[ "${{ github.event.created }}" != "true" || "${{ github.event.forced }}" == "true" ]]; then
+              echo "Tag-triggered releases require a newly created, unforced tag" >&2
+              exit 1
+            fi
             target_ref="${GITHUB_SHA}"
             tag_name="${GITHUB_REF_NAME}"
             prerelease="false"
@@ -334,27 +338,44 @@ jobs:
           release_title="${{ needs.prepare.outputs.release_title }}"
           target_ref="${{ needs.prepare.outputs.target_ref }}"
 
-          if gh release view "${tag_name}" --repo "${repo}" >/dev/null 2>&1; then
-            echo "Release ${tag_name} already exists; refusing to replace immutable release assets" >&2
-            exit 1
+          resume_draft="false"
+          if release_json=$(gh api "repos/${repo}/releases/tags/${tag_name}" 2>/dev/null); then
+            is_draft=$(jq -r '.draft' <<<"${release_json}")
+            existing_target=$(jq -r '.target_commitish' <<<"${release_json}")
+            if [[ "${is_draft}" != "true" ]]; then
+              echo "Published release ${tag_name} already exists; refusing to replace immutable assets" >&2
+              exit 1
+            fi
+            if [[ "${existing_target}" != "${target_ref}" ]]; then
+              echo "Draft ${tag_name} targets ${existing_target}, expected ${target_ref}; refusing to modify it" >&2
+              exit 1
+            fi
+            resume_draft="true"
           fi
 
-          if [[ "${GITHUB_EVENT_NAME}" != "push" ]] && \
+          if [[ "${resume_draft}" != "true" && "${GITHUB_EVENT_NAME}" != "push" ]] && \
              gh api "repos/${repo}/git/ref/tags/${tag_name}" >/dev/null 2>&1; then
             echo "Tag ${tag_name} already exists; refusing to attach a new release to an unexpected tag" >&2
             exit 1
           fi
 
-          gh release create "${tag_name}" \
-            --repo "${repo}" \
-            --draft \
-            --title "${release_title}" \
-            --notes-file release/RELEASE_NOTES.md \
-            --target "${target_ref}" \
-            release/*.tar.gz release/*.zip release/install.sh release/install.ps1 \
-            release/SHA256SUMS release/RELEASE-METADATA.json \
-            release/RELEASE-METADATA.txt release/SHA256SUMS.sigstore.json \
-            --repo "${repo}"
+          release_assets=(
+            release/*.tar.gz release/*.zip release/install.sh release/install.ps1
+            release/SHA256SUMS release/RELEASE-METADATA.json
+            release/RELEASE-METADATA.txt release/SHA256SUMS.sigstore.json
+          )
+          if [[ "${resume_draft}" == "true" ]]; then
+            gh release edit "${tag_name}" --repo "${repo}" \
+              --title "${release_title}" --notes-file release/RELEASE_NOTES.md
+            gh release upload "${tag_name}" "${release_assets[@]}" --clobber --repo "${repo}"
+          else
+            gh release create "${tag_name}" "${release_assets[@]}" \
+              --repo "${repo}" \
+              --draft \
+              --title "${release_title}" \
+              --notes-file release/RELEASE_NOTES.md \
+              --target "${target_ref}"
+          fi
 
           publish_flags=(--latest)
           if [[ "${{ needs.prepare.outputs.prerelease }}" == "true" ]]; then

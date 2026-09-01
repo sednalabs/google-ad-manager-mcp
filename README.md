@@ -5,7 +5,7 @@ Manager workflows. It is built on `mcp-toolkit-rs`, the official Google Ad
 Manager API (Beta), and the official Google Ad Manager SOAP API for classic
 trafficking operations that are not yet available through REST.
 
-The current alpha focuses on a small useful surface:
+The current release focuses on a small useful surface:
 
 - inspect Google Ad Manager credential readiness without exposing secrets;
 - discover accessible Ad Manager networks;
@@ -63,9 +63,7 @@ sh install.sh
 On Windows PowerShell:
 
 ```powershell
-Invoke-WebRequest \
-  https://github.com/sednalabs/google-ad-manager-mcp/releases/latest/download/install.ps1 \
-  -OutFile install.ps1
+Invoke-WebRequest https://github.com/sednalabs/google-ad-manager-mcp/releases/latest/download/install.ps1 -OutFile install.ps1
 .\install.ps1
 ```
 

@@ -74,6 +74,10 @@ jobs:
           set -euo pipefail
           bash -n scripts/install-release.sh
           scripts/install-release.sh --help >/dev/null
+          if scripts/install-release.sh --version '../v0.1.1' >/dev/null 2>&1; then
+            echo "Unix installer accepted an unsafe release version" >&2
+            exit 1
+          fi
           # shellcheck disable=SC2016
           pwsh -NoProfile -Command '
             $tokens = $null
@@ -86,5 +90,14 @@ jobs:
             if ($errors.Count) {
               $errors | ForEach-Object { Write-Error $_ }
               exit 1
+            }
+            try {
+              & scripts/install-release.ps1 -Version "../v0.1.1" | Out-Null
+              Write-Error "PowerShell installer accepted an unsafe release version"
+              exit 1
+            } catch {
+              if ($_.Exception.Message -notlike "*complete semantic version*") {
+                throw
+              }
             }
           '

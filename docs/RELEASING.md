@@ -15,16 +15,19 @@ The repository provides `.github/workflows/release.yml` for release builds.
 The workflow:
 
 1. verifies that the requested tag matches `Cargo.toml`;
-2. builds standard-runner release bundles for:
+2. rejects reused or force-updated tag events and requires the target commit to
+   be contained by `main`;
+3. builds standard-runner release bundles for:
    - Linux x86_64
    - Linux arm64
    - macOS arm64
    - macOS x86_64
    - Windows x86_64
-3. creates a draft, attaches those bundles, checksum-verifying install helpers,
+4. creates or resumes an exact-target draft, attaches those bundles,
+   checksum-verifying install helpers,
    `SHA256SUMS`, `SHA256SUMS.sigstore.json`, and release metadata, then publishes
    it under GitHub's immutable-release policy; and
-4. keeps the install path aligned with the tagged source release.
+5. keeps the install path aligned with the tagged source release.
 
 ## Expected tag format
 

@@ -41,15 +41,15 @@ command -v curl >/dev/null 2>&1 || { echo "curl is required" >&2; exit 1; }
 command -v tar >/dev/null 2>&1 || { echo "tar is required" >&2; exit 1; }
 
 if [ "$version" = "latest" ]; then
-  latest_url=$(curl --proto '=https' --tlsv1.2 -fsSIL -o /dev/null -w '%{url_effective}' \
+  latest_url=$(curl --proto '=https' --proto-redir '=https' -fsSIL -o /dev/null -w '%{url_effective}' \
     "https://github.com/${repository}/releases/latest")
   version=${latest_url##*/}
 fi
 
-case "$version" in
-  v[0-9]*) ;;
-  *) echo "release version must look like v0.1.1" >&2; exit 2 ;;
-esac
+if ! printf '%s\n' "$version" | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?(\+[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$'; then
+  echo "release version must be a complete semantic version such as v0.1.1" >&2
+  exit 2
+fi
 
 os=$(uname -s)
 arch=$(uname -m)
@@ -68,8 +68,8 @@ tmp_dir=$(mktemp -d)
 cleanup() { rm -rf "$tmp_dir"; }
 trap cleanup EXIT HUP INT TERM
 
-curl --proto '=https' --tlsv1.2 -fsSL "${base_url}/${asset}" -o "${tmp_dir}/${asset}"
-curl --proto '=https' --tlsv1.2 -fsSL "${base_url}/SHA256SUMS" -o "${tmp_dir}/SHA256SUMS"
+curl --proto '=https' --proto-redir '=https' -fsSL "${base_url}/${asset}" -o "${tmp_dir}/${asset}"
+curl --proto '=https' --proto-redir '=https' -fsSL "${base_url}/SHA256SUMS" -o "${tmp_dir}/SHA256SUMS"
 
 expected=$(awk -v name="$asset" '$2 == name || $2 == "*" name { print $1; exit }' "${tmp_dir}/SHA256SUMS")
 [ -n "$expected" ] || { echo "checksum for ${asset} not found" >&2; exit 1; }
