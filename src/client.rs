@@ -21,6 +21,7 @@ use crate::error::AdManagerError;
 pub const DEFAULT_SOAP_API_VERSION: &str = "v202605";
 const MAX_SOAP_PAYLOAD_XML_BYTES: usize = 256 * 1024;
 const MAX_SOAP_RESPONSE_XML_BYTES: usize = 200 * 1024;
+const MAX_SOAP_RESPONSE_XML_NODES: u32 = 16_384;
 const SOAP_ENVELOPE_NAMESPACE: &str = concat!("http", "://schemas.xmlsoap.org/soap/envelope/");
 const NETWORK_HIERARCHY_FIELDS: &str = "name,networkCode,effectiveRootAdUnit";
 const AD_UNIT_HIERARCHY_FIELDS: &str = "adUnits.name,adUnits.parentAdUnit,adUnits.parentPath.parentAdUnit,adUnits.status,adUnits.hasChildren,adUnits.updateTime,nextPageToken";
@@ -2117,10 +2118,18 @@ pub(crate) fn soap_apply_failed(result: &SoapTraffickingApplyResult) -> bool {
             .is_some_and(|value| !value.is_empty())
 }
 
-pub(crate) fn soap_mutation_apply_failed(result: &SoapTraffickingApplyResult) -> bool {
+pub(crate) fn soap_mutation_apply_failed(
+    result: &SoapTraffickingApplyResult,
+    expected_method: &str,
+    expected_namespace: &str,
+) -> bool {
     soap_apply_failed(result)
         || result.response_truncated
-        || xml_response_contains_unterminated_markup(&result.upstream_response_xml)
+        || !soap_mutation_response_matches(
+            &result.upstream_response_xml,
+            expected_method,
+            expected_namespace,
+        )
 }
 
 fn contains_xml_open_tag(value: &str, tag: &str) -> bool {
@@ -2140,30 +2149,55 @@ fn contains_xml_open_tag(value: &str, tag: &str) -> bool {
     false
 }
 
-fn xml_response_contains_unterminated_markup(value: &str) -> bool {
-    let mut cursor = 0;
-    while let Some(relative_start) = value[cursor..].find('<') {
-        let start = cursor + relative_start;
-        if value[start..].starts_with("<!--") {
-            if !value[start..].contains("-->") {
-                return true;
-            }
-            cursor = xml_markup_end(value, start);
-            continue;
-        }
-        if value[start..].starts_with("<![CDATA[") {
-            if !value[start..].contains("]]>") {
-                return true;
-            }
-            cursor = xml_markup_end(value, start);
-            continue;
-        }
-        if xml_tag_end(value, start).is_none() {
-            return true;
-        }
-        cursor = xml_tag_end(value, start).map_or(value.len(), |end| end + 1);
+fn soap_mutation_response_matches(
+    value: &str,
+    expected_method: &str,
+    expected_namespace: &str,
+) -> bool {
+    if value.trim().is_empty() {
+        return false;
     }
-    false
+
+    let options = roxmltree::ParsingOptions {
+        allow_dtd: false,
+        nodes_limit: MAX_SOAP_RESPONSE_XML_NODES,
+        ..roxmltree::ParsingOptions::default()
+    };
+    let Ok(document) = roxmltree::Document::parse_with_options(value, options) else {
+        return false;
+    };
+    let envelope = document.root_element();
+    if envelope.tag_name().name() != "Envelope"
+        || envelope.tag_name().namespace() != Some(SOAP_ENVELOPE_NAMESPACE)
+    {
+        return false;
+    }
+
+    let mut bodies = envelope
+        .children()
+        .filter(|node| node.is_element() && node.tag_name().name() == "Body");
+    let Some(body) = bodies.next() else {
+        return false;
+    };
+    if body.tag_name().namespace() != Some(SOAP_ENVELOPE_NAMESPACE)
+        || bodies.next().is_some()
+        || body.descendants().any(|node| {
+            node.is_element()
+                && node.tag_name().name() == "Fault"
+                && node.tag_name().namespace() == Some(SOAP_ENVELOPE_NAMESPACE)
+        })
+    {
+        return false;
+    }
+
+    let expected_response = format!("{expected_method}Response");
+    let mut body_elements = body.children().filter(|node| node.is_element());
+    let Some(response) = body_elements.next() else {
+        return false;
+    };
+    body_elements.next().is_none()
+        && response.tag_name().name() == expected_response
+        && response.tag_name().namespace() == Some(expected_namespace)
 }
 
 pub(crate) fn soap_error_message_with_truncation(
@@ -2368,8 +2402,9 @@ mod tests {
         RestWriteResource, SOAP_ENVELOPE_NAMESPACE, SoapTraffickingApplyResult,
         SoapTraffickingOperation, UpstreamAuthMode, ad_unit_hierarchy_list_query,
         auth_source_for_mode, classify_soap_impact, clip_message, clip_message_with_truncation,
-        clip_xml_response, extract_xml_tag, soap_apply_failed, validate_operation_name,
-        validate_report_result_name, validate_rest_write_body, validate_soap_payload_xml,
+        clip_xml_response, extract_xml_tag, soap_apply_failed, soap_mutation_apply_failed,
+        validate_operation_name, validate_report_result_name, validate_rest_write_body,
+        validate_soap_payload_xml,
     };
     use crate::Settings;
     use serde_json::json;
@@ -2943,7 +2978,11 @@ mod tests {
             soap_fault: None,
         };
         assert!(!soap_apply_failed(&truncated));
-        assert!(soap_mutation_apply_failed(&truncated));
+        assert!(soap_mutation_apply_failed(
+            &truncated,
+            "updateOrders",
+            "https://www.google.com/apis/ads/publisher/v202605"
+        ));
 
         let malformed_before_fault = SoapTraffickingApplyResult {
             upstream_status: 200,
@@ -2953,7 +2992,66 @@ mod tests {
             response_time: None,
             soap_fault: None,
         };
-        assert!(soap_mutation_apply_failed(&malformed_before_fault));
+        assert!(soap_mutation_apply_failed(
+            &malformed_before_fault,
+            "updateOrders",
+            "https://www.google.com/apis/ads/publisher/v202605"
+        ));
+    }
+
+    #[test]
+    fn soap_mutation_requires_well_formed_method_response_envelope() {
+        let namespace = "https://www.google.com/apis/ads/publisher/v202605";
+        let result = |xml: &str| SoapTraffickingApplyResult {
+            upstream_status: 200,
+            upstream_response_xml: xml.to_string(),
+            response_truncated: false,
+            request_id: None,
+            response_time: None,
+            soap_fault: extract_xml_tag(xml, "faultstring"),
+        };
+        let accepted = format!(
+            r#"<soap:Envelope xmlns:soap="{SOAP_ENVELOPE_NAMESPACE}" xmlns:gam="{namespace}"><soap:Body><gam:updateOrdersResponse><gam:rval/></gam:updateOrdersResponse></soap:Body></soap:Envelope>"#
+        );
+        assert!(!soap_mutation_apply_failed(
+            &result(&accepted),
+            "updateOrders",
+            namespace
+        ));
+
+        for rejected in [
+            "",
+            "<Envelope><Body><updateOrdersResponse></Body></Envelope>",
+            &format!(
+                r#"<soap:Envelope xmlns:soap="{SOAP_ENVELOPE_NAMESPACE}" xmlns:gam="{namespace}"><soap:Body><gam:createOrdersResponse/></soap:Body></soap:Envelope>"#
+            ),
+            &format!(
+                r#"<soap:Envelope xmlns:soap="{SOAP_ENVELOPE_NAMESPACE}"><soap:Body/><soap:Body/></soap:Envelope>"#
+            ),
+            &format!(
+                r#"<soap:Envelope xmlns:soap="{SOAP_ENVELOPE_NAMESPACE}" xmlns:gam="{namespace}" xmlns:other="urn:other"><soap:Body><gam:updateOrdersResponse/></soap:Body><other:Body/></soap:Envelope>"#
+            ),
+            &format!(
+                r#"<soap:Envelope xmlns:soap="{SOAP_ENVELOPE_NAMESPACE}" xmlns:gam="{namespace}"><soap:Body><gam:updateOrdersResponse/><gam:unexpected/></soap:Body></soap:Envelope>"#
+            ),
+            &format!(
+                r#"<!DOCTYPE soap:Envelope><soap:Envelope xmlns:soap="{SOAP_ENVELOPE_NAMESPACE}" xmlns:gam="{namespace}"><soap:Body><gam:updateOrdersResponse/></soap:Body></soap:Envelope>"#
+            ),
+        ] {
+            assert!(
+                soap_mutation_apply_failed(&result(rejected), "updateOrders", namespace),
+                "unexpectedly accepted {rejected:?}"
+            );
+        }
+
+        let fault = format!(
+            r#"<soap:Envelope xmlns:soap="{SOAP_ENVELOPE_NAMESPACE}"><soap:Body><soap:Fault><faultcode>soap:Server</faultcode></soap:Fault></soap:Body></soap:Envelope>"#
+        );
+        assert!(soap_mutation_apply_failed(
+            &result(&fault),
+            "updateOrders",
+            namespace
+        ));
     }
 
     #[test]

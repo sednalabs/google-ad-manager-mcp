@@ -1657,7 +1657,12 @@ impl AdManagerServer {
             Err(err) => return Ok(contract::error(err, started)),
         };
         if crate::client::soap_apply_failed(&applied)
-            || (plan.mutating && crate::client::soap_mutation_apply_failed(&applied))
+            || (plan.mutating
+                && crate::client::soap_mutation_apply_failed(
+                    &applied,
+                    plan.method,
+                    &plan.namespace,
+                ))
         {
             return Ok(contract::error_with_detail(
                 AdManagerError::UpstreamApi {
@@ -1838,7 +1843,11 @@ impl AdManagerServer {
                 Ok(value) => value,
                 Err(err) => return Ok(contract::error(err, started)),
             };
-            if crate::client::soap_mutation_apply_failed(&applied) {
+            if crate::client::soap_mutation_apply_failed(
+                &applied,
+                update_request.method,
+                &update_request.namespace,
+            ) {
                 return Ok(contract::error_with_detail(
                     AdManagerError::UpstreamApi {
                         status: applied.upstream_status,

@@ -19,6 +19,7 @@ mcp-toolkit-core = { version = "0.1.0", git = "https://github.com/sednalabs/mcp-
 mcp-toolkit-observability = { version = "0.1.0", git = "https://github.com/sednalabs/mcp-toolkit-rs", rev = "20ae7a1791c4cd54a91dcca87d0a3acd5c0c53a7", package = "mcp-toolkit-observability", features = ["tracing-bridge"] }
 mcp-toolkit-scratchpad = { version = "0.1.0", git = "https://github.com/sednalabs/mcp-toolkit-rs", rev = "20ae7a1791c4cd54a91dcca87d0a3acd5c0c53a7", package = "mcp-toolkit-scratchpad", features = ["tokio"] }
 reqwest = { version = "0.12.24", default-features = false, features = ["http2", "json", "rustls-tls"] }
+roxmltree = "0.21.1"
 schemars = "1.2.1"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
