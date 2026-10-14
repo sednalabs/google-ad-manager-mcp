@@ -62,7 +62,7 @@ jobs:
       - name: Install governance tools
         if: ${{ matrix.lane.tool != '' }}
         # taiki-e/install-action v2
-        uses: taiki-e/install-action@742a3317eac7bd62f91cd888b4eead5e784ba833
+        uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe
         with:
           tool: ${{ matrix.lane.tool }}
 
