@@ -327,6 +327,50 @@ fn find_tools_exposes_dated_delivery_report_preview_schema() {
     assert!(!apply_tools.contains(&"gam_report_run"));
     assert!(!apply_tools.contains(&"gam_dated_delivery_report_read"));
     assert_complete_discovery_result_is_bounded(&apply_response);
+
+    for (request_id, query, expected_plan) in [
+        (1004, "Do not preview a dated delivery report", false),
+        (
+            1005,
+            "explain whether to preview a dated delivery report",
+            false,
+        ),
+        (
+            1006,
+            "preview a dated delivery report and show status fields",
+            true,
+        ),
+    ] {
+        let blocked_response = process.call_tool(
+            request_id,
+            "find_tools",
+            json!({
+                "query":query,
+                "group":"reports",
+                "read_only":false,
+                "limit":10,
+                "include_schema":true
+            }),
+        );
+        let blocked_data = &blocked_response["result"]["structuredContent"]["data"];
+        let blocked_tools = sorted_string_values(&blocked_data["openai_allowed_tools"]);
+        assert_eq!(
+            blocked_tools.contains(&"gam_dated_delivery_report_plan"),
+            expected_plan,
+            "unexpected dated preview plan exposure: {query}"
+        );
+        for name in [
+            "gam_dated_delivery_report_apply",
+            "gam_dated_delivery_report_read",
+            "gam_report_run",
+        ] {
+            assert!(
+                !blocked_tools.contains(&name),
+                "blocked or preview-only request exposed {name}: {query}"
+            );
+        }
+        assert_complete_discovery_result_is_bounded(&blocked_response);
+    }
 }
 
 #[test]

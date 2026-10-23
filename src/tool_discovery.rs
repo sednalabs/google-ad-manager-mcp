@@ -204,25 +204,45 @@ fn has_dated_delivery_report_read_action(query: Option<&str>) -> bool {
     let Some(query) = query else {
         return false;
     };
-    let normalized = normalize_report_discovery_query(query).text;
-    normalized
+    let normalized_query = normalize_report_discovery_query(query);
+    let mut terms = normalized_query
+        .text
         .split(|character: char| !character.is_ascii_alphanumeric())
-        .any(|term| {
-            matches!(
-                term,
-                "read" | "status" | "download" | "inspect" | "fetch" | "get" | "view"
-            )
-        })
+        .filter(|term| !term.is_empty())
+        .collect::<Vec<_>>();
+    if terms.first() == Some(&"please") {
+        terms.remove(0);
+    }
+    let action = terms.first().is_some_and(|term| {
+        matches!(
+            *term,
+            "read" | "download" | "inspect" | "fetch" | "get" | "view"
+        )
+    });
+    action && !query_blocks_report_authority(&terms, &terms.join(" "))
 }
 
 fn has_dated_delivery_preview_action(query: Option<&str>) -> bool {
     let Some(query) = query else {
         return false;
     };
-    normalize_report_discovery_query(query)
+    let normalized_query = normalize_report_discovery_query(query);
+    let mut terms = normalized_query
         .text
         .split(|character: char| !character.is_ascii_alphanumeric())
-        .any(|term| matches!(term, "preview" | "plan" | "prepare"))
+        .filter(|term| !term.is_empty())
+        .collect::<Vec<_>>();
+    if terms.first() == Some(&"please") {
+        terms.remove(0);
+    }
+    let Some(action) = terms.first() else {
+        return false;
+    };
+    if !matches!(*action, "preview" | "plan" | "prepare") {
+        return false;
+    }
+    terms.remove(0);
+    !query_blocks_report_authority(&terms, &terms.join(" "))
 }
 
 fn has_explicit_saved_report_context(query: Option<&str>) -> bool {
