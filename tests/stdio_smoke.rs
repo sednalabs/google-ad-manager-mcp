@@ -17,6 +17,9 @@ fn stdio_initializes_and_lists_tools() {
         "gam_ad_unit_dependency_probe",
         "gam_ad_unit_retirement_assessment",
         "gam_report_run",
+        "gam_dated_delivery_report_plan",
+        "gam_dated_delivery_report_apply",
+        "gam_dated_delivery_report_read",
         "gam_change_history",
         "gam_change_history_inspect",
         "gam_report_operation_poll",
@@ -108,6 +111,12 @@ fn find_tools_is_semantic_compact_and_recoverable() {
             "ingest line item delivery into an existing scratchpad session",
             "gam_scratchpad_ingest_soap_line_items",
             false,
+        ),
+        (
+            10,
+            "preview a bounded dated delivery report for line items",
+            "gam_dated_delivery_report_plan",
+            true,
         ),
     ] {
         let response = process.call_tool(
@@ -243,6 +252,36 @@ fn find_tools_is_semantic_compact_and_recoverable() {
         content_projection["direct_matches"][0]["tool_already_selected"],
         true
     );
+}
+
+#[test]
+fn find_tools_exposes_dated_delivery_report_preview_schema() {
+    let mut process = StdioMcpProcess::start(env!("CARGO_BIN_EXE_google-ad-manager-mcp"));
+    let response = process.call_tool(
+        1001,
+        "find_tools",
+        json!({
+            "query":"preview a bounded dated delivery report for exact line items",
+            "group":"reports",
+            "read_only":true,
+            "limit":1,
+            "include_schema":true
+        }),
+    );
+    let data = &response["result"]["structuredContent"]["data"];
+    assert_eq!(
+        sorted_direct_names(data),
+        vec!["gam_dated_delivery_report_plan"]
+    );
+    assert_eq!(
+        sorted_schema_names(data),
+        vec!["gam_dated_delivery_report_plan"]
+    );
+    assert!(
+        data["schemas"]["gam_dated_delivery_report_plan"]["inputSchema"]["properties"]["request"]
+            .is_object()
+    );
+    assert_complete_discovery_result_is_bounded(&response);
 }
 
 #[test]
