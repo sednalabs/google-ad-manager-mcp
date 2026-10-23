@@ -416,20 +416,163 @@
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
-          "verify_token": {
-            "default": false,
-            "description": "When true, acquire an access token without making an Ad Manager API call.",
-            "type": "boolean"
-          },
           "verify_access": {
             "default": false,
             "description": "When true, make a live low-cost Ad Manager API call to prove access.",
+            "type": "boolean"
+          },
+          "verify_token": {
+            "default": false,
+            "description": "When true, acquire an access token without making an Ad Manager API call.",
             "type": "boolean"
           }
         },
         "type": "object"
       },
       "name": "gam_auth_status"
+    },
+    {
+      "description": "Read a bounded Google Ad Manager Change_History window with exact entity filters, provider timestamps, and explicit capped-versus-complete coverage. The API returns entity, operation, and user IDs, not changed field names or old/new values.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "end_time": {
+            "description": "Inclusive RFC3339 end bound. The offset is required.",
+            "type": "string"
+          },
+          "entity_id": {
+            "description": "Optional exact numeric entity ID.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "entity_types": {
+            "default": [],
+            "description": "Optional Ad Manager Change_History entity-type allowlist.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "max_events": {
+            "description": "Maximum events to return. Values must be between 1 and 500.",
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "network_code": {
+            "description": "Raw Ad Manager network code.",
+            "type": "string"
+          },
+          "start_time": {
+            "description": "Inclusive RFC3339 start bound. The offset is required.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "network_code",
+          "start_time",
+          "end_time"
+        ],
+        "type": "object"
+      },
+      "name": "gam_change_history"
+    },
+    {
+      "description": "Inspect operator-supplied structured field-level change-history rows with asserted source hash and row references. This tool never opens files or fetches history; sensitive values are redacted by default.",
+      "inputSchema": {
+        "$defs": {
+          "ChangeHistoryFieldChange": {
+            "properties": {
+              "current": true,
+              "field": {
+                "type": "string"
+              },
+              "previous": true
+            },
+            "required": [
+              "field",
+              "previous",
+              "current"
+            ],
+            "type": "object"
+          },
+          "ChangeHistoryInputRow": {
+            "properties": {
+              "change_date_time": {
+                "type": "string"
+              },
+              "changes": {
+                "items": {
+                  "$ref": "#/$defs/ChangeHistoryFieldChange"
+                },
+                "type": "array"
+              },
+              "entity_id": {
+                "type": "string"
+              },
+              "entity_type": {
+                "type": "string"
+              },
+              "operation": {
+                "type": "string"
+              },
+              "row_ref": {
+                "type": "string"
+              },
+              "user_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "row_ref",
+              "change_date_time",
+              "entity_type",
+              "entity_id",
+              "operation",
+              "changes"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "acknowledge_sensitive_values": {
+            "default": false,
+            "description": "Explicit per-call acknowledgment required when include_values is true.",
+            "type": "boolean"
+          },
+          "include_values": {
+            "default": false,
+            "description": "Return supplied previous/current values only when the server's sensitive-history gate is enabled and the per-call acknowledgment is true.",
+            "type": "boolean"
+          },
+          "rows": {
+            "description": "Supplied row references and authored field-level changes. The adapter does not open files or fetch source data.",
+            "items": {
+              "$ref": "#/$defs/ChangeHistoryInputRow"
+            },
+            "type": "array"
+          },
+          "source_sha256": {
+            "description": "SHA-256 asserted by the operator for the supplied source export.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source_sha256",
+          "rows"
+        ],
+        "type": "object"
+      },
+      "name": "gam_change_history_inspect"
     },
     {
       "description": "Read-only proof for whether exact Ad Manager ad units appear exposed to AdSense, private auctions, private deals, or yield groups, while naming unsupported protection surfaces explicitly.",
