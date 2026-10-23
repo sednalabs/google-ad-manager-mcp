@@ -194,10 +194,14 @@ fn has_dated_delivery_report_context(query: Option<&str>) -> bool {
     let terms = normalized
         .split(|character: char| !character.is_ascii_alphanumeric())
         .filter(|term| !term.is_empty())
-        .collect::<BTreeSet<_>>();
-    (terms.contains("dated") || terms.contains("daily") || terms.contains("date"))
-        && terms.contains("delivery")
-        && (terms.contains("report") || terms.contains("reports"))
+        .collect::<Vec<_>>();
+    terms_have_dated_delivery_report_context(&terms)
+}
+
+fn terms_have_dated_delivery_report_context(terms: &[&str]) -> bool {
+    (terms.contains(&"dated") || terms.contains(&"daily") || terms.contains(&"date"))
+        && terms.contains(&"delivery")
+        && (terms.contains(&"report") || terms.contains(&"reports"))
 }
 
 fn has_dated_delivery_report_read_action(query: Option<&str>) -> bool {
@@ -1037,11 +1041,7 @@ fn reference_has_non_report_relation_target(terms: &[&str], reference_index: usi
 }
 
 fn is_dated_delivery_line_item_scope(terms: &[&str], target: &[&str]) -> bool {
-    let has_dated_delivery_report =
-        (terms.contains(&"dated") || terms.contains(&"daily") || terms.contains(&"date"))
-            && terms.contains(&"delivery")
-            && (terms.contains(&"report") || terms.contains(&"reports"));
-    has_dated_delivery_report
+    terms_have_dated_delivery_report_context(terms)
         && target.iter().any(|term| matches!(*term, "line" | "lines"))
         && target.iter().any(|term| matches!(*term, "item" | "items"))
         && target
@@ -1653,13 +1653,14 @@ fn report_start_action_tail(
     if !report_context {
         return ReportStartActionTail::NoCandidate;
     }
+    let allow_dated_modifier = terms_have_dated_delivery_report_context(terms);
     let term_spans = ascii_alphanumeric_term_spans(clause_text);
     for (index, term) in terms.iter().enumerate() {
         if !is_report_start_action(term) {
             continue;
         }
         let object_terms = &terms[index + 1..];
-        let Some(consumed) = report_start_object_end(object_terms) else {
+        let Some(consumed) = report_start_object_end(object_terms, allow_dated_modifier) else {
             continue;
         };
         let report_index = index + consumed;
@@ -1679,7 +1680,7 @@ fn report_start_action_tail(
     ReportStartActionTail::NoCandidate
 }
 
-fn report_start_object_end(object_terms: &[&str]) -> Option<usize> {
+fn report_start_object_end(object_terms: &[&str], allow_dated_modifier: bool) -> Option<usize> {
     if let Some(consumed) = campaign_delivery_audit_report_object_end(object_terms) {
         return Some(consumed);
     }
@@ -1687,7 +1688,9 @@ fn report_start_object_end(object_terms: &[&str]) -> Option<usize> {
         if matches!(*candidate, "report" | "reports") {
             return Some(candidate_index + 1);
         }
-        if !is_report_object_modifier(candidate) {
+        if !is_report_object_modifier(candidate)
+            && !(allow_dated_modifier && matches!(*candidate, "dated" | "date"))
+        {
             break;
         }
     }
@@ -2083,6 +2086,7 @@ fn report_start_tail_safety(
         .iter()
         .all(|term| matches!(*term, "for" | "exact" | "line" | "lines" | "item" | "items"))
         && terms.first() == Some(&"for")
+        && terms_have_dated_delivery_report_context(all_terms)
     {
         return ReportStartTailSafety::Safe;
     }
@@ -2230,8 +2234,6 @@ fn is_report_object_modifier(term: &str) -> bool {
             | "latest"
             | "current"
             | "daily"
-            | "dated"
-            | "date"
             | "weekly"
             | "monthly"
             | "quarter"
@@ -3555,6 +3557,13 @@ mod tests {
             report_discovery_intent(Some("run a dated delivery report for exact line items")),
             ReportDiscoveryIntent::ExplicitNewRun
         );
+        for query in ["run a report for exact line items", "run a date report"] {
+            assert_eq!(
+                report_discovery_intent(Some(query)),
+                ReportDiscoveryIntent::Unspecified,
+                "unrelated report query gained run authority: {query}"
+            );
+        }
         for query in [
             "start a report",
             "run the report",

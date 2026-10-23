@@ -371,6 +371,35 @@ fn find_tools_exposes_dated_delivery_report_preview_schema() {
         }
         assert_complete_discovery_result_is_bounded(&blocked_response);
     }
+
+    for (request_id, query) in [
+        (1007, "run a report for exact line items"),
+        (1008, "run a date report"),
+    ] {
+        let unrelated_response = process.call_tool(
+            request_id,
+            "find_tools",
+            json!({
+                "query":query,
+                "group":"reports",
+                "read_only":false,
+                "limit":10,
+                "include_schema":true
+            }),
+        );
+        let unrelated_data = &unrelated_response["result"]["structuredContent"]["data"];
+        let unrelated_tools = sorted_string_values(&unrelated_data["openai_allowed_tools"]);
+        assert!(!unrelated_tools.contains(&"gam_report_run"), "{query}");
+        assert!(
+            !unrelated_tools.contains(&"gam_dated_delivery_report_plan"),
+            "{query}"
+        );
+        assert!(
+            !unrelated_tools.contains(&"gam_dated_delivery_report_apply"),
+            "{query}"
+        );
+        assert_complete_discovery_result_is_bounded(&unrelated_response);
+    }
 }
 
 #[test]
