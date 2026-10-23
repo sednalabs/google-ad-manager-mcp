@@ -8625,6 +8625,193 @@ mod tests {
         assert!(default_read_only["schemas"].get("gam_report_run").is_none());
     }
 
+    #[tokio::test]
+    async fn scratchpad_report_rows_preserve_values_and_reject_unsafe_sql() {
+        let server = AdManagerServer::new(crate::Settings::default())
+            .expect("scratchpad integration server");
+        let session_id = format!("report_rows_{}", std::process::id());
+        let opened = server
+            .gam_scratchpad_open_session(Parameters(ScratchpadSessionArgs {
+                session_id: session_id.clone(),
+            }))
+            .await
+            .expect("open scratchpad session");
+        assert_eq!(opened.is_error, None);
+
+        let report_result = json!({
+            "rows": [
+                {"dimensionValues":[{"value":"2026-10-21"}],"metricValues":[{"value":"banner"}],"values":["Leaderboard", null, 18446744073709551615u64]},
+                {"dimensionValues":[{"value":"2026-10-22"}],"metricValues":[{"value":"newsletter"}],"values":["MREC", "", 9223372036854775808u64]},
+                {"dimensionValues":[{"value":"2026-10-23"}],"metricValues":[{"value":"banner"}],"values":["Half page", "ok", 7]}
+            ]
+        });
+        let columns = report_rows_ingest_columns();
+        let rows = report_result_rows_for_scratchpad(
+            &report_result,
+            "networks/123/reports/456/results/789",
+        );
+        let sessions = server.scratchpad_sessions().clone();
+        sessions
+            .ingest_rows_with_mode(
+                &session_id,
+                "report_rows",
+                &columns,
+                &rows,
+                ScratchpadIngestMode::Create,
+            )
+            .expect("ingest mapped report rows");
+
+        let first_page = server
+            .gam_scratchpad_query(Parameters(ScratchpadQueryArgs {
+                session_id: session_id.clone(),
+                sql: "SELECT row_index AS item, values_json AS payload FROM report_rows ORDER BY row_index".into(),
+                offset: Some(0),
+                page_size: Some(2),
+            }))
+            .await
+            .expect("query first page")
+            .structured_content
+            .expect("first page structured response");
+        assert_eq!(first_page["ok"], true);
+        assert_eq!(first_page["data"]["row_count_total"], 3);
+        assert_eq!(first_page["data"]["has_more"], true);
+        assert_eq!(first_page["data"]["columns"][0]["name"], "item");
+        assert_eq!(first_page["data"]["columns"][1]["name"], "payload");
+        let payload: Value = serde_json::from_str(
+            first_page["data"]["rows"][0]["payload"]
+                .as_str()
+                .expect("JSON payload remains text"),
+        )
+        .expect("report value JSON parses");
+        assert_eq!(payload[0], "Leaderboard");
+        assert_eq!(payload[1], Value::Null);
+        assert_eq!(payload[2].as_u64(), Some(u64::MAX));
+        let payload: Value = serde_json::from_str(
+            first_page["data"]["rows"][1]["payload"]
+                .as_str()
+                .expect("second JSON payload remains text"),
+        )
+        .expect("second report value JSON parses");
+        assert_eq!(payload[0], "MREC");
+        assert_eq!(payload[2].as_u64(), Some(9_223_372_036_854_775_808));
+
+        let second_page = server
+            .gam_scratchpad_query(Parameters(ScratchpadQueryArgs {
+                session_id: session_id.clone(),
+                sql: "SELECT row_index AS item, values_json AS payload FROM report_rows ORDER BY row_index".into(),
+                offset: Some(2),
+                page_size: Some(2),
+            }))
+            .await
+            .expect("query second page")
+            .structured_content
+            .expect("second page structured response");
+        assert_eq!(second_page["data"]["offset"], 2);
+        assert_eq!(second_page["data"]["rows"].as_array().unwrap().len(), 1);
+        assert_eq!(second_page["data"]["has_more"], false);
+
+        let huge_integer = server
+            .gam_scratchpad_query(Parameters(ScratchpadQueryArgs {
+                session_id: session_id.clone(),
+                sql: "SELECT CAST('340282366920938463463374607431768211455' AS UHUGEINT) AS exact_value".into(),
+                offset: Some(0),
+                page_size: Some(10),
+            }))
+            .await
+            .expect("query unsigned 128-bit boundary")
+            .structured_content
+            .expect("unsigned 128-bit structured response");
+        assert_eq!(huge_integer["ok"], true);
+        assert_eq!(
+            huge_integer["data"]["rows"][0]["exact_value"],
+            "340282366920938463463374607431768211455"
+        );
+
+        let appended_rows = report_result_rows_for_scratchpad(
+            &json!({"rows":[{"values":["Appended", "text", 9]}]}),
+            "networks/123/reports/456/results/790",
+        );
+        sessions
+            .ingest_rows_with_mode(
+                &session_id,
+                "report_rows",
+                &columns,
+                &appended_rows,
+                ScratchpadIngestMode::Append,
+            )
+            .expect("append second report page");
+
+        let before_failed_append = sessions
+            .query_rows(
+                &session_id,
+                "SELECT COUNT(*) AS rows FROM report_rows",
+                0,
+                10,
+            )
+            .expect("count appended report rows");
+        assert_eq!(before_failed_append.rows[0]["rows"], 4);
+
+        let incompatible_columns = vec![ScratchpadIngestColumn {
+            name: "different_column".into(),
+            logical_type: "string".into(),
+        }];
+        let incompatible_rows = vec![serde_json::Map::from_iter([(
+            "different_column".into(),
+            json!("must not append"),
+        )])];
+        assert!(
+            sessions
+                .ingest_rows_with_mode(
+                    &session_id,
+                    "report_rows",
+                    &incompatible_columns,
+                    &incompatible_rows,
+                    ScratchpadIngestMode::Append,
+                )
+                .is_err()
+        );
+
+        for unsafe_sql in [
+            "DELETE FROM report_rows",
+            "SELECT * FROM read_csv_auto('/tmp/not-a-real-scratchpad-input.csv')",
+        ] {
+            let denied = server
+                .gam_scratchpad_query(Parameters(ScratchpadQueryArgs {
+                    session_id: session_id.clone(),
+                    sql: unsafe_sql.into(),
+                    offset: Some(0),
+                    page_size: Some(10),
+                }))
+                .await
+                .expect("unsafe query returns structured denial");
+            assert_eq!(
+                denied.is_error,
+                Some(true),
+                "SQL was not rejected: {unsafe_sql}"
+            );
+        }
+
+        let final_count = sessions
+            .query_rows(
+                &session_id,
+                "SELECT COUNT(*) AS rows FROM report_rows",
+                0,
+                10,
+            )
+            .expect("count remains unchanged after denied operations");
+        assert_eq!(final_count.rows[0]["rows"], 4);
+
+        let closed = server
+            .gam_scratchpad_close_session(Parameters(ScratchpadSessionArgs { session_id }))
+            .await
+            .expect("close scratchpad session");
+        assert_eq!(closed.is_error, None);
+        assert_eq!(
+            closed.structured_content.as_ref().unwrap()["data"]["released"],
+            true
+        );
+    }
+
     #[test]
     fn report_result_guard_fails_closed_above_the_complete_result_limit() {
         let result = bounded_report_result(
