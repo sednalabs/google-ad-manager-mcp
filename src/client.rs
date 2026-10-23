@@ -3492,11 +3492,26 @@ mod tests {
     }
 
     fn http_response(status: &str, headers: &str, body: &[u8]) -> Vec<u8> {
-        format!("HTTP/1.1 {status}\r\n{headers}\r\n")
+        let headers = headers.trim_end_matches("\r\n");
+        format!("HTTP/1.1 {status}\r\n{headers}\r\n\r\n")
             .into_bytes()
             .into_iter()
             .chain(body.iter().copied())
             .collect()
+    }
+
+    #[test]
+    fn http_response_emits_one_complete_header_terminator() {
+        let expected =
+            b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec();
+        assert_eq!(
+            http_response("200 OK", "Content-Length: 0\r\nConnection: close", &[]),
+            expected
+        );
+        assert_eq!(
+            http_response("200 OK", "Content-Length: 0\r\nConnection: close\r\n", &[]),
+            expected
+        );
     }
 
     const CHANGE_HISTORY_TEST_QUERY: &str = "SELECT ChangeDateTime, EntityId, EntityType, Id, Operation, UserId FROM Change_History WHERE ChangeDateTime >= '2026-10-01T00:00:00Z' AND ChangeDateTime <= '2026-10-02T00:00:00Z' ORDER BY ChangeDateTime DESC LIMIT 1";
