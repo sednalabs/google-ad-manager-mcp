@@ -4,7 +4,7 @@
 use chrono::{DateTime, SecondsFormat, Utc};
 use roxmltree::{Document, Node};
 use schemars::JsonSchema;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::AdManagerError;
@@ -36,7 +36,7 @@ pub struct ChangeHistoryArgs {
     pub max_events: Option<usize>,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct ChangeHistoryInspectArgs {
     /// SHA-256 asserted by the operator for the supplied source export.
     pub source_sha256: String,
@@ -50,7 +50,7 @@ pub struct ChangeHistoryInspectArgs {
     pub acknowledge_sensitive_values: bool,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct ChangeHistoryInputRow {
     pub row_ref: String,
     pub change_date_time: String,
@@ -61,7 +61,7 @@ pub struct ChangeHistoryInputRow {
     pub changes: Vec<ChangeHistoryFieldChange>,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct ChangeHistoryFieldChange {
     pub field: String,
     pub previous: Value,
@@ -339,7 +339,8 @@ pub(crate) fn inspect_history(
             })
             .collect::<Result<Vec<_>, AdManagerError>>()?;
         output.push(json!({
-            "row_ref": row_ref,
+            "row_index": output.len() + 1,
+            "row_ref": if args.include_values { row_ref } else { "[redacted]".to_string() },
             "change_date_time": row.change_date_time,
             "entity_type": entity_type,
             "entity_id": if args.include_values { entity_id } else { "[redacted]".to_string() },
@@ -551,7 +552,7 @@ mod tests {
         let args = ChangeHistoryInspectArgs {
             source_sha256: "a".repeat(64),
             rows: vec![ChangeHistoryInputRow {
-                row_ref: "row-1".into(),
+                row_ref: "audit@example.com /var/private/history.csv".into(),
                 change_date_time: "2026-10-01T00:00:00Z".into(),
                 entity_type: "LINE_ITEM".into(),
                 entity_id: "123".into(),
@@ -568,8 +569,38 @@ mod tests {
         };
         let data = super::inspect_history(args, false).expect("redacted history");
         assert_eq!(data["rows"][0]["changes"][0]["previous"], "[redacted]");
+        assert_eq!(data["rows"][0]["row_ref"], "[redacted]");
+        assert_eq!(data["rows"][0]["row_index"], 1);
         assert_eq!(data["rows"][0]["entity_id"], "[redacted]");
+        assert!(!data.to_string().contains("audit@example.com"));
+        assert!(!data.to_string().contains("/var/private/history.csv"));
         assert_eq!(data["source_identity"], "operator_asserted_not_verified");
+    }
+
+    #[test]
+    fn explicitly_acknowledged_sensitive_inspection_preserves_row_reference() {
+        let args = ChangeHistoryInspectArgs {
+            source_sha256: "b".repeat(64),
+            rows: vec![ChangeHistoryInputRow {
+                row_ref: "approved-row-7".into(),
+                change_date_time: "2026-10-01T00:00:00Z".into(),
+                entity_type: "LINE_ITEM".into(),
+                entity_id: "123".into(),
+                operation: "UPDATE".into(),
+                user_id: Some("456".into()),
+                changes: vec![ChangeHistoryFieldChange {
+                    field: "primaryGoal.units".into(),
+                    previous: json!(50000),
+                    current: json!(100000),
+                }],
+            }],
+            include_values: true,
+            acknowledge_sensitive_values: true,
+        };
+        assert!(super::inspect_history(args.clone(), false).is_err());
+        let data = super::inspect_history(args, true).expect("both sensitive-read gates");
+        assert_eq!(data["rows"][0]["row_ref"], "approved-row-7");
+        assert_eq!(data["rows"][0]["changes"][0]["previous"], 50000);
     }
 
     #[test]

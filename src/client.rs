@@ -638,6 +638,8 @@ pub struct AdManagerClient {
     quota_project: Option<Arc<str>>,
     #[cfg(test)]
     test_access_token: Option<Arc<str>>,
+    #[cfg(test)]
+    change_history_test_endpoint: Option<Arc<str>>,
 }
 
 impl AdManagerClient {
@@ -681,6 +683,8 @@ impl AdManagerClient {
             quota_project,
             #[cfg(test)]
             test_access_token: None,
+            #[cfg(test)]
+            change_history_test_endpoint: None,
         }
     }
 
@@ -689,6 +693,14 @@ impl AdManagerClient {
         let mut client = Self::from_settings(&Settings::default());
         client.api_base_url = api_base_url.into();
         client.test_access_token = Some(Arc::from("test-access-token"));
+        client
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test_change_history_endpoint(endpoint: impl Into<Arc<str>>) -> Self {
+        let mut client = Self::from_settings(&Settings::default());
+        client.test_access_token = Some(Arc::from("test-access-token"));
+        client.change_history_test_endpoint = Some(endpoint.into());
         client
     }
 
@@ -903,11 +915,21 @@ impl AdManagerClient {
             ));
         }
         let api_version = DEFAULT_SOAP_API_VERSION;
-        let endpoint = soap_service_url(
-            &self.soap_base_url,
-            api_version,
-            "PublisherQueryLanguageService",
-        )?;
+        #[cfg(test)]
+        let endpoint = self
+            .change_history_test_endpoint
+            .as_deref()
+            .map(str::to_string);
+        #[cfg(not(test))]
+        let endpoint: Option<String> = None;
+        let endpoint = match endpoint {
+            Some(endpoint) => endpoint,
+            None => soap_service_url(
+                &self.soap_base_url,
+                api_version,
+                "PublisherQueryLanguageService",
+            )?,
+        };
         let namespace = soap_namespace(api_version);
         let payload = format!(
             "<selectStatement><query>{}</query></selectStatement>",
@@ -3430,6 +3452,91 @@ mod tests {
             let _ = stream.write_all(&response);
         });
         (format!("http://{address}/bounded"), handle)
+    }
+
+    fn http_response(status: &str, headers: &str, body: &[u8]) -> Vec<u8> {
+        format!("HTTP/1.1 {status}\r\n{headers}\r\n")
+            .into_bytes()
+            .into_iter()
+            .chain(body.iter().copied())
+            .collect()
+    }
+
+    const CHANGE_HISTORY_TEST_QUERY: &str = "SELECT ChangeDateTime, EntityId, EntityType, Id, Operation, UserId FROM Change_History WHERE ChangeDateTime >= '2026-10-01T00:00:00Z' AND ChangeDateTime <= '2026-10-02T00:00:00Z' ORDER BY ChangeDateTime DESC LIMIT 1";
+
+    #[tokio::test]
+    async fn change_history_transport_rejects_oversized_content_length() {
+        let too_large = crate::change_history::CHANGE_HISTORY_MAX_RESPONSE_BYTES + 1;
+        let response = http_response(
+            "200 OK",
+            &format!("Content-Length: {too_large}\r\nConnection: close"),
+            &[],
+        );
+        let (endpoint, server) = serve_one_http_response(response);
+        let client = AdManagerClient::for_test_change_history_endpoint(endpoint);
+        let result = client
+            .select_change_history_page("123", CHANGE_HISTORY_TEST_QUERY)
+            .await;
+        assert!(matches!(
+            result,
+            Err(AdManagerError::UpstreamContract {
+                field: "change_history.response",
+                ..
+            })
+        ));
+        server.join().expect("join oversized content-length server");
+    }
+
+    #[tokio::test]
+    async fn change_history_transport_stream_cap_rejects_oversized_body_without_length() {
+        let too_large = vec![b'x'; crate::change_history::CHANGE_HISTORY_MAX_RESPONSE_BYTES + 1];
+        let response = http_response("200 OK", "Connection: close", &too_large);
+        let (endpoint, server) = serve_one_http_response(response);
+        let client = AdManagerClient::for_test_change_history_endpoint(endpoint);
+        let result = client
+            .select_change_history_page("123", CHANGE_HISTORY_TEST_QUERY)
+            .await;
+        assert!(matches!(
+            result,
+            Err(AdManagerError::UpstreamContract {
+                field: "change_history.response",
+                ..
+            })
+        ));
+        server.join().expect("join oversized stream server");
+    }
+
+    #[tokio::test]
+    async fn change_history_transport_does_not_follow_redirects() {
+        use std::io::ErrorKind;
+
+        let second_hop = TcpListener::bind("127.0.0.1:0").expect("bind redirect target");
+        second_hop
+            .set_nonblocking(true)
+            .expect("make redirect target nonblocking");
+        let location = format!(
+            "http://{}/should-not-be-requested",
+            second_hop.local_addr().unwrap()
+        );
+        let response = http_response(
+            "302 Found",
+            &format!("Location: {location}\r\nContent-Length: 0\r\nConnection: close"),
+            &[],
+        );
+        let (endpoint, server) = serve_one_http_response(response);
+        let client = AdManagerClient::for_test_change_history_endpoint(endpoint);
+        let result = client
+            .select_change_history_page("123", CHANGE_HISTORY_TEST_QUERY)
+            .await;
+        assert!(matches!(
+            result,
+            Err(AdManagerError::UpstreamApi { status: 302, .. })
+        ));
+        server.join().expect("join redirect server");
+        assert_eq!(
+            second_hop.accept().unwrap_err().kind(),
+            ErrorKind::WouldBlock
+        );
     }
 
     fn serve_rest_write_response(

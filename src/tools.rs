@@ -8088,7 +8088,7 @@ async fn gcloud_version() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use std::io::{Read, Write};
-    use std::net::TcpListener;
+    use std::net::{TcpListener, TcpStream};
     use std::sync::{Arc, Mutex};
     use std::thread;
 
@@ -8756,6 +8756,147 @@ mod tests {
             }
         });
         (format!("http://{address}/v1"), requests, handle)
+    }
+
+    fn bounded_history_xml(first_row: usize, row_count: usize) -> Vec<u8> {
+        let mut xml = String::from(
+            r#"<selectResponse xmlns="https://www.google.com/apis/ads/publisher/v202605" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><rval>
+              <columnTypes><labelName>ChangeDateTime</labelName></columnTypes>
+              <columnTypes><labelName>EntityId</labelName></columnTypes>
+              <columnTypes><labelName>EntityType</labelName></columnTypes>
+              <columnTypes><labelName>Id</labelName></columnTypes>
+              <columnTypes><labelName>Operation</labelName></columnTypes>
+              <columnTypes><labelName>UserId</labelName></columnTypes>"#,
+        );
+        for index in first_row..first_row + row_count {
+            xml.push_str(&format!(
+                r#"<rows><values>
+                  <value xsi:type="DateTimeValue"><value><date><year>2026</year><month>10</month><day>22</day></date><hour>12</hour><minute>5</minute><second>4</second><timeZoneId>Australia/Sydney</timeZoneId></value></value>
+                  <value xsi:type="NumberValue"><value>{}</value></value>
+                  <value xsi:type="TextValue"><value>LINE_ITEM</value></value>
+                  <value xsi:type="TextValue"><value>cursor-{index}</value></value>
+                  <value xsi:type="TextValue"><value>UPDATE</value></value>
+                  <value xsi:type="NumberValue"><value>789</value></value>
+                </values></rows>"#,
+                1000 + index
+            ));
+        }
+        xml.push_str("</rval></selectResponse>");
+        xml.into_bytes()
+    }
+
+    fn read_complete_http_request(stream: &mut TcpStream) -> Vec<u8> {
+        let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(2)));
+        let mut request = Vec::new();
+        let mut chunk = [0_u8; 4096];
+        loop {
+            let count = stream.read(&mut chunk).expect("read history request");
+            if count == 0 {
+                break;
+            }
+            request.extend_from_slice(&chunk[..count]);
+            if let Some(header_end) = request.windows(4).position(|part| part == b"\r\n\r\n") {
+                let headers = String::from_utf8_lossy(&request[..header_end]);
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        line.to_ascii_lowercase()
+                            .strip_prefix("content-length:")
+                            .and_then(|value| value.trim().parse::<usize>().ok())
+                    })
+                    .unwrap_or(0);
+                if request.len() >= header_end + 4 + content_length {
+                    break;
+                }
+            }
+        }
+        request
+    }
+
+    fn serve_change_history_sequence(
+        responses: Vec<Vec<u8>>,
+    ) -> (String, ReportRequestLog, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind history test server");
+        let address = listener.local_addr().expect("history test address");
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let request_log = requests.clone();
+        let handle = thread::spawn(move || {
+            for body in responses {
+                let (mut stream, _) = listener.accept().expect("accept history request");
+                let request = read_complete_http_request(&mut stream);
+                request_log
+                    .lock()
+                    .expect("lock history request log")
+                    .push(String::from_utf8_lossy(&request).to_string());
+                let header = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                stream
+                    .write_all(header.as_bytes())
+                    .expect("write history response headers");
+                stream
+                    .write_all(&body)
+                    .expect("write history response body");
+            }
+        });
+        (
+            format!("http://{address}/v202605/PublisherQueryLanguageService"),
+            requests,
+            handle,
+        )
+    }
+
+    #[tokio::test]
+    async fn change_history_multiple_pages_report_complete_or_capped_coverage() {
+        for (max_events, second_count, expected_count, expected_complete) in
+            [(100, 4, 54, true), (55, 5, 55, false)]
+        {
+            let (endpoint, requests, server) = serve_change_history_sequence(vec![
+                bounded_history_xml(0, 50),
+                bounded_history_xml(50, second_count),
+            ]);
+            let client = AdManagerClient::for_test_change_history_endpoint(endpoint);
+            let server_under_test = AdManagerServer::new(crate::Settings::default())
+                .expect("build history test server")
+                .with_test_client(client);
+            let result = server_under_test
+                .gam_change_history(Parameters(ChangeHistoryArgs {
+                    network_code: "1234567".into(),
+                    start_time: "2026-10-01T00:00:00Z".into(),
+                    end_time: "2026-10-02T00:00:00Z".into(),
+                    entity_id: None,
+                    entity_types: vec!["LINE_ITEM".into()],
+                    max_events: Some(max_events),
+                }))
+                .await
+                .expect("read bounded history pages");
+            let response = result
+                .structured_content
+                .expect("structured history response");
+            assert_eq!(response["ok"], true);
+            assert_eq!(
+                response["data"]["coverage"]["returned_events"],
+                expected_count
+            );
+            assert_eq!(response["data"]["coverage"]["pages_read"], 2);
+            assert_eq!(response["data"]["coverage"]["complete"], expected_complete);
+            assert_eq!(response["data"]["coverage"]["capped"], !expected_complete);
+            assert_eq!(
+                response["data"]["events"].as_array().unwrap().len(),
+                expected_count
+            );
+
+            server.join().expect("join history test server");
+            let requests = requests.lock().expect("lock history test requests");
+            assert_eq!(requests.len(), 2);
+            assert!(requests[0].contains("ORDER BY ChangeDateTime DESC LIMIT 50"));
+            assert!(requests[1].contains("Id &lt; 'cursor-49'"));
+            assert!(requests[1].contains(&format!(
+                "ORDER BY ChangeDateTime DESC LIMIT {}",
+                max_events - 50
+            )));
+        }
     }
 
     fn serve_delayed_report_http_response(
