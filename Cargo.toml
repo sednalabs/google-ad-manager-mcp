@@ -20,7 +20,7 @@ mcp-toolkit-core = { version = "0.1.0", git = "https://github.com/sednalabs/mcp-
 mcp-toolkit-observability = { version = "0.1.0", git = "https://github.com/sednalabs/mcp-toolkit-rs", rev = "8bfe29c056ef7cfcc9a7748bdabd527961e7e082", package = "mcp-toolkit-observability", features = ["tracing-bridge"] }
 mcp-toolkit-scratchpad = { version = "0.1.0", git = "https://github.com/sednalabs/mcp-toolkit-rs", rev = "06b4665eedbab3ff2387a05840f0d4c802657f99", package = "mcp-toolkit-scratchpad", features = ["tokio"] }
 reqwest = { version = "0.12.24", default-features = false, features = ["http2", "json", "rustls-tls"] }
-rmcp = { version = "=2.1.0", default-features = false, features = ["macros", "schemars", "server", "transport-io"] }
+rmcp = { version = "=3.6.0", default-features = false, features = ["macros", "schemars", "server", "transport-io"] }
 roxmltree = "0.21.1"
 schemars = "1.2.1"
 serde = { version = "1.0.228", features = ["derive"] }
