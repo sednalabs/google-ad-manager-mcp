@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Instant;
 
-use mcp_toolkit::rmcp::model::CallToolResult;
+use mcp_toolkit_server::rmcp::model::CallToolResult;
 use serde_json::{Value, json};
 
 use crate::AdManagerError;

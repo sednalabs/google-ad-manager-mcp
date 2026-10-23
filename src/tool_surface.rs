@@ -136,6 +136,18 @@ pub(crate) fn build_tool_inventory() -> Result<ToolInventory, ToolInventoryError
         )
         .with_risk_posture(report_run_posture()),
         cap(
+            "gam_change_history",
+            "history",
+            "Read a bounded Google Ad Manager Change_History window with exact entity filters, provider timestamps, and explicit capped-versus-complete coverage; the API supplies metadata rather than field values.",
+            ["google", "ad-manager", "change-history", "audit", "changes", "operator", "line-item", "history"],
+        ),
+        cap(
+            "gam_change_history_inspect",
+            "history",
+            "Inspect operator-supplied structured field-level history with asserted source hash and row references; values are redacted by default and no files are opened.",
+            ["google", "ad-manager", "change-history", "field-level", "inspect", "old", "new", "history"],
+        ),
+        cap(
             "gam_report_operation_poll",
             "reports",
             "Wait on an existing Google Ad Manager report operation without starting another run, then optionally fetch the first result page.",

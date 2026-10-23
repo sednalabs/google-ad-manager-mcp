@@ -17,6 +17,8 @@ All tools return Contract V1 envelopes: `ok/data/meta` on success and
 | `gam_ad_unit_dependency_probe` | Read-only proof for exact ad-unit dependencies across placements and SOAP line-item inventory targeting. |
 | `gam_ad_unit_retirement_assessment` | Read-only exact-identity, hierarchy, and freshness-bound evidence assessment for conservative ad-unit retirement review. |
 | `gam_report_run` | Run a saved Ad Manager report, optionally wait, and optionally fetch the first result page. |
+| `gam_change_history` | Read a bounded Change_History window with provider metadata and explicit completeness state. |
+| `gam_change_history_inspect` | Inspect structured operator-supplied field-level rows; source digest is asserted, values redacted by default. |
 | `gam_report_operation_poll` | Wait on an existing asynchronous report operation without starting another report run, then optionally fetch the first result page. |
 | `gam_report_result_rows` | Fetch rows from a completed report result resource. |
 | `gam_trafficking_tool_matrix` | Describe REST-supported writes, SOAP trafficking operations, and remaining ergonomics gaps. |
@@ -494,6 +496,33 @@ supplied the receipts and is not an archive authorization; explicit operator
 review and any separate guarded write remain outside this tool.
 The inner data, complete model-visible Contract V1 content, and serialized RMCP
 result are independently measured against 7 KiB, 8 KiB, and 20 KiB limits.
+
+## `gam_change_history`
+
+`gam_change_history` calls the fixed PQL `Change_History` table through
+`PublisherQueryLanguageService.select`. It accepts RFC3339 start/end bounds
+with explicit offsets (maximum 93 days), an optional exact entity ID, an
+optional allowlisted entity-type set, and a maximum result count of 500. The
+adapter normalizes the requested bounds to UTC and retains each returned
+provider `DateTime` component and `timeZoneId` without guessing a timezone.
+It uses only the documented columns: change time, entity ID/type, provider
+change-row ID, operation, and user ID. The provider row ID remains an internal
+cursor and is not returned. Results include `complete`, `capped`, `pages_read`
+and `returned_events`; reaching a cap is never presented as a complete window.
+
+The API's Change_History table does not contain field names or old/new values.
+Do not infer those values from current `lastModifiedTime`, UI row order, or
+other entities' current state.
+
+## `gam_change_history_inspect`
+
+This tool accepts structured rows already supplied by an operator, plus a
+64-character SHA-256 assertion and source row references. It does not read
+files, retrieve history, or verify the asserted digest. Values and entity/user
+identifiers are redacted by default. Returning supplied previous/current
+values requires both `GOOGLE_AD_MANAGER_MCP_UNREDACTED_CHANGE_HISTORY_READ=true`
+and `include_values=true` with `acknowledge_sensitive_values=true` on that
+call. Input is limited to 500 rows, 100 field changes per row, and 1 MiB.
 
 ## `gam_report_run`
 

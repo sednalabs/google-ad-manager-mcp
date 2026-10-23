@@ -2,14 +2,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::time::Instant;
 
-use mcp_toolkit::rmcp::handler::server::wrapper::Parameters;
-use mcp_toolkit::rmcp::model::CallToolResult;
-use mcp_toolkit::rmcp::{self, tool, tool_router};
 use mcp_toolkit_auth::provider_auth::{GoogleProviderAuthConfig, GoogleProviderAuthLoginOptions};
 use mcp_toolkit_scratchpad::{
     ScratchpadIngestColumn, ScratchpadIngestMode, ScratchpadQueryProjection, ScratchpadSessionInfo,
     ScratchpadSessionSnapshot, ScratchpadTableInfo, run_scratchpad_blocking,
 };
+use mcp_toolkit_server::rmcp::handler::server::wrapper::Parameters;
+use mcp_toolkit_server::rmcp::model::CallToolResult;
+use mcp_toolkit_server::rmcp::{self, tool, tool_router};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -18,6 +18,10 @@ use tokio::process::Command;
 use crate::ad_unit_retirement::{
     AdUnitRetirementAssessmentArgs, MAX_DESCENDANT_PAGE_BYTES,
     assess_ad_unit_retirement_with_readers, response_bytes,
+};
+use crate::change_history::{
+    CHANGE_HISTORY_MAX_PAGES, CHANGE_HISTORY_PAGE_SIZE, ChangeHistoryArgs,
+    ChangeHistoryInspectArgs, inspect_history,
 };
 use crate::client::{
     AdManagerClient, CatalogCollection, CompletedReportRun, DEFAULT_SOAP_API_VERSION,
@@ -871,6 +875,113 @@ fn bounded_report_result(
 
 #[tool_router(router = tool_router_ad_manager, vis = "pub")]
 impl AdManagerServer {
+    #[tool(
+        name = "gam_change_history",
+        description = "Read a bounded Google Ad Manager Change_History window with exact entity filters, provider timestamps, and explicit capped-versus-complete coverage. The API returns entity, operation, and user IDs, not changed field names or old/new values."
+    )]
+    async fn gam_change_history(
+        &self,
+        Parameters(args): Parameters<ChangeHistoryArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let started = Instant::now();
+        let (network_code, window) = match args.validate() {
+            Ok(value) => value,
+            Err(error) => return Ok(contract::error(error, started)),
+        };
+        let mut events = Vec::with_capacity(window.max_events);
+        let mut seen_ids = BTreeSet::new();
+        let mut before_id: Option<String> = None;
+        let mut page_count = 0usize;
+        let mut complete = false;
+        while events.len() < window.max_events && page_count < CHANGE_HISTORY_MAX_PAGES {
+            let requested = (window.max_events - events.len()).min(CHANGE_HISTORY_PAGE_SIZE);
+            let query = window.query(before_id.as_deref(), requested);
+            let page = match self
+                .client()
+                .select_change_history_page(&network_code, &query)
+                .await
+            {
+                Ok(page) => page,
+                Err(error) => return Ok(contract::error(error, started)),
+            };
+            page_count += 1;
+            if page.len() > requested {
+                return Ok(contract::result_contract_error(
+                    "change_history.rows",
+                    "provider returned more rows than requested",
+                    started,
+                ));
+            }
+            if page.is_empty() {
+                complete = true;
+                break;
+            }
+            let page_len = page.len();
+            let mut next_cursor = None;
+            for event in page {
+                if !seen_ids.insert(event.paging_id.clone()) {
+                    return Ok(contract::result_contract_error(
+                        "change_history.paging_id",
+                        "provider repeated a cursor row; completeness cannot be established",
+                        started,
+                    ));
+                }
+                next_cursor = Some(event.paging_id.clone());
+                events.push(json!({
+                    "change_date_time": event.change_date_time,
+                    "entity_id": event.entity_id,
+                    "entity_type": event.entity_type,
+                    "operation": event.operation,
+                    "user_id": event.user_id,
+                }));
+            }
+            if page_len < requested {
+                complete = true;
+                break;
+            }
+            before_id = next_cursor;
+        }
+        let capped = !complete;
+        Ok(contract::success(
+            json!({
+                "network_code": network_code,
+                "requested_window": {
+                    "start_utc": window.start_utc.to_rfc3339(),
+                    "end_utc": window.end_utc.to_rfc3339(),
+                    "max_events": window.max_events,
+                    "entity_id": window.entity_id,
+                    "entity_types": window.entity_types,
+                },
+                "events": events,
+                "coverage": {
+                    "returned_events": seen_ids.len(),
+                    "pages_read": page_count,
+                    "complete": complete,
+                    "capped": capped,
+                    "reason": if capped { "event_or_page_cap_reached" } else { "provider_window_exhausted" },
+                },
+                "field_level_changes_available_from_api": false,
+                "timestamp_note": "Each event retains the provider's DateTime components and timeZoneId. The requested bounds are normalized to UTC.",
+            }),
+            started,
+        ))
+    }
+
+    #[tool(
+        name = "gam_change_history_inspect",
+        description = "Inspect operator-supplied structured field-level change-history rows with asserted source hash and row references. This tool never opens files or fetches history; sensitive values are redacted by default."
+    )]
+    async fn gam_change_history_inspect(
+        &self,
+        Parameters(args): Parameters<ChangeHistoryInspectArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let started = Instant::now();
+        match inspect_history(args, self.settings().unredacted_change_history_read) {
+            Ok(data) => Ok(contract::success(data, started)),
+            Err(error) => Ok(contract::error(error, started)),
+        }
+    }
+
     #[tool(
         name = "find_tools",
         description = "Semantically search Google Ad Manager MCP tools with ranked matches, guided dependency edges, completeness metadata, and filter-validated empty-result recovery."
@@ -7977,7 +8088,7 @@ async fn gcloud_version() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use std::io::{Read, Write};
-    use std::net::TcpListener;
+    use std::net::{TcpListener, TcpStream};
     use std::sync::{Arc, Mutex};
     use std::thread;
 
@@ -8514,6 +8625,193 @@ mod tests {
         assert!(default_read_only["schemas"].get("gam_report_run").is_none());
     }
 
+    #[tokio::test]
+    async fn scratchpad_report_rows_preserve_values_and_reject_unsafe_sql() {
+        let server = AdManagerServer::new(crate::Settings::default())
+            .expect("scratchpad integration server");
+        let session_id = format!("report_rows_{}", std::process::id());
+        let opened = server
+            .gam_scratchpad_open_session(Parameters(ScratchpadSessionArgs {
+                session_id: session_id.clone(),
+            }))
+            .await
+            .expect("open scratchpad session");
+        assert_eq!(opened.is_error, Some(false));
+
+        let report_result = json!({
+            "rows": [
+                {"dimensionValues":[{"value":"2026-10-21"}],"metricValues":[{"value":"banner"}],"values":["Leaderboard", null, 18446744073709551615u64]},
+                {"dimensionValues":[{"value":"2026-10-22"}],"metricValues":[{"value":"newsletter"}],"values":["MREC", "", 9223372036854775808u64]},
+                {"dimensionValues":[{"value":"2026-10-23"}],"metricValues":[{"value":"banner"}],"values":["Half page", "ok", 7]}
+            ]
+        });
+        let columns = report_rows_ingest_columns();
+        let rows = report_result_rows_for_scratchpad(
+            &report_result,
+            "networks/123/reports/456/results/789",
+        );
+        let sessions = server.scratchpad_sessions().clone();
+        sessions
+            .ingest_rows_with_mode(
+                &session_id,
+                "report_rows",
+                &columns,
+                &rows,
+                ScratchpadIngestMode::Create,
+            )
+            .expect("ingest mapped report rows");
+
+        let first_page = server
+            .gam_scratchpad_query(Parameters(ScratchpadQueryArgs {
+                session_id: session_id.clone(),
+                sql: "SELECT row_index AS item, values_json AS payload FROM report_rows ORDER BY row_index".into(),
+                offset: Some(0),
+                page_size: Some(2),
+            }))
+            .await
+            .expect("query first page")
+            .structured_content
+            .expect("first page structured response");
+        assert_eq!(first_page["ok"], true);
+        assert_eq!(first_page["data"]["row_count_total"], 3);
+        assert_eq!(first_page["data"]["has_more"], true);
+        assert_eq!(first_page["data"]["columns"][0]["name"], "item");
+        assert_eq!(first_page["data"]["columns"][1]["name"], "payload");
+        let payload: Value = serde_json::from_str(
+            first_page["data"]["rows"][0]["payload"]
+                .as_str()
+                .expect("JSON payload remains text"),
+        )
+        .expect("report value JSON parses");
+        assert_eq!(payload[0], "Leaderboard");
+        assert_eq!(payload[1], Value::Null);
+        assert_eq!(payload[2].as_u64(), Some(u64::MAX));
+        let payload: Value = serde_json::from_str(
+            first_page["data"]["rows"][1]["payload"]
+                .as_str()
+                .expect("second JSON payload remains text"),
+        )
+        .expect("second report value JSON parses");
+        assert_eq!(payload[0], "MREC");
+        assert_eq!(payload[2].as_u64(), Some(9_223_372_036_854_775_808));
+
+        let second_page = server
+            .gam_scratchpad_query(Parameters(ScratchpadQueryArgs {
+                session_id: session_id.clone(),
+                sql: "SELECT row_index AS item, values_json AS payload FROM report_rows ORDER BY row_index".into(),
+                offset: Some(2),
+                page_size: Some(2),
+            }))
+            .await
+            .expect("query second page")
+            .structured_content
+            .expect("second page structured response");
+        assert_eq!(second_page["data"]["offset"], 2);
+        assert_eq!(second_page["data"]["rows"].as_array().unwrap().len(), 1);
+        assert_eq!(second_page["data"]["has_more"], false);
+
+        let huge_integer = server
+            .gam_scratchpad_query(Parameters(ScratchpadQueryArgs {
+                session_id: session_id.clone(),
+                sql: "SELECT CAST('340282366920938463463374607431768211455' AS UHUGEINT) AS exact_value".into(),
+                offset: Some(0),
+                page_size: Some(10),
+            }))
+            .await
+            .expect("query unsigned 128-bit boundary")
+            .structured_content
+            .expect("unsigned 128-bit structured response");
+        assert_eq!(huge_integer["ok"], true);
+        assert_eq!(
+            huge_integer["data"]["rows"][0]["exact_value"],
+            "340282366920938463463374607431768211455"
+        );
+
+        let appended_rows = report_result_rows_for_scratchpad(
+            &json!({"rows":[{"values":["Appended", "text", 9]}]}),
+            "networks/123/reports/456/results/790",
+        );
+        sessions
+            .ingest_rows_with_mode(
+                &session_id,
+                "report_rows",
+                &columns,
+                &appended_rows,
+                ScratchpadIngestMode::Append,
+            )
+            .expect("append second report page");
+
+        let before_failed_append = sessions
+            .query_rows(
+                &session_id,
+                "SELECT COUNT(*) AS rows FROM report_rows",
+                0,
+                10,
+            )
+            .expect("count appended report rows");
+        assert_eq!(before_failed_append.rows[0]["rows"], 4);
+
+        let incompatible_columns = vec![ScratchpadIngestColumn {
+            name: "different_column".into(),
+            logical_type: "string".into(),
+        }];
+        let incompatible_rows = vec![serde_json::Map::from_iter([(
+            "different_column".into(),
+            json!("must not append"),
+        )])];
+        assert!(
+            sessions
+                .ingest_rows_with_mode(
+                    &session_id,
+                    "report_rows",
+                    &incompatible_columns,
+                    &incompatible_rows,
+                    ScratchpadIngestMode::Append,
+                )
+                .is_err()
+        );
+
+        for unsafe_sql in [
+            "DELETE FROM report_rows",
+            "SELECT * FROM read_csv_auto('/tmp/not-a-real-scratchpad-input.csv')",
+        ] {
+            let denied = server
+                .gam_scratchpad_query(Parameters(ScratchpadQueryArgs {
+                    session_id: session_id.clone(),
+                    sql: unsafe_sql.into(),
+                    offset: Some(0),
+                    page_size: Some(10),
+                }))
+                .await
+                .expect("unsafe query returns structured denial");
+            assert_eq!(
+                denied.is_error,
+                Some(true),
+                "SQL was not rejected: {unsafe_sql}"
+            );
+        }
+
+        let final_count = sessions
+            .query_rows(
+                &session_id,
+                "SELECT COUNT(*) AS rows FROM report_rows",
+                0,
+                10,
+            )
+            .expect("count remains unchanged after denied operations");
+        assert_eq!(final_count.rows[0]["rows"], 4);
+
+        let closed = server
+            .gam_scratchpad_close_session(Parameters(ScratchpadSessionArgs { session_id }))
+            .await
+            .expect("close scratchpad session");
+        assert_eq!(closed.is_error, Some(false));
+        assert_eq!(
+            closed.structured_content.as_ref().unwrap()["data"]["released"],
+            true
+        );
+    }
+
     #[test]
     fn report_result_guard_fails_closed_above_the_complete_result_limit() {
         let result = bounded_report_result(
@@ -8645,6 +8943,147 @@ mod tests {
             }
         });
         (format!("http://{address}/v1"), requests, handle)
+    }
+
+    fn bounded_history_xml(first_row: usize, row_count: usize) -> Vec<u8> {
+        let mut xml = String::from(
+            r#"<selectResponse xmlns="https://www.google.com/apis/ads/publisher/v202605" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><rval>
+              <columnTypes><labelName>ChangeDateTime</labelName></columnTypes>
+              <columnTypes><labelName>EntityId</labelName></columnTypes>
+              <columnTypes><labelName>EntityType</labelName></columnTypes>
+              <columnTypes><labelName>Id</labelName></columnTypes>
+              <columnTypes><labelName>Operation</labelName></columnTypes>
+              <columnTypes><labelName>UserId</labelName></columnTypes>"#,
+        );
+        for index in first_row..first_row + row_count {
+            xml.push_str(&format!(
+                r#"<rows><values>
+                  <value xsi:type="DateTimeValue"><value><date><year>2026</year><month>10</month><day>22</day></date><hour>12</hour><minute>5</minute><second>4</second><timeZoneId>Australia/Sydney</timeZoneId></value></value>
+                  <value xsi:type="NumberValue"><value>{}</value></value>
+                  <value xsi:type="TextValue"><value>LINE_ITEM</value></value>
+                  <value xsi:type="TextValue"><value>cursor-{index}</value></value>
+                  <value xsi:type="TextValue"><value>UPDATE</value></value>
+                  <value xsi:type="NumberValue"><value>789</value></value>
+                </values></rows>"#,
+                1000 + index
+            ));
+        }
+        xml.push_str("</rval></selectResponse>");
+        xml.into_bytes()
+    }
+
+    fn read_complete_http_request(stream: &mut TcpStream) -> Vec<u8> {
+        let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(2)));
+        let mut request = Vec::new();
+        let mut chunk = [0_u8; 4096];
+        loop {
+            let count = stream.read(&mut chunk).expect("read history request");
+            if count == 0 {
+                break;
+            }
+            request.extend_from_slice(&chunk[..count]);
+            if let Some(header_end) = request.windows(4).position(|part| part == b"\r\n\r\n") {
+                let headers = String::from_utf8_lossy(&request[..header_end]);
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        line.to_ascii_lowercase()
+                            .strip_prefix("content-length:")
+                            .and_then(|value| value.trim().parse::<usize>().ok())
+                    })
+                    .unwrap_or(0);
+                if request.len() >= header_end + 4 + content_length {
+                    break;
+                }
+            }
+        }
+        request
+    }
+
+    fn serve_change_history_sequence(
+        responses: Vec<Vec<u8>>,
+    ) -> (String, ReportRequestLog, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind history test server");
+        let address = listener.local_addr().expect("history test address");
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let request_log = requests.clone();
+        let handle = thread::spawn(move || {
+            for body in responses {
+                let (mut stream, _) = listener.accept().expect("accept history request");
+                let request = read_complete_http_request(&mut stream);
+                request_log
+                    .lock()
+                    .expect("lock history request log")
+                    .push(String::from_utf8_lossy(&request).to_string());
+                let header = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                stream
+                    .write_all(header.as_bytes())
+                    .expect("write history response headers");
+                stream
+                    .write_all(&body)
+                    .expect("write history response body");
+            }
+        });
+        (
+            format!("http://{address}/v202605/PublisherQueryLanguageService"),
+            requests,
+            handle,
+        )
+    }
+
+    #[tokio::test]
+    async fn change_history_multiple_pages_report_complete_or_capped_coverage() {
+        for (max_events, second_count, expected_count, expected_complete) in
+            [(100, 4, 54, true), (55, 5, 55, false)]
+        {
+            let (endpoint, requests, server) = serve_change_history_sequence(vec![
+                bounded_history_xml(0, 50),
+                bounded_history_xml(50, second_count),
+            ]);
+            let client = AdManagerClient::for_test_change_history_endpoint(endpoint);
+            let server_under_test = AdManagerServer::new(crate::Settings::default())
+                .expect("build history test server")
+                .with_test_client(client);
+            let result = server_under_test
+                .gam_change_history(Parameters(ChangeHistoryArgs {
+                    network_code: "1234567".into(),
+                    start_time: "2026-10-01T00:00:00Z".into(),
+                    end_time: "2026-10-02T00:00:00Z".into(),
+                    entity_id: None,
+                    entity_types: vec!["LINE_ITEM".into()],
+                    max_events: Some(max_events),
+                }))
+                .await
+                .expect("read bounded history pages");
+            let response = result
+                .structured_content
+                .expect("structured history response");
+            assert_eq!(response["ok"], true);
+            assert_eq!(
+                response["data"]["coverage"]["returned_events"],
+                expected_count
+            );
+            assert_eq!(response["data"]["coverage"]["pages_read"], 2);
+            assert_eq!(response["data"]["coverage"]["complete"], expected_complete);
+            assert_eq!(response["data"]["coverage"]["capped"], !expected_complete);
+            assert_eq!(
+                response["data"]["events"].as_array().unwrap().len(),
+                expected_count
+            );
+
+            server.join().expect("join history test server");
+            let requests = requests.lock().expect("lock history test requests");
+            assert_eq!(requests.len(), 2);
+            assert!(requests[0].contains("ORDER BY ChangeDateTime DESC LIMIT 50"));
+            assert!(requests[1].contains("Id &lt; &apos;cursor-49&apos;"));
+            assert!(requests[1].contains(&format!(
+                "ORDER BY ChangeDateTime DESC LIMIT {}",
+                max_events - 50
+            )));
+        }
     }
 
     fn serve_delayed_report_http_response(

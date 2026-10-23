@@ -54,7 +54,7 @@ async fn run() -> Result<()> {
         ],
     );
 
-    mcp_toolkit::server::stdio::serve_stdio(server).await?;
+    mcp_toolkit_server::stdio::serve_stdio(server).await?;
     Ok(())
 }
 

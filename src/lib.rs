@@ -23,6 +23,7 @@
 
 mod ad_unit_retirement;
 pub mod auth_ux;
+mod change_history;
 mod client;
 mod config;
 mod contract;
@@ -44,21 +45,21 @@ pub use error::AdManagerError;
 
 use std::sync::Arc;
 
-use mcp_toolkit::rmcp::{
-    self, ServerHandler,
-    handler::server::router::tool::ToolRouter,
-    model::{ServerCapabilities, ServerInfo, Tool},
-    tool_handler,
-};
 use mcp_toolkit_core::guarded_action::GuardedActionPosture;
 use mcp_toolkit_core::tool_inventory::ToolInventory;
 use mcp_toolkit_scratchpad::{
     DuckDbEngine, ScratchpadSessionConfig, ScratchpadSessionManager, SharedScratchpadEngine,
     SharedScratchpadSessionManager,
 };
+use mcp_toolkit_server::rmcp::{
+    self, ServerHandler,
+    handler::server::router::tool::ToolRouter,
+    model::{ServerCapabilities, ServerInfo, Tool},
+    tool_handler,
+};
 use tool_surface::build_tool_inventory;
 
-pub type McpError = mcp_toolkit::rmcp::ErrorData;
+pub type McpError = mcp_toolkit_server::rmcp::ErrorData;
 
 #[derive(Clone)]
 pub struct AdManagerServer {

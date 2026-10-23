@@ -9,12 +9,16 @@ use mcp_toolkit_auth::upstream_oauth::{
     RefreshTokenProvider, google_authorized_user_adc_from_file,
 };
 use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderValue, USER_AGENT};
+use reqwest::redirect::Policy;
 use reqwest::{Client, Method, RequestBuilder};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::OnceCell;
 use tokio::time::{Instant as TokioInstant, sleep_until, timeout_at};
 
+use crate::change_history::{
+    CHANGE_HISTORY_MAX_RESPONSE_BYTES, ChangeHistoryEvent, parse_change_history_xml,
+};
 use crate::config::{MAX_REPORT_POLL_TIMEOUT_MS, Settings, selected_adc_file};
 use crate::error::AdManagerError;
 
@@ -30,6 +34,7 @@ const MAX_REPORT_RESOURCE_NAME_BYTES: usize = 256;
 const MAX_REPORT_NUMERIC_ID_BYTES: usize = 32;
 const MAX_REPORT_OPERATION_ID_BYTES: usize = 128;
 pub(crate) const MAX_REPORT_PAGE_TOKEN_BYTES: usize = 4 * 1024;
+const MAX_CHANGE_HISTORY_QUERY_BYTES: usize = 16 * 1024;
 const SOAP_ENVELOPE_NAMESPACE: &str = concat!("http", "://schemas.xmlsoap.org/soap/envelope/");
 const NETWORK_HIERARCHY_FIELDS: &str = "name,networkCode,effectiveRootAdUnit";
 const AD_UNIT_HIERARCHY_FIELDS: &str = "adUnits.name,adUnits.parentAdUnit,adUnits.parentPath.parentAdUnit,adUnits.status,adUnits.hasChildren,adUnits.updateTime,nextPageToken";
@@ -623,6 +628,7 @@ pub(crate) struct ReportPollFailure {
 #[derive(Clone)]
 pub struct AdManagerClient {
     http: Client,
+    change_history_http: Client,
     auth_mode: UpstreamAuthMode,
     token_provider: Arc<OnceCell<Arc<dyn TokenProvider>>>,
     oauth_token_provider: Arc<OnceCell<Arc<RefreshTokenProvider>>>,
@@ -632,6 +638,8 @@ pub struct AdManagerClient {
     quota_project: Option<Arc<str>>,
     #[cfg(test)]
     test_access_token: Option<Arc<str>>,
+    #[cfg(test)]
+    change_history_test_endpoint: Option<Arc<str>>,
 }
 
 impl AdManagerClient {
@@ -648,10 +656,23 @@ impl AdManagerClient {
             .build()
             .expect("reqwest client should build");
 
+        let mut history_headers = HeaderMap::new();
+        history_headers.insert(
+            USER_AGENT,
+            HeaderValue::from_static(concat!("google-ad-manager-mcp/", env!("CARGO_PKG_VERSION"))),
+        );
+        let change_history_http = Client::builder()
+            .timeout(settings.http_timeout)
+            .redirect(Policy::none())
+            .default_headers(history_headers)
+            .build()
+            .expect("change-history client should build");
+
         let quota_project = settings.quota_project.clone().map(Arc::<str>::from);
 
         Self {
             http,
+            change_history_http,
             auth_mode: select_auth_mode(settings)
                 .unwrap_or_else(|err| UpstreamAuthMode::Unavailable(err.to_string())),
             token_provider: Arc::new(OnceCell::new()),
@@ -662,6 +683,8 @@ impl AdManagerClient {
             quota_project,
             #[cfg(test)]
             test_access_token: None,
+            #[cfg(test)]
+            change_history_test_endpoint: None,
         }
     }
 
@@ -670,6 +693,14 @@ impl AdManagerClient {
         let mut client = Self::from_settings(&Settings::default());
         client.api_base_url = api_base_url.into();
         client.test_access_token = Some(Arc::from("test-access-token"));
+        client
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test_change_history_endpoint(endpoint: impl Into<Arc<str>>) -> Self {
+        let mut client = Self::from_settings(&Settings::default());
+        client.test_access_token = Some(Arc::from("test-access-token"));
+        client.change_history_test_endpoint = Some(endpoint.into());
         client
     }
 
@@ -865,6 +896,90 @@ impl AdManagerClient {
         }
         self.send_report_run_json_bounded(request, MAX_REPORT_OPERATION_RESPONSE_BYTES)
             .await
+    }
+
+    /// Execute one fixed-schema, bounded PQL Change_History page. The caller
+    /// constructs the query from validated timestamps, entity filters, and an
+    /// in-call-only provider cursor; caller supplied arbitrary PQL is not
+    /// exposed through the MCP.
+    pub(crate) async fn select_change_history_page(
+        &self,
+        network_code: &str,
+        query: &str,
+    ) -> Result<Vec<ChangeHistoryEvent>, AdManagerError> {
+        let network_code = validate_network_code(network_code)?;
+        if query.is_empty() || query.len() > MAX_CHANGE_HISTORY_QUERY_BYTES {
+            return Err(AdManagerError::invalid(
+                "change_history_query",
+                "generated query is outside its safety bound",
+            ));
+        }
+        let api_version = DEFAULT_SOAP_API_VERSION;
+        #[cfg(test)]
+        let endpoint = self
+            .change_history_test_endpoint
+            .as_deref()
+            .map(str::to_string);
+        #[cfg(not(test))]
+        let endpoint: Option<String> = None;
+        let endpoint = match endpoint {
+            Some(endpoint) => endpoint,
+            None => soap_service_url(
+                &self.soap_base_url,
+                api_version,
+                "PublisherQueryLanguageService",
+            )?,
+        };
+        let namespace = soap_namespace(api_version);
+        let payload = format!(
+            "<selectStatement><query>{}</query></selectStatement>",
+            escape_xml_text(query)
+        );
+        let envelope = build_soap_envelope(&namespace, &network_code, "select", &payload);
+        let token = self.access_token().await?;
+        let mut request = self
+            .change_history_http
+            .request(Method::POST, endpoint)
+            .bearer_auth(token)
+            .header(CONTENT_TYPE, "text/xml; charset=utf-8")
+            .header("SOAPAction", "")
+            .body(envelope);
+        if let Some(quota_project) = &self.quota_project {
+            request = request.header("x-goog-user-project", quota_project.as_ref());
+        }
+        let mut response = request.send().await?;
+        let status = response.status();
+        if response
+            .content_length()
+            .is_some_and(|length| length > CHANGE_HISTORY_MAX_RESPONSE_BYTES as u64)
+        {
+            return Err(AdManagerError::UpstreamContract {
+                field: "change_history.response",
+                message: "provider response exceeded the bounded history-read limit".to_string(),
+            });
+        }
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response.chunk().await? {
+            if bytes.len().saturating_add(chunk.len()) > CHANGE_HISTORY_MAX_RESPONSE_BYTES {
+                return Err(AdManagerError::UpstreamContract {
+                    field: "change_history.response",
+                    message: "provider response exceeded the bounded history-read limit"
+                        .to_string(),
+                });
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        if !status.is_success() {
+            return Err(AdManagerError::UpstreamApi {
+                status: status.as_u16(),
+                message: "Google Ad Manager Change_History read failed".to_string(),
+            });
+        }
+        let xml = std::str::from_utf8(&bytes).map_err(|_| AdManagerError::UpstreamContract {
+            field: "change_history.response",
+            message: "provider response was not UTF-8 XML".to_string(),
+        })?;
+        parse_change_history_xml(xml)
     }
 
     pub async fn get_report_result_rows(
@@ -3328,15 +3443,183 @@ mod tests {
     use serde_json::{Value, json};
 
     fn serve_one_http_response(response: Vec<u8>) -> (String, thread::JoinHandle<()>) {
+        const MAX_TEST_HTTP_REQUEST_BYTES: usize = 64 * 1024;
+
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind local test server");
         let address = listener.local_addr().expect("local test address");
         let handle = thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("accept test request");
-            let mut request = [0_u8; 4096];
-            let _ = stream.read(&mut request).expect("read test request");
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 4096];
+            loop {
+                let count = stream.read(&mut chunk).expect("read test request");
+                assert_ne!(count, 0, "client closed before complete request");
+                assert!(
+                    request.len().saturating_add(count) <= MAX_TEST_HTTP_REQUEST_BYTES,
+                    "test request exceeded its byte bound"
+                );
+                request.extend_from_slice(&chunk[..count]);
+                if let Some(header_end) = request.windows(4).position(|part| part == b"\r\n\r\n") {
+                    let headers = String::from_utf8_lossy(&request[..header_end]);
+                    assert!(
+                        !headers.lines().any(|line| {
+                            line.to_ascii_lowercase()
+                                .strip_prefix("transfer-encoding:")
+                                .is_some()
+                        }),
+                        "test fixture does not support transfer encoding"
+                    );
+                    let content_length = headers.lines().find_map(|line| {
+                        line.to_ascii_lowercase()
+                            .strip_prefix("content-length:")
+                            .map(|value| {
+                                value
+                                    .trim()
+                                    .parse::<usize>()
+                                    .expect("valid test request content length")
+                            })
+                    });
+                    let body = &request[header_end + 4..];
+                    if content_length.is_none_or(|length| body.len() >= length) {
+                        break;
+                    }
+                }
+            }
             let _ = stream.write_all(&response);
         });
         (format!("http://{address}/bounded"), handle)
+    }
+
+    fn http_response(status: &str, headers: &str, body: &[u8]) -> Vec<u8> {
+        let headers = headers.trim_end_matches("\r\n");
+        format!("HTTP/1.1 {status}\r\n{headers}\r\n\r\n")
+            .into_bytes()
+            .into_iter()
+            .chain(body.iter().copied())
+            .collect()
+    }
+
+    #[test]
+    fn http_response_emits_one_complete_header_terminator() {
+        let expected =
+            b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec();
+        assert_eq!(
+            http_response("200 OK", "Content-Length: 0\r\nConnection: close", &[]),
+            expected
+        );
+        assert_eq!(
+            http_response("200 OK", "Content-Length: 0\r\nConnection: close\r\n", &[]),
+            expected
+        );
+    }
+
+    const CHANGE_HISTORY_TEST_QUERY: &str = "SELECT ChangeDateTime, EntityId, EntityType, Id, Operation, UserId FROM Change_History WHERE ChangeDateTime >= '2026-10-01T00:00:00Z' AND ChangeDateTime <= '2026-10-02T00:00:00Z' ORDER BY ChangeDateTime DESC LIMIT 1";
+
+    fn change_history_result_class<T>(result: &Result<T, AdManagerError>) -> String {
+        match result {
+            Ok(_) => "ok".to_string(),
+            Err(AdManagerError::UpstreamApi { status, .. }) => {
+                format!("upstream_api:{status}")
+            }
+            Err(AdManagerError::UpstreamContract { field, .. }) => {
+                format!("upstream_contract:{field}")
+            }
+            Err(AdManagerError::Transport { source }) => format!(
+                "transport_error:timeout={},connect={},request={},body={},decode={},status={}",
+                source.is_timeout(),
+                source.is_connect(),
+                source.is_request(),
+                source.is_body(),
+                source.is_decode(),
+                source.status().map_or(0, |status| status.as_u16())
+            ),
+            Err(error) => error.code().to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn change_history_transport_rejects_oversized_content_length() {
+        let too_large = crate::change_history::CHANGE_HISTORY_MAX_RESPONSE_BYTES + 1;
+        let response = http_response(
+            "200 OK",
+            &format!("Content-Length: {too_large}\r\nConnection: close"),
+            &[],
+        );
+        let (endpoint, server) = serve_one_http_response(response);
+        let client = AdManagerClient::for_test_change_history_endpoint(endpoint);
+        let result = client
+            .select_change_history_page("123", CHANGE_HISTORY_TEST_QUERY)
+            .await;
+        assert!(
+            matches!(
+                result,
+                Err(AdManagerError::UpstreamContract {
+                    field: "change_history.response",
+                    ..
+                })
+            ),
+            "unexpected bounded-response result class: {}",
+            change_history_result_class(&result)
+        );
+        server.join().expect("join oversized content-length server");
+    }
+
+    #[tokio::test]
+    async fn change_history_transport_stream_cap_rejects_oversized_body_without_length() {
+        let too_large = vec![b'x'; crate::change_history::CHANGE_HISTORY_MAX_RESPONSE_BYTES + 1];
+        let response = http_response("200 OK", "Connection: close", &too_large);
+        let (endpoint, server) = serve_one_http_response(response);
+        let client = AdManagerClient::for_test_change_history_endpoint(endpoint);
+        let result = client
+            .select_change_history_page("123", CHANGE_HISTORY_TEST_QUERY)
+            .await;
+        assert!(
+            matches!(
+                result,
+                Err(AdManagerError::UpstreamContract {
+                    field: "change_history.response",
+                    ..
+                })
+            ),
+            "unexpected streamed-response result class: {}",
+            change_history_result_class(&result)
+        );
+        server.join().expect("join oversized stream server");
+    }
+
+    #[tokio::test]
+    async fn change_history_transport_does_not_follow_redirects() {
+        use std::io::ErrorKind;
+
+        let second_hop = TcpListener::bind("127.0.0.1:0").expect("bind redirect target");
+        second_hop
+            .set_nonblocking(true)
+            .expect("make redirect target nonblocking");
+        let location = format!(
+            "http://{}/should-not-be-requested",
+            second_hop.local_addr().unwrap()
+        );
+        let response = http_response(
+            "302 Found",
+            &format!("Location: {location}\r\nContent-Length: 0\r\nConnection: close"),
+            &[],
+        );
+        let (endpoint, server) = serve_one_http_response(response);
+        let client = AdManagerClient::for_test_change_history_endpoint(endpoint);
+        let result = client
+            .select_change_history_page("123", CHANGE_HISTORY_TEST_QUERY)
+            .await;
+        assert!(
+            matches!(result, Err(AdManagerError::UpstreamApi { status: 302, .. })),
+            "unexpected redirect result class: {}",
+            change_history_result_class(&result)
+        );
+        server.join().expect("join redirect server");
+        assert_eq!(
+            second_hop.accept().unwrap_err().kind(),
+            ErrorKind::WouldBlock
+        );
     }
 
     fn serve_rest_write_response(
