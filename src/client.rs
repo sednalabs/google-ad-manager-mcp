@@ -3491,6 +3491,19 @@ mod tests {
 
     const CHANGE_HISTORY_TEST_QUERY: &str = "SELECT ChangeDateTime, EntityId, EntityType, Id, Operation, UserId FROM Change_History WHERE ChangeDateTime >= '2026-10-01T00:00:00Z' AND ChangeDateTime <= '2026-10-02T00:00:00Z' ORDER BY ChangeDateTime DESC LIMIT 1";
 
+    fn change_history_result_class<T>(result: &Result<T, AdManagerError>) -> String {
+        match result {
+            Ok(_) => "ok".to_string(),
+            Err(AdManagerError::UpstreamApi { status, .. }) => {
+                format!("upstream_api:{status}")
+            }
+            Err(AdManagerError::UpstreamContract { field, .. }) => {
+                format!("upstream_contract:{field}")
+            }
+            Err(error) => error.code().to_string(),
+        }
+    }
+
     #[tokio::test]
     async fn change_history_transport_rejects_oversized_content_length() {
         let too_large = crate::change_history::CHANGE_HISTORY_MAX_RESPONSE_BYTES + 1;
@@ -3504,13 +3517,17 @@ mod tests {
         let result = client
             .select_change_history_page("123", CHANGE_HISTORY_TEST_QUERY)
             .await;
-        assert!(matches!(
-            result,
-            Err(AdManagerError::UpstreamContract {
-                field: "change_history.response",
-                ..
-            })
-        ));
+        assert!(
+            matches!(
+                result,
+                Err(AdManagerError::UpstreamContract {
+                    field: "change_history.response",
+                    ..
+                })
+            ),
+            "unexpected bounded-response result class: {}",
+            change_history_result_class(&result)
+        );
         server.join().expect("join oversized content-length server");
     }
 
@@ -3523,13 +3540,17 @@ mod tests {
         let result = client
             .select_change_history_page("123", CHANGE_HISTORY_TEST_QUERY)
             .await;
-        assert!(matches!(
-            result,
-            Err(AdManagerError::UpstreamContract {
-                field: "change_history.response",
-                ..
-            })
-        ));
+        assert!(
+            matches!(
+                result,
+                Err(AdManagerError::UpstreamContract {
+                    field: "change_history.response",
+                    ..
+                })
+            ),
+            "unexpected streamed-response result class: {}",
+            change_history_result_class(&result)
+        );
         server.join().expect("join oversized stream server");
     }
 
@@ -3555,10 +3576,11 @@ mod tests {
         let result = client
             .select_change_history_page("123", CHANGE_HISTORY_TEST_QUERY)
             .await;
-        assert!(matches!(
-            result,
-            Err(AdManagerError::UpstreamApi { status: 302, .. })
-        ));
+        assert!(
+            matches!(result, Err(AdManagerError::UpstreamApi { status: 302, .. })),
+            "unexpected redirect result class: {}",
+            change_history_result_class(&result)
+        );
         server.join().expect("join redirect server");
         assert_eq!(
             second_hop.accept().unwrap_err().kind(),
