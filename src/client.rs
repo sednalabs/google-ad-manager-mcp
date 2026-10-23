@@ -698,14 +698,7 @@ impl AdManagerClient {
 
     #[cfg(test)]
     pub(crate) fn for_test_change_history_endpoint(endpoint: impl Into<Arc<str>>) -> Self {
-        let settings = Settings::default();
-        let mut client = Self::from_settings(&settings);
-        client.change_history_http = Client::builder()
-            .timeout(settings.http_timeout)
-            .no_proxy()
-            .redirect(Policy::none())
-            .build()
-            .expect("test change-history client should build");
+        let mut client = Self::from_settings(&Settings::default());
         client.test_access_token = Some(Arc::from("test-access-token"));
         client.change_history_test_endpoint = Some(endpoint.into());
         client
@@ -3463,15 +3456,29 @@ mod tests {
                 request.extend_from_slice(&chunk[..count]);
                 if let Some(header_end) = request.windows(4).position(|part| part == b"\r\n\r\n") {
                     let headers = String::from_utf8_lossy(&request[..header_end]);
-                    let content_length = headers
-                        .lines()
-                        .find_map(|line| {
-                            line.to_ascii_lowercase()
-                                .strip_prefix("content-length:")
-                                .and_then(|value| value.trim().parse::<usize>().ok())
-                        })
-                        .expect("test request content length");
-                    if request.len() >= header_end + 4 + content_length {
+                    let content_length = headers.lines().find_map(|line| {
+                        line.to_ascii_lowercase()
+                            .strip_prefix("content-length:")
+                            .and_then(|value| value.trim().parse::<usize>().ok())
+                    });
+                    let chunked = headers.lines().any(|line| {
+                        line.to_ascii_lowercase()
+                            .strip_prefix("transfer-encoding:")
+                            .is_some_and(|value| {
+                                value
+                                    .split(',')
+                                    .any(|encoding| encoding.trim() == "chunked")
+                            })
+                    });
+                    let body = &request[header_end + 4..];
+                    let body_complete = if let Some(content_length) = content_length {
+                        body.len() >= content_length
+                    } else if chunked {
+                        chunked_http_body_complete(body)
+                    } else {
+                        true
+                    };
+                    if body_complete {
                         break;
                     }
                 }
@@ -3479,6 +3486,44 @@ mod tests {
             let _ = stream.write_all(&response);
         });
         (format!("http://{address}/bounded"), handle)
+    }
+
+    fn chunked_http_body_complete(body: &[u8]) -> bool {
+        let mut offset = 0;
+        loop {
+            let Some(line_end) = body[offset..]
+                .windows(2)
+                .position(|part| part == b"\r\n")
+                .map(|relative| offset + relative)
+            else {
+                return false;
+            };
+            let size = std::str::from_utf8(&body[offset..line_end])
+                .ok()
+                .and_then(|line| line.split(';').next())
+                .and_then(|value| usize::from_str_radix(value.trim(), 16).ok());
+            let Some(size) = size else {
+                return false;
+            };
+            offset = line_end + 2;
+            if size == 0 {
+                return body[offset..].starts_with(b"\r\n")
+                    || body[offset..].windows(4).any(|part| part == b"\r\n\r\n");
+            }
+            let Some(chunk_end) = offset.checked_add(size) else {
+                return false;
+            };
+            let Some(chunk_ending) = chunk_end.checked_add(2) else {
+                return false;
+            };
+            if !body
+                .get(chunk_end..chunk_ending)
+                .is_some_and(|ending| ending == b"\r\n")
+            {
+                return false;
+            }
+            offset = chunk_ending;
+        }
     }
 
     fn http_response(status: &str, headers: &str, body: &[u8]) -> Vec<u8> {
