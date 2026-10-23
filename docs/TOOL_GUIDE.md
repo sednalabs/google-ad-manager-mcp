@@ -610,6 +610,31 @@ Use `gam_report_result_rows` with the returned `report_result` when:
 - you intentionally skipped fetching the first page during `gam_report_run`;
 - you want to revisit a completed report result later.
 
+## `gam_dated_delivery_report_*`
+
+Use the fixed dated-delivery workflow when a report must cover exact GAM
+line-item ids over custom calendar dates:
+
+1. `gam_dated_delivery_report_plan` validates and previews the exact network,
+   positive line-item ids, inclusive start/end dates, expected publisher IANA
+   time zone, `DATE`/line-item/creative/`CREATIVE_SIZE_DELIVERED` dimensions, and ad-server
+   impression/click metrics. It creates no provider job and accepts no query
+   text.
+2. `gam_dated_delivery_report_apply` requires the exact preview token and the
+   legacy SOAP manage scope, checks the current publisher time zone, and sends
+   one `ReportService.runReportJob` request. If the response is uncertain or
+   has no verifiable job id, reconcile provider activity before any new run.
+3. `gam_dated_delivery_report_read` uses the returned network and job id,
+   waits at most 60 seconds per call, checks publisher time zone again, then
+   retrieves and validates the fixed CSV schema. It returns at most 10,000
+   rows from a 5 MiB download and marks either cap as incomplete.
+
+The plan binds the provider-selected `PUBLISHER` timezone to the requested
+IANA timezone; GAM network readback must match before submission and result
+projection. Dates are inclusive calendar dates in that timezone. The result
+never includes the signed download URL or raw CSV, and its counts are delivery
+metrics rather than people, sessions, pageviews, or forecasts.
+
 ## Write And Trafficking Tools
 
 Write and trafficking tools are available as guarded preview/apply pairs:

@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use mcp_toolkit_auth::provider_auth::{GoogleProviderAuthConfig, GoogleProviderAuthLoginOptions};
 use mcp_toolkit_scratchpad::{
@@ -14,6 +14,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use tokio::process::Command;
+use tokio::time::sleep;
 
 use crate::ad_unit_retirement::{
     AdUnitRetirementAssessmentArgs, MAX_DESCENDANT_PAGE_BYTES,
@@ -37,6 +38,10 @@ use crate::config::{
     server_cloudsdk_config_dir,
 };
 use crate::contract;
+use crate::dated_reporting::{
+    DatedDeliveryReportPlan, DatedDeliveryReportRequest, build_plan as build_dated_delivery_plan,
+    parse_report_csv,
+};
 use crate::evidence::{
     EvidenceSource, EvidenceState, MAX_CONTRACT_ENVELOPE_BYTES, MAX_RMCP_TRANSPORT_BYTES,
     dependency_evidence_state, dependency_probe_decision, evidence_receipt_target_ids,
@@ -243,6 +248,28 @@ pub struct ReportResultRowsArgs {
     /// Optional next-page token. Must be no more than 4096 bytes.
     #[schemars(length(max = 4096))]
     pub page_token: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DatedDeliveryReportPlanArgs {
+    pub request: DatedDeliveryReportRequest,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DatedDeliveryReportApplyArgs {
+    pub request: DatedDeliveryReportRequest,
+    /// Exact token returned by gam_dated_delivery_report_plan.
+    pub confirmation_token: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DatedDeliveryReportReadArgs {
+    pub request: DatedDeliveryReportRequest,
+    /// Exact report-job id returned by gam_dated_delivery_report_apply.
+    pub report_job_id: String,
+    /// Maximum time to wait for an existing job. Defaults to 20 seconds, max 60 seconds.
+    #[schemars(range(min = 0, max = 60000))]
+    pub max_wait_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
@@ -1260,6 +1287,7 @@ impl AdManagerServer {
                     "Call gam_ad_unit_dependency_probe before ad-unit cleanup, archive, or retargeting work so placement and line-item dependencies are explicit.",
                     "Call gam_ad_unit_retirement_assessment to bind one to ten exact canonical ad-unit ids to current REST identity and a bounded ordered hierarchy/descendant scan, then grade freshness-bound evidence receipts and return a conservative operator-review recommendation that never authorizes a mutation.",
                     "Call gam_report_run only with explicit intent to start a new saved-report job, gam_report_operation_poll to continue an asynchronous run without starting another one, and gam_report_result_rows for large paginated results.",
+                    "For bounded dated GAM delivery, call gam_dated_delivery_report_plan first; after reviewing its exact network, line-item ids, inclusive dates, publisher time zone, fixed dimensions and metrics, use gam_dated_delivery_report_apply once with the returned confirmation_token, then continue only the returned job id with gam_dated_delivery_report_read.",
                     "Call gam_trafficking_tool_matrix before planning writes so the REST and SOAP trafficking surfaces are explicit.",
                     "Use gam_rest_write_plan for dry-run write plans; gam_rest_write_apply only works when the server is explicitly started with GOOGLE_AD_MANAGER_MCP_WRITE_MODE=enabled and the manage scope.",
                     "Use gam_soap_trafficking_plan and gam_soap_trafficking_apply for order, line-item, creative, LICA, and forecast SOAP workflows.",
@@ -1304,6 +1332,9 @@ impl AdManagerServer {
                     "gam_report_run",
                     "gam_report_operation_poll",
                     "gam_report_result_rows",
+                    "gam_dated_delivery_report_plan",
+                    "gam_dated_delivery_report_apply",
+                    "gam_dated_delivery_report_read",
                     "gam_trafficking_tool_matrix",
                     "gam_rest_write_plan",
                     "gam_soap_trafficking_plan",
@@ -1316,6 +1347,7 @@ impl AdManagerServer {
                     "The guarded SOAP layer covers production trafficking operations that are not yet available through the REST beta surface.",
                     "SOAP live calls require the full Ad Manager manage scope, including non-mutating forecast/read calls, because the legacy SOAP API does not accept the newer read-only scope.",
                     "Starting a saved report creates an upstream job and discovery exposes gam_report_run only for explicit new-run intent with read_only=false; gam_report_operation_poll resumes an existing operation without starting a new run.",
+                    "Dated delivery report plans are fixed-shape previews with no provider job. Applying requires the exact plan token; a possibly dispatched runReportJob without a verified job id must be reconciled and never blindly replayed. The read tool uses only the returned job id, a bounded wait, publisher-time-zone readback, and capped validated CSV rows.",
                     "Scratchpad data stays local to the MCP server process and is bounded by session, table, row, memory, SQL-size, and query-time limits."
                 ]
             }),
@@ -2264,6 +2296,294 @@ impl AdManagerServer {
                 ))
             }
         }
+    }
+
+    #[tool(
+        name = "gam_dated_delivery_report_plan",
+        description = "Preview a fixed, bounded GAM daily line-item delivery report. This preview creates no provider job."
+    )]
+    async fn gam_dated_delivery_report_plan(
+        &self,
+        Parameters(args): Parameters<DatedDeliveryReportPlanArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let started = Instant::now();
+        let plan = match build_dated_delivery_plan(args.request) {
+            Ok(value) => value,
+            Err(err) => return Ok(contract::error(err, started)),
+        };
+        let (plan_id, confirmation_token, fingerprint) =
+            match dated_delivery_report_identifiers(&plan) {
+                Ok(value) => value,
+                Err(err) => return Ok(contract::error(err, started)),
+            };
+        let preview = GuardedActionPreview::new(
+            plan_id,
+            self.settings().write_mode,
+            GuardedActionPosture::preview(),
+            json!({
+                "request": {
+                    "network_code": plan.network_code,
+                    "line_item_ids": plan.line_item_ids,
+                    "start_date": plan.start_date,
+                    "end_date": plan.end_date,
+                    "publisher_time_zone": plan.publisher_time_zone,
+                },
+                "report_query": {
+                    "service": "ReportService",
+                    "api_version": DEFAULT_SOAP_API_VERSION,
+                    "date_range_inclusive": true,
+                    "time_zone_type": "PUBLISHER",
+                    "dimensions": plan.dimensions,
+                    "metrics": plan.columns,
+                    "statement": plan.statement,
+                    "soap_payload": plan.report_query_xml,
+                },
+                "fingerprint": fingerprint,
+                "confirmation_token": confirmation_token,
+                "provider_job_created": false,
+                "required_apply_scope": MANAGE_SCOPE,
+                "next_step": "Review the exact network, line-item ids, inclusive dates, publisher timezone, dimensions and metrics. The legacy SOAP ReportService requires the manage scope. Apply with this exact request and confirmation token only when the report job is authorized.",
+            }),
+            json!({
+                "provider_called": false,
+                "provider_job_created": false,
+                "campaign_or_configuration_changed": false,
+            }),
+        );
+        Ok(contract::success(json!(preview), started))
+    }
+
+    #[tool(
+        name = "gam_dated_delivery_report_apply",
+        description = "Start one fixed GAM dated delivery report job after exact plan-token confirmation; an uncertain response must be reconciled and never replayed."
+    )]
+    async fn gam_dated_delivery_report_apply(
+        &self,
+        Parameters(args): Parameters<DatedDeliveryReportApplyArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let started = Instant::now();
+        let plan = match build_dated_delivery_plan(args.request) {
+            Ok(value) => value,
+            Err(err) => return Ok(contract::error(err, started)),
+        };
+        let (plan_id, expected_token, fingerprint) = match dated_delivery_report_identifiers(&plan)
+        {
+            Ok(value) => value,
+            Err(err) => return Ok(contract::error(err, started)),
+        };
+        if let Err(err) = self.settings().write_mode.assert_allowed(
+            "gam_dated_delivery_report_apply",
+            AdManagerServer::report_run_posture(),
+        ) {
+            return Ok(contract::error(write_action_disabled(err), started));
+        }
+        if args.confirmation_token != expected_token {
+            return Ok(contract::error(
+                AdManagerError::ConfirmationTokenMismatch,
+                started,
+            ));
+        }
+
+        if !scope_allows_write(self.client().scope()) {
+            return Ok(contract::error(
+                AdManagerError::WriteScopeRequired {
+                    scope: self.client().scope().to_string(),
+                },
+                started,
+            ));
+        }
+
+        let publisher_time_zone = match self
+            .client()
+            .get_network_time_zone(&plan.network_code)
+            .await
+        {
+            Ok(value) => value,
+            Err(err) => return Ok(contract::error(err, started)),
+        };
+        if publisher_time_zone != plan.publisher_time_zone {
+            return Ok(contract::error(
+                AdManagerError::UpstreamContract {
+                    field: "dated_delivery.publisher_time_zone",
+                    message: "the current GAM publisher time zone does not match the reviewed plan"
+                        .to_string(),
+                },
+                started,
+            ));
+        }
+
+        let report_job_id = match self.client().run_dated_delivery_report_job(&plan).await {
+            Ok(value) => value,
+            Err(err @ AdManagerError::DatedReportHandoffUncertain { .. }) => {
+                return Ok(contract::error_with_detail(
+                    err,
+                    json!({
+                        "plan_id": plan_id,
+                        "fingerprint": fingerprint,
+                        "dispatch_state": "uncertain_after_single_submission",
+                        "report_job_id": null,
+                        "automatic_replay_safe": false,
+                        "operator_action": "Reconcile ReportService job activity for this network and reviewed plan. Do not submit the report again unless reconciliation proves no job was created and an operator explicitly authorizes a new attempt."
+                    }),
+                    started,
+                ));
+            }
+            Err(err) => return Ok(contract::error(err, started)),
+        };
+        let apply = GuardedActionApply::new(
+            plan_id,
+            self.settings().write_mode,
+            AdManagerServer::report_run_posture(),
+            json!({
+                "report_job_id": report_job_id,
+                "network_code": plan.network_code,
+                "line_item_ids": plan.line_item_ids,
+                "start_date": plan.start_date,
+                "end_date": plan.end_date,
+                "publisher_time_zone": publisher_time_zone,
+                "date_range_inclusive": true,
+                "status_tool": "gam_dated_delivery_report_read",
+            }),
+            json!({
+                "mutation_performed": true,
+                "provider_effect": "one_report_job_created",
+                "fingerprint": fingerprint,
+                "campaign_or_configuration_changed": false,
+                "automatic_retry_performed": false,
+            }),
+        );
+        Ok(contract::success(json!(apply), started))
+    }
+
+    #[tool(
+        name = "gam_dated_delivery_report_read",
+        description = "Wait a bounded time on one exact GAM report-job id, then retrieve and validate fixed-schema dated delivery rows without exposing its signed download URL or raw CSV."
+    )]
+    async fn gam_dated_delivery_report_read(
+        &self,
+        Parameters(args): Parameters<DatedDeliveryReportReadArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let started = Instant::now();
+        let plan = match build_dated_delivery_plan(args.request) {
+            Ok(value) => value,
+            Err(err) => return Ok(contract::error(err, started)),
+        };
+        let wait_ms = args.max_wait_ms.unwrap_or(20_000);
+        if wait_ms > 60_000 {
+            return Ok(contract::error(
+                AdManagerError::invalid("max_wait_ms", "must not exceed 60000"),
+                started,
+            ));
+        }
+        let started_wait = Instant::now();
+        let status = loop {
+            let status = match self
+                .client()
+                .get_dated_delivery_report_status(&plan.network_code, &args.report_job_id)
+                .await
+            {
+                Ok(value) => value,
+                Err(err) => return Ok(contract::error(err, started)),
+            };
+            if status != "IN_PROGRESS" || started_wait.elapsed() >= Duration::from_millis(wait_ms) {
+                break status;
+            }
+            let remaining = Duration::from_millis(wait_ms).saturating_sub(started_wait.elapsed());
+            sleep(remaining.min(Duration::from_secs(5))).await;
+        };
+        let base = json!({
+            "report_job_id": args.report_job_id,
+            "network_code": plan.network_code,
+            "start_date": plan.start_date,
+            "end_date": plan.end_date,
+            "date_range_inclusive": true,
+            "publisher_time_zone": plan.publisher_time_zone,
+            "time_zone_source": "GAM publisher network setting",
+            "time_zone_type": "PUBLISHER",
+            "status": status,
+        });
+        if status == "IN_PROGRESS" {
+            return Ok(contract::success(
+                json!({
+                    "report": base,
+                    "coverage": {"complete": false, "reason": "job_still_running"},
+                    "next_action": "Call this tool again with the same network, report_job_id and reviewed request. This continues the existing job and never submits another report."
+                }),
+                started,
+            ));
+        }
+        if status == "FAILED" {
+            return Ok(contract::success(
+                json!({
+                    "report": base,
+                    "coverage": {"complete": false, "reason": "provider_job_failed"},
+                    "rows": [],
+                }),
+                started,
+            ));
+        }
+
+        let current_time_zone = match self
+            .client()
+            .get_network_time_zone(&plan.network_code)
+            .await
+        {
+            Ok(value) => value,
+            Err(err) => return Ok(contract::error(err, started)),
+        };
+        if current_time_zone != plan.publisher_time_zone {
+            return Ok(contract::success(
+                json!({
+                    "report": base,
+                    "coverage": {"complete": false, "reason": "publisher_time_zone_changed"},
+                    "rows": [],
+                    "current_publisher_time_zone": current_time_zone,
+                }),
+                started,
+            ));
+        }
+        let download = match self
+            .client()
+            .download_dated_delivery_report(&plan.network_code, &args.report_job_id)
+            .await
+        {
+            Ok(value) => value,
+            Err(err) => return Ok(contract::error(err, started)),
+        };
+        if !download.complete && !download.bytes.contains(&b'\n') {
+            return Ok(contract::success(
+                json!({
+                    "report": base,
+                    "coverage": {"complete": false, "reason": "download_byte_cap_before_complete_header"},
+                    "rows": [],
+                }),
+                started,
+            ));
+        }
+        let parsed = match parse_report_csv(&download.bytes, &plan) {
+            Ok(value) => value,
+            Err(err) => return Ok(contract::error(err, started)),
+        };
+        let complete = download.complete && parsed.complete;
+        let reason = if !download.complete {
+            Some("download_byte_cap")
+        } else {
+            parsed.truncation_reason
+        };
+        Ok(contract::success(
+            json!({
+                "report": base,
+                "coverage": {
+                    "complete": complete,
+                    "row_cap": 10000,
+                    "byte_cap": 5242880,
+                    "returned_rows": parsed.rows.len(),
+                    "truncation_reason": reason,
+                },
+                "rows": parsed.rows,
+            }),
+            started,
+        ))
     }
 
     #[tool(
@@ -7171,6 +7491,22 @@ fn guarded_write_identifiers(
     Ok((plan_id, confirmation_token, fingerprint))
 }
 
+fn dated_delivery_report_identifiers(
+    plan: &DatedDeliveryReportPlan,
+) -> Result<(String, String, String), AdManagerError> {
+    let target = format!("{}-through-{}", plan.start_date, plan.end_date);
+    let seed = GuardedActionPlanSeed::new("gam_dated_delivery_report", &plan.network_code, &target)
+        .map_err(|err| AdManagerError::invalid("plan_seed", err.to_string()))?;
+    let serialized = serde_json::to_string(plan).map_err(|_| AdManagerError::UpstreamContract {
+        field: "dated_delivery.plan",
+        message: "could not serialize the validated report plan".to_string(),
+    })?;
+    let fingerprint = stable_fingerprint(&serialized);
+    let plan_id = format!("{}.{}", seed.stable_plan_id(), fingerprint);
+    let confirmation_token = format!("confirm-gam-dated-{fingerprint}");
+    Ok((plan_id, confirmation_token, fingerprint))
+}
+
 fn guarded_soap_identifiers(
     request: &SoapTraffickingRequestArgs,
     plan: &SoapTraffickingPlan,
@@ -8093,6 +8429,45 @@ mod tests {
     use std::thread;
 
     use super::*;
+
+    #[test]
+    fn dated_report_confirmation_binds_network_ids_dates_and_timezone() {
+        let request = DatedDeliveryReportRequest {
+            network_code: "1234567".into(),
+            line_item_ids: vec!["42".into()],
+            start_date: "2026-10-01".into(),
+            end_date: "2026-10-31".into(),
+            publisher_time_zone: "Australia/Sydney".into(),
+        };
+        let base = build_dated_delivery_plan(request.clone()).unwrap();
+        let (_, token, _) = dated_delivery_report_identifiers(&base).unwrap();
+        for changed in [
+            DatedDeliveryReportRequest {
+                network_code: "7654321".into(),
+                ..request.clone()
+            },
+            DatedDeliveryReportRequest {
+                line_item_ids: vec!["43".into()],
+                ..request.clone()
+            },
+            DatedDeliveryReportRequest {
+                start_date: "2026-10-02".into(),
+                ..request.clone()
+            },
+            DatedDeliveryReportRequest {
+                end_date: "2026-10-30".into(),
+                ..request.clone()
+            },
+            DatedDeliveryReportRequest {
+                publisher_time_zone: "America/Los_Angeles".into(),
+                ..request.clone()
+            },
+        ] {
+            let changed_plan = build_dated_delivery_plan(changed).unwrap();
+            let (_, changed_token, _) = dated_delivery_report_identifiers(&changed_plan).unwrap();
+            assert_ne!(token, changed_token);
+        }
+    }
 
     #[test]
     fn shared_adc_request_uses_configured_default_and_explicit_override() {

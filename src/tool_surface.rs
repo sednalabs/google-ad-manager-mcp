@@ -181,6 +181,56 @@ pub(crate) fn build_tool_inventory() -> Result<ToolInventory, ToolInventoryError
             ],
         ),
         cap(
+            "gam_dated_delivery_report_plan",
+            "reports",
+            "Preview a fixed-shape bounded dated delivery report for exact line-item ids; the preview makes no provider call and creates no job.",
+            [
+                "google",
+                "ad-manager",
+                "reports",
+                "dated",
+                "delivery",
+                "clicks",
+                "impressions",
+                "preview",
+                "line-items",
+            ],
+        )
+        .with_risk_posture(GuardedActionPosture::preview()),
+        cap(
+            "gam_dated_delivery_report_apply",
+            "reports",
+            "Start one dated GAM report job after exact preview-token confirmation; uncertain submission outcomes require reconciliation before another attempt.",
+            [
+                "google",
+                "ad-manager",
+                "reports",
+                "dated",
+                "delivery",
+                "apply",
+                "job",
+                "line-items",
+            ],
+        )
+        .with_read_only(false)
+        .with_risk_posture(report_run_posture()),
+        cap(
+            "gam_dated_delivery_report_read",
+            "reports",
+            "Read one exact dated GAM report job, wait a bounded time, and validate bounded CSV results without exposing the signed download URL or raw CSV.",
+            [
+                "google",
+                "ad-manager",
+                "reports",
+                "dated",
+                "delivery",
+                "status",
+                "download",
+                "rows",
+            ],
+        )
+        .with_risk_posture(report_poll_posture()),
+        cap(
             "gam_trafficking_tool_matrix",
             "trafficking",
             "Describe REST-supported Ad Manager write tools, SOAP trafficking operations, and remaining ergonomics gaps.",

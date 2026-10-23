@@ -27,6 +27,7 @@ mod change_history;
 mod client;
 mod config;
 mod contract;
+mod dated_reporting;
 mod error;
 mod evidence;
 mod fingerprint;

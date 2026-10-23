@@ -165,6 +165,13 @@ seconds, result pages at 1,000 rows and 512 KiB, and polling applies its absolut
 deadline to every GET and sleep. Continue with the returned
 `expected_report_name`; a timed-out continuation raises the bounded timeout.
 
+For a fixed dated delivery report, use `gam_dated_delivery_report_plan` to
+review exact line-item ids, inclusive dates, and publisher timezone; then call
+`gam_dated_delivery_report_apply` once with the exact confirmation token and
+continue only its returned job id with `gam_dated_delivery_report_read`. The
+legacy SOAP report service requires the Ad Manager manage scope. An uncertain
+job submission must be reconciled before another run.
+
 For REST write planning:
 
 1. `gam_trafficking_tool_matrix`
