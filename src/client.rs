@@ -3454,8 +3454,28 @@ mod tests {
         let address = listener.local_addr().expect("local test address");
         let handle = thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("accept test request");
-            let mut request = [0_u8; 4096];
-            let _ = stream.read(&mut request).expect("read test request");
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 4096];
+            loop {
+                let count = stream.read(&mut chunk).expect("read test request");
+                assert_ne!(count, 0, "client closed before complete request");
+                request.extend_from_slice(&chunk[..count]);
+                if let Some(header_end) = request.windows(4).position(|part| part == b"\r\n\r\n") {
+                    let headers = String::from_utf8_lossy(&request[..header_end]);
+                    let content_length = headers
+                        .lines()
+                        .find_map(|line| {
+                            line.to_ascii_lowercase()
+                                .strip_prefix("content-length:")
+                                .and_then(|value| value.trim().parse::<usize>().ok())
+                        })
+                        .expect("test request content length");
+                    if request.len() >= header_end + 4 + content_length {
+                        break;
+                    }
+                }
+            }
             let _ = stream.write_all(&response);
         });
         (format!("http://{address}/bounded"), handle)

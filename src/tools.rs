@@ -8805,7 +8805,7 @@ mod tests {
             .gam_scratchpad_close_session(Parameters(ScratchpadSessionArgs { session_id }))
             .await
             .expect("close scratchpad session");
-        assert_eq!(closed.is_error, None);
+        assert_eq!(closed.is_error, Some(false));
         assert_eq!(
             closed.structured_content.as_ref().unwrap()["data"]["released"],
             true
