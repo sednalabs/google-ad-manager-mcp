@@ -20,6 +20,7 @@ use crate::change_history::{
     CHANGE_HISTORY_MAX_RESPONSE_BYTES, ChangeHistoryEvent, parse_change_history_xml,
 };
 use crate::config::{MAX_REPORT_POLL_TIMEOUT_MS, Settings, selected_adc_file};
+use crate::dated_reporting::{DatedDeliveryReportPlan, MAX_REPORT_CSV_BYTES};
 use crate::error::AdManagerError;
 
 pub const DEFAULT_SOAP_API_VERSION: &str = "v202605";
@@ -32,11 +33,13 @@ pub(crate) const MAX_REPORT_RESULT_PAGE_SIZE: u32 = 1_000;
 pub(crate) const MAX_REPORT_INITIAL_POLL_INTERVAL_MS: u64 = 30 * 1_000;
 const MAX_REPORT_RESOURCE_NAME_BYTES: usize = 256;
 const MAX_REPORT_NUMERIC_ID_BYTES: usize = 32;
+const MAX_DATED_REPORT_SOAP_BYTES: usize = 64 * 1024;
 const MAX_REPORT_OPERATION_ID_BYTES: usize = 128;
 pub(crate) const MAX_REPORT_PAGE_TOKEN_BYTES: usize = 4 * 1024;
 const MAX_CHANGE_HISTORY_QUERY_BYTES: usize = 16 * 1024;
 const SOAP_ENVELOPE_NAMESPACE: &str = concat!("http", "://schemas.xmlsoap.org/soap/envelope/");
 const NETWORK_HIERARCHY_FIELDS: &str = "name,networkCode,effectiveRootAdUnit";
+const NETWORK_REPORT_FIELDS: &str = "networkCode,timeZone";
 const AD_UNIT_HIERARCHY_FIELDS: &str = "adUnits.name,adUnits.parentAdUnit,adUnits.parentPath.parentAdUnit,adUnits.status,adUnits.hasChildren,adUnits.updateTime,nextPageToken";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -618,6 +621,12 @@ pub struct CompletedReportRun {
 }
 
 #[derive(Debug)]
+pub(crate) struct DatedReportDownload {
+    pub bytes: Vec<u8>,
+    pub complete: bool,
+}
+
+#[derive(Debug)]
 pub(crate) struct ReportPollFailure {
     pub error: AdManagerError,
     pub operation: Option<Value>,
@@ -629,6 +638,7 @@ pub(crate) struct ReportPollFailure {
 pub struct AdManagerClient {
     http: Client,
     change_history_http: Client,
+    report_http: Client,
     auth_mode: UpstreamAuthMode,
     token_provider: Arc<OnceCell<Arc<dyn TokenProvider>>>,
     oauth_token_provider: Arc<OnceCell<Arc<RefreshTokenProvider>>>,
@@ -640,6 +650,8 @@ pub struct AdManagerClient {
     test_access_token: Option<Arc<str>>,
     #[cfg(test)]
     change_history_test_endpoint: Option<Arc<str>>,
+    #[cfg(test)]
+    report_test_endpoint: Option<Arc<str>>,
 }
 
 impl AdManagerClient {
@@ -652,9 +664,15 @@ impl AdManagerClient {
 
         let http = Client::builder()
             .timeout(settings.http_timeout)
-            .default_headers(headers)
+            .default_headers(headers.clone())
             .build()
             .expect("reqwest client should build");
+        let report_http = Client::builder()
+            .timeout(settings.http_timeout)
+            .redirect(reqwest::redirect::Policy::none())
+            .default_headers(headers)
+            .build()
+            .expect("GAM report client should build without redirects");
 
         let mut history_headers = HeaderMap::new();
         history_headers.insert(
@@ -673,6 +691,7 @@ impl AdManagerClient {
         Self {
             http,
             change_history_http,
+            report_http,
             auth_mode: select_auth_mode(settings)
                 .unwrap_or_else(|err| UpstreamAuthMode::Unavailable(err.to_string())),
             token_provider: Arc::new(OnceCell::new()),
@@ -685,6 +704,8 @@ impl AdManagerClient {
             test_access_token: None,
             #[cfg(test)]
             change_history_test_endpoint: None,
+            #[cfg(test)]
+            report_test_endpoint: None,
         }
     }
 
@@ -701,6 +722,14 @@ impl AdManagerClient {
         let mut client = Self::from_settings(&Settings::default());
         client.test_access_token = Some(Arc::from("test-access-token"));
         client.change_history_test_endpoint = Some(endpoint.into());
+        client
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test_report_endpoint(endpoint: impl Into<Arc<str>>) -> Self {
+        let mut client = Self::from_settings(&Settings::default());
+        client.test_access_token = Some(Arc::from("test-access-token"));
+        client.report_test_endpoint = Some(endpoint.into());
         client
     }
 
@@ -872,6 +901,289 @@ impl AdManagerClient {
             "https://admanager.googleapis.com/$discovery/rest?version=v1",
         );
         self.send_json(request).await
+    }
+
+    pub(crate) async fn get_network_time_zone(
+        &self,
+        network_code: &str,
+    ) -> Result<String, AdManagerError> {
+        let network_code = validate_network_code(network_code)?;
+        let value = self
+            .get_json(
+                &format!("networks/{network_code}"),
+                &[("fields", NETWORK_REPORT_FIELDS.to_string())],
+            )
+            .await?;
+        if value.get("networkCode").and_then(Value::as_str) != Some(network_code.as_str()) {
+            return Err(AdManagerError::UpstreamContract {
+                field: "dated_delivery.network_identity",
+                message: "GAM network readback did not match the requested network".to_string(),
+            });
+        }
+        value
+            .get("timeZone")
+            .and_then(Value::as_str)
+            .filter(|time_zone| !time_zone.trim().is_empty())
+            .map(ToOwned::to_owned)
+            .ok_or_else(|| AdManagerError::UpstreamContract {
+                field: "dated_delivery.publisher_time_zone",
+                message: "GAM network readback omitted its publisher time zone".to_string(),
+            })
+    }
+
+    pub(crate) async fn run_dated_delivery_report_job(
+        &self,
+        plan: &DatedDeliveryReportPlan,
+    ) -> Result<String, AdManagerError> {
+        let network_code = validate_network_code(&plan.network_code)?;
+        let api_version = DEFAULT_SOAP_API_VERSION;
+        let endpoint = self.report_endpoint(api_version, "ReportService")?;
+        let namespace = soap_namespace(api_version);
+        let payload = format!("<reportJob>{}</reportJob>", plan.report_query_xml);
+        let envelope = build_soap_envelope(&namespace, &network_code, "runReportJob", &payload);
+        let token = self.access_token().await?;
+        let mut request = self
+            .report_http
+            .request(Method::POST, endpoint)
+            .bearer_auth(token)
+            .header(CONTENT_TYPE, "text/xml; charset=utf-8")
+            .header("SOAPAction", "")
+            .body(envelope);
+        if let Some(quota_project) = &self.quota_project {
+            request = request.header("x-goog-user-project", quota_project.as_ref());
+        }
+
+        // runReportJob creates provider state. Send once and treat every
+        // post-dispatch uncertainty as a reconciliation stop.
+        let mut response = request.send().await.map_err(|_| {
+            dated_report_handoff_uncertain("GAM report-job submission may have been dispatched")
+        })?;
+        let status = response.status();
+        if response
+            .content_length()
+            .is_some_and(|length| length > MAX_DATED_REPORT_SOAP_BYTES as u64)
+        {
+            return Err(if definitive_report_rejection(status) {
+                AdManagerError::UpstreamApi {
+                    status: status.as_u16(),
+                    message:
+                        "GAM rejected the report-job request; response exceeded the safety limit"
+                            .to_string(),
+                }
+            } else {
+                dated_report_handoff_uncertain("GAM report-job response exceeded the safety limit")
+            });
+        }
+        let mut bytes = Vec::new();
+        loop {
+            let chunk = match response.chunk().await {
+                Ok(value) => value,
+                Err(_) if definitive_report_rejection(status) => {
+                    return Err(AdManagerError::UpstreamApi {
+                        status: status.as_u16(),
+                        message: "GAM rejected the report-job request".to_string(),
+                    });
+                }
+                Err(_) => {
+                    return Err(dated_report_handoff_uncertain(
+                        "GAM report-job response could not be read",
+                    ));
+                }
+            };
+            let Some(chunk) = chunk else { break };
+            if bytes.len().saturating_add(chunk.len()) > MAX_DATED_REPORT_SOAP_BYTES {
+                return Err(if definitive_report_rejection(status) {
+                    AdManagerError::UpstreamApi {
+                        status: status.as_u16(),
+                        message: "GAM rejected the report-job request; response exceeded the safety limit".to_string(),
+                    }
+                } else {
+                    dated_report_handoff_uncertain(
+                        "GAM report-job response exceeded the safety limit",
+                    )
+                });
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        if !status.is_success() {
+            return Err(if definitive_report_rejection(status) {
+                AdManagerError::UpstreamApi {
+                    status: status.as_u16(),
+                    message: "GAM rejected the report-job request".to_string(),
+                }
+            } else {
+                dated_report_handoff_uncertain("GAM report-job submission outcome is uncertain")
+            });
+        }
+        let response_xml = std::str::from_utf8(&bytes).map_err(|_| {
+            dated_report_handoff_uncertain("GAM returned an unreadable report-job response")
+        })?;
+        if soap_response_has_fault(response_xml) {
+            return Err(AdManagerError::UpstreamApi {
+                status: 400,
+                message: "GAM rejected the report-job request".to_string(),
+            });
+        }
+        let document = roxmltree::Document::parse(response_xml).map_err(|_| {
+            dated_report_handoff_uncertain("GAM returned an unreadable report-job response")
+        })?;
+        let job_id = document
+            .descendants()
+            .find(|node| node.tag_name().name() == "rval")
+            .and_then(|rval| {
+                rval.descendants()
+                    .find(|node| node.tag_name().name() == "id")
+                    .and_then(|node| node.text())
+            })
+            .map(str::trim)
+            .filter(|value| !value.is_empty() && value.chars().all(|ch| ch.is_ascii_digit()))
+            .ok_or_else(|| dated_report_handoff_uncertain("GAM did not return a report-job id"))?;
+        if job_id.len() > 32 || job_id.parse::<u64>().ok().is_none_or(|id| id == 0) {
+            return Err(dated_report_handoff_uncertain(
+                "GAM returned an invalid report-job id",
+            ));
+        }
+        Ok(job_id.to_string())
+    }
+
+    pub(crate) async fn get_dated_delivery_report_status(
+        &self,
+        network_code: &str,
+        report_job_id: &str,
+    ) -> Result<String, AdManagerError> {
+        let job_id = validate_report_job_id(report_job_id)?;
+        let response = self
+            .dated_report_soap_call(
+                network_code,
+                "getReportJobStatus",
+                &format!("<reportJobId>{job_id}</reportJobId>"),
+            )
+            .await?;
+        let document = roxmltree::Document::parse(&response).map_err(|_| {
+            AdManagerError::UpstreamContract {
+                field: "dated_delivery.report_status",
+                message: "GAM returned an unreadable report status".to_string(),
+            }
+        })?;
+        let status = document
+            .descendants()
+            .find(|node| node.tag_name().name() == "rval")
+            .and_then(|node| node.text())
+            .map(str::trim)
+            .filter(|status| matches!(*status, "IN_PROGRESS" | "COMPLETED" | "FAILED"))
+            .ok_or_else(|| AdManagerError::UpstreamContract {
+                field: "dated_delivery.report_status",
+                message: "GAM returned an unrecognized report status".to_string(),
+            })?;
+        Ok(status.to_string())
+    }
+
+    pub(crate) async fn download_dated_delivery_report(
+        &self,
+        network_code: &str,
+        report_job_id: &str,
+    ) -> Result<DatedReportDownload, AdManagerError> {
+        let job_id = validate_report_job_id(report_job_id)?;
+        let payload = format!(
+            "<reportJobId>{job_id}</reportJobId><reportDownloadOptions><exportFormat>CSV_DUMP</exportFormat><includeReportProperties>false</includeReportProperties><includeTotalsRow>false</includeTotalsRow><useGzipCompression>false</useGzipCompression></reportDownloadOptions>"
+        );
+        let response = self
+            .dated_report_soap_call(network_code, "getReportDownloadUrlWithOptions", &payload)
+            .await?;
+        let document = roxmltree::Document::parse(&response).map_err(|_| {
+            AdManagerError::UpstreamContract {
+                field: "dated_delivery.download_url",
+                message: "GAM returned an unreadable report-download response".to_string(),
+            }
+        })?;
+        let signed_url = document
+            .descendants()
+            .find(|node| node.tag_name().name() == "rval")
+            .and_then(|node| node.text())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| AdManagerError::UpstreamContract {
+                field: "dated_delivery.download_url",
+                message: "GAM omitted the report-download URL".to_string(),
+            })?;
+        let url = validate_report_download_url(signed_url)?;
+        let response = self.report_http.get(url).send().await.map_err(|_| {
+            AdManagerError::UpstreamContract {
+                field: "dated_delivery.download",
+                message: "GAM report download request failed; the signed URL was withheld"
+                    .to_string(),
+            }
+        })?;
+        read_dated_report_csv_response(response).await
+    }
+
+    async fn dated_report_soap_call(
+        &self,
+        network_code: &str,
+        method: &str,
+        payload_xml: &str,
+    ) -> Result<String, AdManagerError> {
+        let network_code = validate_network_code(network_code)?;
+        let endpoint = self.report_endpoint(DEFAULT_SOAP_API_VERSION, "ReportService")?;
+        let namespace = soap_namespace(DEFAULT_SOAP_API_VERSION);
+        let envelope = build_soap_envelope(&namespace, &network_code, method, payload_xml);
+        let token = self.access_token().await?;
+        let mut request = self
+            .report_http
+            .request(Method::POST, endpoint)
+            .bearer_auth(token)
+            .header(CONTENT_TYPE, "text/xml; charset=utf-8")
+            .header("SOAPAction", "")
+            .body(envelope);
+        if let Some(quota_project) = &self.quota_project {
+            request = request.header("x-goog-user-project", quota_project.as_ref());
+        }
+        let mut response = request.send().await?;
+        let status = response.status();
+        if response
+            .content_length()
+            .is_some_and(|length| length > MAX_DATED_REPORT_SOAP_BYTES as u64)
+        {
+            return Err(AdManagerError::UpstreamContract {
+                field: "dated_delivery.report_response",
+                message: "GAM report response exceeded the safety limit".to_string(),
+            });
+        }
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response.chunk().await? {
+            if bytes.len().saturating_add(chunk.len()) > MAX_DATED_REPORT_SOAP_BYTES {
+                return Err(AdManagerError::UpstreamContract {
+                    field: "dated_delivery.report_response",
+                    message: "GAM report response exceeded the safety limit".to_string(),
+                });
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        if !status.is_success() {
+            return Err(AdManagerError::UpstreamApi {
+                status: status.as_u16(),
+                message: "GAM report request failed".to_string(),
+            });
+        }
+        let xml = std::str::from_utf8(&bytes).map_err(|_| AdManagerError::UpstreamContract {
+            field: "dated_delivery.report_response",
+            message: "GAM report response was not valid UTF-8".to_string(),
+        })?;
+        if soap_response_has_fault(xml) {
+            return Err(AdManagerError::UpstreamApi {
+                status: 400,
+                message: "GAM report request was rejected".to_string(),
+            });
+        }
+        Ok(xml.to_string())
+    }
+
+    fn report_endpoint(&self, api_version: &str, service: &str) -> Result<String, AdManagerError> {
+        #[cfg(test)]
+        if let Some(endpoint) = &self.report_test_endpoint {
+            return Ok(endpoint.to_string());
+        }
+        soap_service_url(&self.soap_base_url, api_version, service)
     }
 
     pub async fn run_report(
@@ -2521,6 +2833,119 @@ fn soap_namespace(api_version: &str) -> String {
     format!("https://www.google.com/apis/ads/publisher/{api_version}")
 }
 
+fn validate_report_job_id(value: &str) -> Result<String, AdManagerError> {
+    let value = value.trim();
+    if value.is_empty()
+        || value.len() > MAX_REPORT_NUMERIC_ID_BYTES
+        || !value.chars().all(|ch| ch.is_ascii_digit())
+        || value.parse::<u64>().ok().is_none_or(|id| id == 0)
+    {
+        return Err(AdManagerError::invalid(
+            "report_job_id",
+            "must be an exact positive numeric report-job id",
+        ));
+    }
+    Ok(value.to_string())
+}
+
+fn dated_report_handoff_uncertain(message: &str) -> AdManagerError {
+    AdManagerError::DatedReportHandoffUncertain {
+        message: message.to_string(),
+    }
+}
+
+fn definitive_report_rejection(status: reqwest::StatusCode) -> bool {
+    status.is_client_error() && status != reqwest::StatusCode::REQUEST_TIMEOUT
+}
+
+fn soap_response_has_fault(xml: &str) -> bool {
+    roxmltree::Document::parse(xml)
+        .ok()
+        .is_some_and(|document| {
+            document.descendants().any(|node| {
+                matches!(
+                    node.tag_name().name(),
+                    "Fault" | "faultstring" | "ApiExceptionFault" | "RequestError"
+                )
+            })
+        })
+}
+
+fn validate_report_download_url(value: &str) -> Result<reqwest::Url, AdManagerError> {
+    if value.len() > 8192 {
+        return Err(AdManagerError::UpstreamContract {
+            field: "dated_delivery.download_url",
+            message: "GAM report-download URL exceeded the safety limit".to_string(),
+        });
+    }
+    let url = reqwest::Url::parse(value).map_err(|_| AdManagerError::UpstreamContract {
+        field: "dated_delivery.download_url",
+        message: "GAM returned an invalid report-download URL".to_string(),
+    })?;
+    let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
+    let google_host = host == "google.com"
+        || host.ends_with(".google.com")
+        || host == "googleapis.com"
+        || host.ends_with(".googleapis.com")
+        || host == "googleusercontent.com"
+        || host.ends_with(".googleusercontent.com");
+    if url.scheme() != "https"
+        || !google_host
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(AdManagerError::UpstreamContract {
+            field: "dated_delivery.download_url",
+            message: "GAM returned a report-download URL outside the allowed HTTPS Google hosts"
+                .to_string(),
+        });
+    }
+    Ok(url)
+}
+
+async fn read_dated_report_csv_response(
+    mut response: reqwest::Response,
+) -> Result<DatedReportDownload, AdManagerError> {
+    if !response.status().is_success() {
+        return Err(AdManagerError::UpstreamApi {
+            status: response.status().as_u16(),
+            message: "GAM report download failed".to_string(),
+        });
+    }
+    let mut bytes = Vec::new();
+    let mut complete = !response
+        .content_length()
+        .is_some_and(|length| length > MAX_REPORT_CSV_BYTES as u64);
+    while let Some(chunk) =
+        response
+            .chunk()
+            .await
+            .map_err(|_| AdManagerError::UpstreamContract {
+                field: "dated_delivery.download",
+                message:
+                    "GAM report download response could not be read; the signed URL was withheld"
+                        .to_string(),
+            })?
+    {
+        if bytes.len().saturating_add(chunk.len()) > MAX_REPORT_CSV_BYTES {
+            let remaining = MAX_REPORT_CSV_BYTES.saturating_sub(bytes.len());
+            bytes.extend_from_slice(&chunk[..remaining]);
+            complete = false;
+            break;
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    if !complete {
+        if let Some(last_newline) = bytes.iter().rposition(|byte| *byte == b'\n') {
+            bytes.truncate(last_newline + 1);
+        } else {
+            bytes.clear();
+        }
+    }
+    Ok(DatedReportDownload { bytes, complete })
+}
+
 fn soap_service_url(
     base_url: &str,
     api_version: &str,
@@ -3433,12 +3858,14 @@ mod tests {
         RestWriteOperation, RestWriteResource, SOAP_ENVELOPE_NAMESPACE, SoapTraffickingApplyResult,
         SoapTraffickingOperation, UpstreamAuthMode, ad_unit_hierarchy_list_query,
         auth_source_for_mode, classify_soap_impact, clip_message, clip_message_with_truncation,
-        clip_xml_response, extract_xml_tag, project_report_operation, soap_apply_failed,
-        soap_mutation_apply_failed, validate_operation_name, validate_report_operation_binding,
+        clip_xml_response, extract_xml_tag, project_report_operation,
+        read_dated_report_csv_response, soap_apply_failed, soap_mutation_apply_failed,
+        validate_operation_name, validate_report_download_url, validate_report_operation_binding,
         validate_report_page_token, validate_report_result_name,
         validate_report_result_rows_payload, validate_report_run_handoff, validate_rest_write_body,
         validate_soap_payload_xml,
     };
+    use crate::dated_reporting::{DatedDeliveryReportRequest, MAX_REPORT_CSV_BYTES, build_plan};
     use crate::{AdManagerError, Settings};
     use serde_json::{Value, json};
 
@@ -3519,9 +3946,7 @@ mod tests {
     fn change_history_result_class<T>(result: &Result<T, AdManagerError>) -> String {
         match result {
             Ok(_) => "ok".to_string(),
-            Err(AdManagerError::UpstreamApi { status, .. }) => {
-                format!("upstream_api:{status}")
-            }
+            Err(AdManagerError::UpstreamApi { status, .. }) => format!("upstream_api:{status}"),
             Err(AdManagerError::UpstreamContract { field, .. }) => {
                 format!("upstream_contract:{field}")
             }
@@ -3551,17 +3976,13 @@ mod tests {
         let result = client
             .select_change_history_page("123", CHANGE_HISTORY_TEST_QUERY)
             .await;
-        assert!(
-            matches!(
-                result,
-                Err(AdManagerError::UpstreamContract {
-                    field: "change_history.response",
-                    ..
-                })
-            ),
-            "unexpected bounded-response result class: {}",
-            change_history_result_class(&result)
-        );
+        assert!(matches!(
+            result,
+            Err(AdManagerError::UpstreamContract {
+                field: "change_history.response",
+                ..
+            })
+        ));
         server.join().expect("join oversized content-length server");
     }
 
@@ -3574,24 +3995,19 @@ mod tests {
         let result = client
             .select_change_history_page("123", CHANGE_HISTORY_TEST_QUERY)
             .await;
-        assert!(
-            matches!(
-                result,
-                Err(AdManagerError::UpstreamContract {
-                    field: "change_history.response",
-                    ..
-                })
-            ),
-            "unexpected streamed-response result class: {}",
-            change_history_result_class(&result)
-        );
+        assert!(matches!(
+            result,
+            Err(AdManagerError::UpstreamContract {
+                field: "change_history.response",
+                ..
+            })
+        ));
         server.join().expect("join oversized stream server");
     }
 
     #[tokio::test]
     async fn change_history_transport_does_not_follow_redirects() {
         use std::io::ErrorKind;
-
         let second_hop = TcpListener::bind("127.0.0.1:0").expect("bind redirect target");
         second_hop
             .set_nonblocking(true)
@@ -3620,6 +4036,97 @@ mod tests {
             second_hop.accept().unwrap_err().kind(),
             ErrorKind::WouldBlock
         );
+    }
+
+    #[tokio::test]
+    async fn dated_report_job_response_without_id_is_uncertain_after_one_post() {
+        let body = b"<soap:Envelope xmlns:soap=\"http://schemas.xmlsoap.org/soap/envelope/\"><soap:Body><runReportJobResponse><rval><ReportJob/></rval></runReportJobResponse></soap:Body></soap:Envelope>";
+        let response = format!("HTTP/1.1 200 OK\r\nContent-Type: text/xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len())
+            .into_bytes().into_iter().chain(body.iter().copied()).collect();
+        let (endpoint, server) = serve_one_http_response(response);
+        let client = AdManagerClient::for_test_report_endpoint(endpoint);
+        let plan = build_plan(DatedDeliveryReportRequest {
+            network_code: "1234567".into(),
+            line_item_ids: vec!["42".into()],
+            start_date: "2026-10-01".into(),
+            end_date: "2026-10-02".into(),
+            publisher_time_zone: "Australia/Sydney".into(),
+        })
+        .unwrap();
+        let error = client
+            .run_dated_delivery_report_job(&plan)
+            .await
+            .expect_err("a response without a job id must be reconciled");
+        server.join().expect("join one-shot report server");
+        assert!(matches!(
+            error,
+            AdManagerError::DatedReportHandoffUncertain { .. }
+        ));
+        assert!(
+            error
+                .hint()
+                .contains("Do not submit this dated report again")
+        );
+    }
+
+    #[tokio::test]
+    async fn dated_report_download_stops_at_byte_cap_and_keeps_only_complete_rows() {
+        let header = b"Dimension.DATE,Dimension.LINE_ITEM_ID,Dimension.CREATIVE_ID,Dimension.CREATIVE_SIZE_DELIVERED,Column.AD_SERVER_IMPRESSIONS,Column.AD_SERVER_CLICKS\n2026-10-01,42,7,300x250,1,0\n";
+        let mut body = header.to_vec();
+        body.resize(MAX_REPORT_CSV_BYTES + 1, b'x');
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        )
+        .into_bytes()
+        .into_iter()
+        .chain(body)
+        .collect();
+        let (url, server) = serve_one_http_response(response);
+        let client = AdManagerClient::from_settings(&Settings::default());
+        let response = client.report_http.get(url).send().await.unwrap();
+        let download = read_dated_report_csv_response(response).await.unwrap();
+        server.join().expect("join capped CSV server");
+        assert!(!download.complete);
+        assert!(download.bytes.len() <= MAX_REPORT_CSV_BYTES);
+        assert!(download.bytes.ends_with(b"\n"));
+        assert_eq!(download.bytes, header);
+    }
+
+    #[tokio::test]
+    async fn report_http_client_does_not_follow_download_redirects() {
+        use std::io::ErrorKind;
+        let second_hop = TcpListener::bind("127.0.0.1:0").expect("bind redirect target");
+        second_hop
+            .set_nonblocking(true)
+            .expect("set redirect target nonblocking");
+        let location = format!("http://{}/second-hop", second_hop.local_addr().unwrap());
+        let response = format!("HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").into_bytes();
+        let (url, server) = serve_one_http_response(response);
+        let client = AdManagerClient::from_settings(&Settings::default());
+        let response = client.report_http.get(url).send().await.unwrap();
+        server.join().expect("join redirect source server");
+        assert_eq!(response.status(), reqwest::StatusCode::FOUND);
+        assert_eq!(
+            second_hop.accept().unwrap_err().kind(),
+            ErrorKind::WouldBlock
+        );
+    }
+
+    #[test]
+    fn dated_report_download_url_is_https_google_only_and_never_echoed() {
+        assert!(
+            validate_report_download_url("https://www.google.com/dfp/download?token=secret")
+                .is_ok()
+        );
+        for value in [
+            "http://www.google.com/dfp/download?token=secret",
+            "https://example.invalid/report.csv?token=secret",
+            "https://user:password@www.google.com/dfp/download?token=secret",
+        ] {
+            let error = validate_report_download_url(value).unwrap_err();
+            assert!(!error.to_string().contains("secret"));
+        }
     }
 
     fn serve_rest_write_response(

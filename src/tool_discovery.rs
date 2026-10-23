@@ -186,6 +186,108 @@ impl ReportDiscoveryIntent {
     }
 }
 
+fn has_dated_delivery_report_context(query: Option<&str>) -> bool {
+    let Some(query) = query else {
+        return false;
+    };
+    let normalized = normalize_report_discovery_query(query).text;
+    let terms = normalized
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .filter(|term| !term.is_empty())
+        .collect::<Vec<_>>();
+    terms_have_dated_delivery_report_context(&terms)
+}
+
+fn terms_have_dated_delivery_report_context(terms: &[&str]) -> bool {
+    (terms.contains(&"dated") || terms.contains(&"daily") || terms.contains(&"date"))
+        && terms.contains(&"delivery")
+        && (terms.contains(&"report") || terms.contains(&"reports"))
+}
+
+fn has_dated_delivery_report_read_action(query: Option<&str>) -> bool {
+    let Some(query) = query else {
+        return false;
+    };
+    let normalized_query = normalize_report_discovery_query(query);
+    let mut terms = normalized_query
+        .text
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .filter(|term| !term.is_empty())
+        .collect::<Vec<_>>();
+    if terms.first() == Some(&"please") {
+        terms.remove(0);
+    }
+    let action = terms.first().is_some_and(|term| {
+        matches!(
+            *term,
+            "read" | "download" | "inspect" | "fetch" | "get" | "view"
+        )
+    });
+    action && !query_blocks_report_authority(&terms, &terms.join(" "))
+}
+
+fn has_dated_delivery_preview_action(query: Option<&str>) -> bool {
+    let Some(query) = query else {
+        return false;
+    };
+    let normalized_query = normalize_report_discovery_query(query);
+    let mut terms = normalized_query
+        .text
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .filter(|term| !term.is_empty())
+        .collect::<Vec<_>>();
+    if terms.first() == Some(&"please") {
+        terms.remove(0);
+    }
+    let Some(action) = terms.first() else {
+        return false;
+    };
+    if !matches!(*action, "preview" | "plan" | "prepare") {
+        return false;
+    }
+    terms.remove(0);
+    !query_blocks_report_authority(&terms, &terms.join(" "))
+}
+
+fn has_explicit_saved_report_context(query: Option<&str>) -> bool {
+    let Some(query) = query else {
+        return false;
+    };
+    normalize_report_discovery_query(query)
+        .text
+        .contains("saved report")
+}
+
+fn dated_report_condition_record(
+    result: &ToolSearchResult,
+    index: usize,
+    intent: ReportDiscoveryIntent,
+    invocation_condition: &'static str,
+    reason: &'static str,
+    effect: &'static str,
+) -> Value {
+    json!({
+        "type": "condition_only_match",
+        "name": result.name,
+        "rank": index + 1,
+        "group": result.group,
+        "description": result.description,
+        "registered_read_only": result.read_only,
+        "registered_risk_posture": result.risk_posture,
+        "relation": "condition",
+        "selection_semantics": "condition_only",
+        "callable_as_tool": false,
+        "schema_exposed": false,
+        "tool_already_selected": true,
+        "required_for_guided_sequence": false,
+        "server_call_enforced": false,
+        "invocation_condition": invocation_condition,
+        "effect": effect,
+        "report_intent": intent.as_str(),
+        "reason": reason,
+    })
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct ReportDiscoveryResolution {
     pub records: Vec<Value>,
@@ -242,7 +344,7 @@ pub(crate) struct WorkflowCompanion {
 }
 
 // Declaration order is not trusted; the provider composer validates and sorts the full graph.
-const WORKFLOW_DEPENDENCIES: [WorkflowDependency; 8] = [
+const WORKFLOW_DEPENDENCIES: [WorkflowDependency; 9] = [
     WorkflowDependency {
         tool_name: "gam_networks_list",
         before_tool: "gam_network_catalog_list",
@@ -256,6 +358,13 @@ const WORKFLOW_DEPENDENCIES: [WorkflowDependency; 8] = [
         callable_as_tool: true,
         required_for_guided_sequence: true,
         reason: "Cold-start report sequence: list collection=reports with the exact network code to obtain a saved report id before starting a run. Discovery does not prove that report catalog lookup ran.",
+    },
+    WorkflowDependency {
+        tool_name: "gam_dated_delivery_report_plan",
+        before_tool: "gam_dated_delivery_report_apply",
+        callable_as_tool: true,
+        required_for_guided_sequence: true,
+        reason: "Dated delivery sequence: review the fixed-shape plan and exact dates, timezone, line-item ids, dimensions, and metrics before confirming one report-job submission. Discovery does not prove the preview ran.",
     },
     WorkflowDependency {
         tool_name: "gam_report_run",
@@ -927,7 +1036,17 @@ fn reference_has_non_report_relation_target(terms: &[&str], reference_index: usi
             && target
                 .iter()
                 .any(|term| is_non_report_reference_domain(term))
+            && !is_dated_delivery_line_item_scope(terms, target)
     })
+}
+
+fn is_dated_delivery_line_item_scope(terms: &[&str], target: &[&str]) -> bool {
+    terms_have_dated_delivery_report_context(terms)
+        && target.iter().any(|term| matches!(*term, "line" | "lines"))
+        && target.iter().any(|term| matches!(*term, "item" | "items"))
+        && target
+            .iter()
+            .all(|term| matches!(*term, "exact" | "the" | "line" | "lines" | "item" | "items"))
 }
 
 fn report_relation_starts_new_clause(terms: &[&str]) -> bool {
@@ -1534,13 +1653,14 @@ fn report_start_action_tail(
     if !report_context {
         return ReportStartActionTail::NoCandidate;
     }
+    let allow_dated_modifier = terms_have_dated_delivery_report_context(terms);
     let term_spans = ascii_alphanumeric_term_spans(clause_text);
     for (index, term) in terms.iter().enumerate() {
         if !is_report_start_action(term) {
             continue;
         }
         let object_terms = &terms[index + 1..];
-        let Some(consumed) = report_start_object_end(object_terms) else {
+        let Some(consumed) = report_start_object_end(object_terms, allow_dated_modifier) else {
             continue;
         };
         let report_index = index + consumed;
@@ -1560,7 +1680,7 @@ fn report_start_action_tail(
     ReportStartActionTail::NoCandidate
 }
 
-fn report_start_object_end(object_terms: &[&str]) -> Option<usize> {
+fn report_start_object_end(object_terms: &[&str], allow_dated_modifier: bool) -> Option<usize> {
     if let Some(consumed) = campaign_delivery_audit_report_object_end(object_terms) {
         return Some(consumed);
     }
@@ -1568,7 +1688,9 @@ fn report_start_object_end(object_terms: &[&str]) -> Option<usize> {
         if matches!(*candidate, "report" | "reports") {
             return Some(candidate_index + 1);
         }
-        if !is_report_object_modifier(candidate) {
+        if !is_report_object_modifier(candidate)
+            && !(allow_dated_modifier && matches!(*candidate, "dated" | "date"))
+        {
             break;
         }
     }
@@ -1960,6 +2082,14 @@ fn report_start_tail_safety(
     {
         return ReportStartTailSafety::Safe;
     }
+    if terms
+        .iter()
+        .all(|term| matches!(*term, "for" | "exact" | "line" | "lines" | "item" | "items"))
+        && terms.first() == Some(&"for")
+        && terms_have_dated_delivery_report_context(all_terms)
+    {
+        return ReportStartTailSafety::Safe;
+    }
     let starts_as_continuation = matches!(terms.first(), Some(&"and" | &"then" | &"until"));
     let has_continuation_action = terms.iter().any(|term| {
         is_report_continuation_term(term)
@@ -2211,6 +2341,18 @@ pub(crate) fn resolve_report_discovery(
     read_only: Option<bool>,
 ) -> ReportDiscoveryResolution {
     let intent = report_discovery_intent(query);
+    let dated_delivery_context = has_dated_delivery_report_context(query);
+    let dated_delivery_read_authorized = dated_delivery_context
+        && (intent == ReportDiscoveryIntent::ExistingOperationContinuation
+            || has_dated_delivery_report_read_action(query));
+    let dated_delivery_apply_authorized = dated_delivery_context
+        && intent == ReportDiscoveryIntent::ExplicitNewRun
+        && read_only == Some(false);
+    let dated_delivery_plan_authorized = dated_delivery_context
+        && !dated_delivery_read_authorized
+        && intent != ReportDiscoveryIntent::ExistingOperationContinuation
+        && (has_dated_delivery_preview_action(query)
+            || intent == ReportDiscoveryIntent::ExplicitNewRun);
     let report_poll_authorized = report_poll_discovery_is_authoritative(query);
     let report_result_rows_authorized = has_clear_report_result_retrieval(query);
     let contextual_companions = companions
@@ -2225,11 +2367,42 @@ pub(crate) fn resolve_report_discovery(
         let is_report_run = result.name == "gam_report_run";
         let is_report_poll = result.name == "gam_report_operation_poll";
         let is_report_result_rows = result.name == "gam_report_result_rows";
+        let is_dated_report_plan = result.name == "gam_dated_delivery_report_plan";
+        let is_dated_report_apply = result.name == "gam_dated_delivery_report_apply";
+        let is_dated_report_read = result.name == "gam_dated_delivery_report_read";
         let report_run_callable = is_report_run
             && read_only == Some(false)
             && intent == ReportDiscoveryIntent::ExplicitNewRun
+            && (!dated_delivery_context || has_explicit_saved_report_context(query))
             && contextual_companion.is_none();
-        if is_report_run && !report_run_callable {
+        if is_dated_report_plan && !dated_delivery_plan_authorized {
+            condition_only.push(dated_report_condition_record(
+                &result,
+                index,
+                intent,
+                "explicit_dated_delivery_report_preview_intent",
+                "A dated delivery plan is relevant only to a date-scoped delivery report request. It creates no GAM job, but unrelated saved-report discovery should not surface it as a workflow action.",
+                "previews_no_provider_effect",
+            ));
+        } else if is_dated_report_apply && !dated_delivery_apply_authorized {
+            condition_only.push(dated_report_condition_record(
+                &result,
+                index,
+                intent,
+                "explicit_new_dated_delivery_report_intent_and_read_only_false",
+                "Applying a dated delivery plan creates one GAM report job. Discovery exposes it only for an explicit new dated-delivery run request with read_only=false; an existing-operation or preview request must not start a job.",
+                "starts_one_upstream_report_job",
+            ));
+        } else if is_dated_report_read && !dated_delivery_read_authorized {
+            condition_only.push(dated_report_condition_record(
+                &result,
+                index,
+                intent,
+                "explicit_dated_existing_report_job_read_intent",
+                "Reading a dated report requires an explicit dated-job read or continuation request. The returned job id must still match this MCP process's exact prior submission binding.",
+                "reads_existing_bound_report_job",
+            ));
+        } else if is_report_run && !report_run_callable {
             let companion_before_tool = contextual_companion.map(|companion| companion.before_tool);
             condition_only.push(json!({
                 "type": "condition_only_match",
@@ -2255,7 +2428,9 @@ pub(crate) fn resolve_report_discovery(
                 "invocation_condition": "explicit_new_run_intent_and_read_only_false",
                 "effect": "starts_upstream_job",
                 "report_intent": intent.as_str(),
-                "reason": if intent == ReportDiscoveryIntent::ExistingOperationContinuation {
+                "reason": if dated_delivery_context && !has_explicit_saved_report_context(query) {
+                    "The bounded request is for a dated delivery report, not a saved-report run. Use the dated preview/apply workflow; the saved-report runner is not callable for this request."
+                } else if intent == ReportDiscoveryIntent::ExistingOperationContinuation {
                     "The bounded discovery query expresses continuation of an existing report operation. Starting a new report run would create duplicate upstream work, so use the GET-only poll alternative."
                 } else if read_only != Some(false) {
                     "Starting a report creates an upstream job and requires an explicit read_only=false discovery filter plus explicit new-run intent."
@@ -2340,6 +2515,35 @@ pub(crate) fn resolve_report_discovery(
             "starts_upstream_job": false,
             "safe_method": "GET",
             "reason": "The bounded discovery query asks to continue an existing report operation. The active read_only=false filter excludes the registered read-only poll tool, so discovery exposes that safe callable alternative without replaying gam_report_run.",
+        }));
+    }
+    let dated_preview_selected = dated_delivery_context
+        && dated_delivery_plan_authorized
+        && has_dated_delivery_preview_action(query)
+        && report_group_selected;
+    if dated_preview_selected
+        && !results
+            .iter()
+            .any(|result| result.name == "gam_dated_delivery_report_plan")
+        && !resolution
+            .callable_alternatives
+            .contains(&"gam_dated_delivery_report_plan")
+    {
+        resolution
+            .callable_alternatives
+            .push("gam_dated_delivery_report_plan");
+        resolution.records.push(json!({
+            "type": "intent_safe_alternative",
+            "name": "gam_dated_delivery_report_plan",
+            "relation": "safe_alternative",
+            "callable_as_tool": true,
+            "schema_exposed": true,
+            "selection_semantics": "callable_safe_alternative",
+            "registered_read_only": true,
+            "report_intent": intent.as_str(),
+            "effect": "previews_no_provider_effect",
+            "starts_upstream_job": false,
+            "reason": "The query explicitly asks to preview a bounded dated delivery report. This plan tool is the correct preview workflow and creates no GAM report job."
         }));
     }
     resolution
@@ -3349,6 +3553,17 @@ mod tests {
             report_discovery_intent(Some("run a saved report and wait for completion")),
             ReportDiscoveryIntent::ExplicitNewRun
         );
+        assert_eq!(
+            report_discovery_intent(Some("run a dated delivery report for exact line items")),
+            ReportDiscoveryIntent::ExplicitNewRun
+        );
+        for query in ["run a report for exact line items", "run a date report"] {
+            assert_eq!(
+                report_discovery_intent(Some(query)),
+                ReportDiscoveryIntent::Unspecified,
+                "unrelated report query gained run authority: {query}"
+            );
+        }
         for query in [
             "start a report",
             "run the report",

@@ -17,6 +17,9 @@ fn stdio_initializes_and_lists_tools() {
         "gam_ad_unit_dependency_probe",
         "gam_ad_unit_retirement_assessment",
         "gam_report_run",
+        "gam_dated_delivery_report_plan",
+        "gam_dated_delivery_report_apply",
+        "gam_dated_delivery_report_read",
         "gam_change_history",
         "gam_change_history_inspect",
         "gam_report_operation_poll",
@@ -108,6 +111,12 @@ fn find_tools_is_semantic_compact_and_recoverable() {
             "ingest line item delivery into an existing scratchpad session",
             "gam_scratchpad_ingest_soap_line_items",
             false,
+        ),
+        (
+            10,
+            "preview a bounded dated delivery report for line items",
+            "gam_dated_delivery_report_plan",
+            true,
         ),
     ] {
         let response = process.call_tool(
@@ -243,6 +252,154 @@ fn find_tools_is_semantic_compact_and_recoverable() {
         content_projection["direct_matches"][0]["tool_already_selected"],
         true
     );
+}
+
+#[test]
+fn find_tools_exposes_dated_delivery_report_preview_schema() {
+    let mut process = StdioMcpProcess::start(env!("CARGO_BIN_EXE_google-ad-manager-mcp"));
+    let response = process.call_tool(
+        1001,
+        "find_tools",
+        json!({
+            "query":"preview a bounded dated delivery report for exact line items",
+            "group":"reports",
+            "read_only":true,
+            "limit":1,
+            "include_schema":true
+        }),
+    );
+    let data = &response["result"]["structuredContent"]["data"];
+    assert!(
+        sorted_string_values(&data["openai_allowed_tools"])
+            .contains(&"gam_dated_delivery_report_plan")
+    );
+    assert_eq!(
+        sorted_string_values(&data["openai_allowed_tools"]),
+        vec!["gam_dated_delivery_report_plan"]
+    );
+    assert_eq!(
+        sorted_schema_names(data),
+        vec!["gam_dated_delivery_report_plan"]
+    );
+    assert!(
+        data["schemas"]["gam_dated_delivery_report_plan"]["inputSchema"]["properties"]["request"]
+            .is_object()
+    );
+    assert_complete_discovery_result_is_bounded(&response);
+
+    let explicit_response = process.call_tool(
+        1002,
+        "find_tools",
+        json!({
+            "query":"preview dated delivery report impressions and clicks for exact line items",
+            "group":"reports",
+            "read_only":true,
+            "limit":10,
+            "include_schema":true
+        }),
+    );
+    let explicit_data = &explicit_response["result"]["structuredContent"]["data"];
+    assert!(
+        sorted_string_values(&explicit_data["openai_allowed_tools"])
+            .contains(&"gam_dated_delivery_report_plan")
+    );
+    let explicit_tools = sorted_string_values(&explicit_data["openai_allowed_tools"]);
+    assert!(!explicit_tools.contains(&"gam_dated_delivery_report_apply"));
+    assert!(!explicit_tools.contains(&"gam_dated_delivery_report_read"));
+    assert!(!explicit_tools.contains(&"gam_report_run"));
+    assert!(sorted_schema_names(explicit_data).contains(&"gam_dated_delivery_report_plan"));
+    assert_complete_discovery_result_is_bounded(&explicit_response);
+
+    let apply_response = process.call_tool(
+        1003,
+        "find_tools",
+        json!({
+            "query":"run a dated delivery report for exact line items",
+            "group":"reports",
+            "read_only":false,
+            "limit":10,
+            "include_schema":true
+        }),
+    );
+    let apply_data = &apply_response["result"]["structuredContent"]["data"];
+    let apply_tools = sorted_string_values(&apply_data["openai_allowed_tools"]);
+    assert!(apply_tools.contains(&"gam_dated_delivery_report_apply"));
+    assert!(!apply_tools.contains(&"gam_report_run"));
+    assert!(!apply_tools.contains(&"gam_dated_delivery_report_read"));
+    assert_complete_discovery_result_is_bounded(&apply_response);
+
+    for (request_id, query, expected_plan) in [
+        (1004, "Do not preview a dated delivery report", false),
+        (
+            1005,
+            "explain whether to preview a dated delivery report",
+            false,
+        ),
+        (
+            1006,
+            "preview a dated delivery report and show status fields",
+            true,
+        ),
+    ] {
+        let blocked_response = process.call_tool(
+            request_id,
+            "find_tools",
+            json!({
+                "query":query,
+                "group":"reports",
+                "read_only":false,
+                "limit":10,
+                "include_schema":true
+            }),
+        );
+        let blocked_data = &blocked_response["result"]["structuredContent"]["data"];
+        let blocked_tools = sorted_string_values(&blocked_data["openai_allowed_tools"]);
+        assert_eq!(
+            blocked_tools.contains(&"gam_dated_delivery_report_plan"),
+            expected_plan,
+            "unexpected dated preview plan exposure: {query}"
+        );
+        for name in [
+            "gam_dated_delivery_report_apply",
+            "gam_dated_delivery_report_read",
+            "gam_report_run",
+        ] {
+            assert!(
+                !blocked_tools.contains(&name),
+                "blocked or preview-only request exposed {name}: {query}"
+            );
+        }
+        assert_complete_discovery_result_is_bounded(&blocked_response);
+    }
+
+    for (request_id, query) in [
+        (1007, "run a report for exact line items"),
+        (1008, "run a date report"),
+    ] {
+        let unrelated_response = process.call_tool(
+            request_id,
+            "find_tools",
+            json!({
+                "query":query,
+                "group":"reports",
+                "read_only":false,
+                "limit":10,
+                "include_schema":true
+            }),
+        );
+        let unrelated_data = &unrelated_response["result"]["structuredContent"]["data"];
+        let unrelated_tools = sorted_string_values(&unrelated_data["openai_allowed_tools"]);
+        assert!(!unrelated_tools.contains(&"gam_report_run"), "{query}");
+        assert!(
+            !unrelated_tools.contains(&"gam_dated_delivery_report_plan"),
+            "{query}"
+        );
+        assert!(
+            !unrelated_tools.contains(&"gam_dated_delivery_report_apply"),
+            "{query}"
+        );
+        assert_complete_discovery_result_is_bounded(&unrelated_response);
+    }
 }
 
 #[test]

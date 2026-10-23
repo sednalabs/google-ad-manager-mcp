@@ -27,6 +27,7 @@ mod change_history;
 mod client;
 mod config;
 mod contract;
+mod dated_reporting;
 mod error;
 mod evidence;
 mod fingerprint;
@@ -45,6 +46,7 @@ pub use error::AdManagerError;
 
 use std::sync::Arc;
 
+use dated_reporting::{DatedDeliveryReportPlan, DatedReportJobRegistry};
 use mcp_toolkit_core::guarded_action::GuardedActionPosture;
 use mcp_toolkit_core::tool_inventory::ToolInventory;
 use mcp_toolkit_scratchpad::{
@@ -68,6 +70,7 @@ pub struct AdManagerServer {
     scratchpad_sessions: SharedScratchpadSessionManager,
     tool_router: ToolRouter<Self>,
     inventory: ToolInventory,
+    dated_report_jobs: Arc<tokio::sync::Mutex<DatedReportJobRegistry>>,
 }
 
 impl AdManagerServer {
@@ -103,7 +106,31 @@ impl AdManagerServer {
             scratchpad_sessions,
             tool_router: Self::tool_router_ad_manager(),
             inventory: build_tool_inventory()?,
+            dated_report_jobs: Arc::new(tokio::sync::Mutex::new(DatedReportJobRegistry::default())),
         })
+    }
+
+    pub(crate) async fn bind_dated_report_job(
+        &self,
+        report_job_id: &str,
+        plan: &DatedDeliveryReportPlan,
+    ) -> Result<(), AdManagerError> {
+        self.dated_report_jobs
+            .lock()
+            .await
+            .bind(report_job_id, plan)
+    }
+
+    pub(crate) async fn require_dated_report_job_binding(
+        &self,
+        network_code: &str,
+        report_job_id: &str,
+        plan: &DatedDeliveryReportPlan,
+    ) -> Result<(), AdManagerError> {
+        self.dated_report_jobs
+            .lock()
+            .await
+            .require_match(network_code, report_job_id, plan)
     }
 
     pub fn tool_names(&self) -> Vec<String> {

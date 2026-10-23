@@ -52,6 +52,12 @@ pub enum AdManagerError {
         "report run request may have been dispatched but a safe operation handoff was not confirmed: {message}"
     )]
     ReportRunHandoffUncertain { message: String },
+    #[error(
+        "dated GAM report-job submission may have been dispatched without a verified job id: {message}"
+    )]
+    DatedReportHandoffUncertain { message: String },
+    #[error("dated GAM report-job query binding is unavailable: {message}")]
+    DatedReportJobBinding { message: String },
 }
 
 impl AdManagerError {
@@ -78,6 +84,8 @@ impl AdManagerError {
             Self::ReportRunMissingResult { .. } => "report_run_missing_result",
             Self::ReportRunFailed { .. } => "report_run_failed",
             Self::ReportRunHandoffUncertain { .. } => "report_run_handoff_uncertain",
+            Self::DatedReportHandoffUncertain { .. } => "dated_report_handoff_uncertain",
+            Self::DatedReportJobBinding { .. } => "dated_report_job_binding_unavailable",
         }
     }
 
@@ -97,6 +105,8 @@ impl AdManagerError {
             Self::ReportRunMissingResult { .. } => "report_result_missing",
             Self::ReportRunFailed { .. } => "report_operation_failed",
             Self::ReportRunHandoffUncertain { .. } => "report_run_handoff_uncertain",
+            Self::DatedReportHandoffUncertain { .. } => "dated_report_handoff_uncertain",
+            Self::DatedReportJobBinding { .. } => "dated_report_job_binding_unavailable",
         }
     }
 
@@ -116,6 +126,8 @@ impl AdManagerError {
             | Self::ReportRunMissingResult { .. }
             | Self::ReportRunFailed { .. }
             | Self::ReportRunHandoffUncertain { .. } => "reports",
+            Self::DatedReportHandoffUncertain { .. } => "reports",
+            Self::DatedReportJobBinding { .. } => "reports",
         }
     }
 
@@ -178,6 +190,12 @@ impl AdManagerError {
             }
             Self::ReportRunHandoffUncertain { .. } => {
                 "Do not automatically start another report run. Preserve this receipt and inspect Ad Manager report activity or retry only with explicit operator approval."
+            }
+            Self::DatedReportHandoffUncertain { .. } => {
+                "Do not submit this dated report again. Reconcile the report-job activity in Ad Manager and use the returned job id if one exists."
+            }
+            Self::DatedReportJobBinding { .. } => {
+                "This MCP process cannot verify that report-job id was created from the exact reviewed request. Do not assume the job is absent or resubmit automatically; reconcile it in Ad Manager before taking any new action."
             }
         }
     }

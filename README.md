@@ -178,6 +178,7 @@ credential material. See [Getting started](docs/GETTING_STARTED.md) for raw
 | Check setup and credentials | `gam_get_started`, `gam_auth_status` |
 | Discover inventory | `gam_networks_list`, `gam_network_catalog_list` |
 | Run a saved report | `gam_report_run`, then poll or page only when needed |
+| Run a bounded dated delivery report | `gam_dated_delivery_report_plan`, review and confirm once with `gam_dated_delivery_report_apply`, then continue the returned job with `gam_dated_delivery_report_read` |
 | Assess ad-unit dependencies or retirement | `gam_ad_unit_dependency_probe`, `gam_ad_unit_retirement_assessment` |
 | Inspect exchange, yield, or protection exposure | `gam_exchange_protection_probe` |
 | Preview a REST change | `gam_trafficking_tool_matrix`, `gam_rest_write_plan` |
