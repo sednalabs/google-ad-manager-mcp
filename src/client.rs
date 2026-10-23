@@ -3443,6 +3443,8 @@ mod tests {
     use serde_json::{Value, json};
 
     fn serve_one_http_response(response: Vec<u8>) -> (String, thread::JoinHandle<()>) {
+        const MAX_TEST_HTTP_REQUEST_BYTES: usize = 64 * 1024;
+
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind local test server");
         let address = listener.local_addr().expect("local test address");
         let handle = thread::spawn(move || {
@@ -3453,32 +3455,33 @@ mod tests {
             loop {
                 let count = stream.read(&mut chunk).expect("read test request");
                 assert_ne!(count, 0, "client closed before complete request");
+                assert!(
+                    request.len().saturating_add(count) <= MAX_TEST_HTTP_REQUEST_BYTES,
+                    "test request exceeded its byte bound"
+                );
                 request.extend_from_slice(&chunk[..count]);
                 if let Some(header_end) = request.windows(4).position(|part| part == b"\r\n\r\n") {
                     let headers = String::from_utf8_lossy(&request[..header_end]);
+                    assert!(
+                        !headers.lines().any(|line| {
+                            line.to_ascii_lowercase()
+                                .strip_prefix("transfer-encoding:")
+                                .is_some()
+                        }),
+                        "test fixture does not support transfer encoding"
+                    );
                     let content_length = headers.lines().find_map(|line| {
                         line.to_ascii_lowercase()
                             .strip_prefix("content-length:")
-                            .and_then(|value| value.trim().parse::<usize>().ok())
-                    });
-                    let chunked = headers.lines().any(|line| {
-                        line.to_ascii_lowercase()
-                            .strip_prefix("transfer-encoding:")
-                            .is_some_and(|value| {
+                            .map(|value| {
                                 value
-                                    .split(',')
-                                    .any(|encoding| encoding.trim() == "chunked")
+                                    .trim()
+                                    .parse::<usize>()
+                                    .expect("valid test request content length")
                             })
                     });
                     let body = &request[header_end + 4..];
-                    let body_complete = if let Some(content_length) = content_length {
-                        body.len() >= content_length
-                    } else if chunked {
-                        chunked_http_body_complete(body)
-                    } else {
-                        true
-                    };
-                    if body_complete {
+                    if content_length.is_none_or(|length| body.len() >= length) {
                         break;
                     }
                 }
@@ -3486,44 +3489,6 @@ mod tests {
             let _ = stream.write_all(&response);
         });
         (format!("http://{address}/bounded"), handle)
-    }
-
-    fn chunked_http_body_complete(body: &[u8]) -> bool {
-        let mut offset = 0;
-        loop {
-            let Some(line_end) = body[offset..]
-                .windows(2)
-                .position(|part| part == b"\r\n")
-                .map(|relative| offset + relative)
-            else {
-                return false;
-            };
-            let size = std::str::from_utf8(&body[offset..line_end])
-                .ok()
-                .and_then(|line| line.split(';').next())
-                .and_then(|value| usize::from_str_radix(value.trim(), 16).ok());
-            let Some(size) = size else {
-                return false;
-            };
-            offset = line_end + 2;
-            if size == 0 {
-                return body[offset..].starts_with(b"\r\n")
-                    || body[offset..].windows(4).any(|part| part == b"\r\n\r\n");
-            }
-            let Some(chunk_end) = offset.checked_add(size) else {
-                return false;
-            };
-            let Some(chunk_ending) = chunk_end.checked_add(2) else {
-                return false;
-            };
-            if !body
-                .get(chunk_end..chunk_ending)
-                .is_some_and(|ending| ending == b"\r\n")
-            {
-                return false;
-            }
-            offset = chunk_ending;
-        }
     }
 
     fn http_response(status: &str, headers: &str, body: &[u8]) -> Vec<u8> {
