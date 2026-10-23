@@ -662,10 +662,6 @@ mod tests {
         let mut input = request();
         input.start_date = "2026-02-30".into();
         assert!(build_plan(input).is_err());
-        let mut input = request();
-        input.start_date = "2026-01-01".into();
-        input.end_date = "2026-03-01".into();
-        assert!(build_plan(input).is_err());
         assert_eq!(MAX_DATE_SPAN_DAYS, 62);
         let mut boundary = request();
         boundary.start_date = "2026-10-01".into();
