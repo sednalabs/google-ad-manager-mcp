@@ -9,12 +9,16 @@ use mcp_toolkit_auth::upstream_oauth::{
     RefreshTokenProvider, google_authorized_user_adc_from_file,
 };
 use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderValue, USER_AGENT};
+use reqwest::redirect::Policy;
 use reqwest::{Client, Method, RequestBuilder};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::OnceCell;
 use tokio::time::{Instant as TokioInstant, sleep_until, timeout_at};
 
+use crate::change_history::{
+    CHANGE_HISTORY_MAX_RESPONSE_BYTES, ChangeHistoryEvent, parse_change_history_xml,
+};
 use crate::config::{MAX_REPORT_POLL_TIMEOUT_MS, Settings, selected_adc_file};
 use crate::error::AdManagerError;
 
@@ -30,6 +34,7 @@ const MAX_REPORT_RESOURCE_NAME_BYTES: usize = 256;
 const MAX_REPORT_NUMERIC_ID_BYTES: usize = 32;
 const MAX_REPORT_OPERATION_ID_BYTES: usize = 128;
 pub(crate) const MAX_REPORT_PAGE_TOKEN_BYTES: usize = 4 * 1024;
+const MAX_CHANGE_HISTORY_QUERY_BYTES: usize = 16 * 1024;
 const SOAP_ENVELOPE_NAMESPACE: &str = concat!("http", "://schemas.xmlsoap.org/soap/envelope/");
 const NETWORK_HIERARCHY_FIELDS: &str = "name,networkCode,effectiveRootAdUnit";
 const AD_UNIT_HIERARCHY_FIELDS: &str = "adUnits.name,adUnits.parentAdUnit,adUnits.parentPath.parentAdUnit,adUnits.status,adUnits.hasChildren,adUnits.updateTime,nextPageToken";
@@ -623,6 +628,7 @@ pub(crate) struct ReportPollFailure {
 #[derive(Clone)]
 pub struct AdManagerClient {
     http: Client,
+    change_history_http: Client,
     auth_mode: UpstreamAuthMode,
     token_provider: Arc<OnceCell<Arc<dyn TokenProvider>>>,
     oauth_token_provider: Arc<OnceCell<Arc<RefreshTokenProvider>>>,
@@ -648,10 +654,23 @@ impl AdManagerClient {
             .build()
             .expect("reqwest client should build");
 
+        let mut history_headers = HeaderMap::new();
+        history_headers.insert(
+            USER_AGENT,
+            HeaderValue::from_static(concat!("google-ad-manager-mcp/", env!("CARGO_PKG_VERSION"))),
+        );
+        let change_history_http = Client::builder()
+            .timeout(settings.http_timeout)
+            .redirect(Policy::none())
+            .default_headers(history_headers)
+            .build()
+            .expect("change-history client should build");
+
         let quota_project = settings.quota_project.clone().map(Arc::<str>::from);
 
         Self {
             http,
+            change_history_http,
             auth_mode: select_auth_mode(settings)
                 .unwrap_or_else(|err| UpstreamAuthMode::Unavailable(err.to_string())),
             token_provider: Arc::new(OnceCell::new()),
@@ -865,6 +884,80 @@ impl AdManagerClient {
         }
         self.send_report_run_json_bounded(request, MAX_REPORT_OPERATION_RESPONSE_BYTES)
             .await
+    }
+
+    /// Execute one fixed-schema, bounded PQL Change_History page. The caller
+    /// constructs the query from validated timestamps, entity filters, and an
+    /// in-call-only provider cursor; caller supplied arbitrary PQL is not
+    /// exposed through the MCP.
+    pub(crate) async fn select_change_history_page(
+        &self,
+        network_code: &str,
+        query: &str,
+    ) -> Result<Vec<ChangeHistoryEvent>, AdManagerError> {
+        let network_code = validate_network_code(network_code)?;
+        if query.is_empty() || query.len() > MAX_CHANGE_HISTORY_QUERY_BYTES {
+            return Err(AdManagerError::invalid(
+                "change_history_query",
+                "generated query is outside its safety bound",
+            ));
+        }
+        let api_version = DEFAULT_SOAP_API_VERSION;
+        let endpoint = soap_service_url(
+            &self.soap_base_url,
+            api_version,
+            "PublisherQueryLanguageService",
+        )?;
+        let namespace = soap_namespace(api_version);
+        let payload = format!(
+            "<selectStatement><query>{}</query></selectStatement>",
+            escape_xml_text(query)
+        );
+        let envelope = build_soap_envelope(&namespace, &network_code, "select", &payload);
+        let token = self.access_token().await?;
+        let mut request = self
+            .change_history_http
+            .request(Method::POST, endpoint)
+            .bearer_auth(token)
+            .header(CONTENT_TYPE, "text/xml; charset=utf-8")
+            .header("SOAPAction", "")
+            .body(envelope);
+        if let Some(quota_project) = &self.quota_project {
+            request = request.header("x-goog-user-project", quota_project.as_ref());
+        }
+        let mut response = request.send().await?;
+        let status = response.status();
+        if response
+            .content_length()
+            .is_some_and(|length| length > CHANGE_HISTORY_MAX_RESPONSE_BYTES as u64)
+        {
+            return Err(AdManagerError::UpstreamContract {
+                field: "change_history.response",
+                message: "provider response exceeded the bounded history-read limit".to_string(),
+            });
+        }
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response.chunk().await? {
+            if bytes.len().saturating_add(chunk.len()) > CHANGE_HISTORY_MAX_RESPONSE_BYTES {
+                return Err(AdManagerError::UpstreamContract {
+                    field: "change_history.response",
+                    message: "provider response exceeded the bounded history-read limit"
+                        .to_string(),
+                });
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        if !status.is_success() {
+            return Err(AdManagerError::UpstreamApi {
+                status: status.as_u16(),
+                message: "Google Ad Manager Change_History read failed".to_string(),
+            });
+        }
+        let xml = std::str::from_utf8(&bytes).map_err(|_| AdManagerError::UpstreamContract {
+            field: "change_history.response",
+            message: "provider response was not UTF-8 XML".to_string(),
+        })?;
+        parse_change_history_xml(xml)
     }
 
     pub async fn get_report_result_rows(

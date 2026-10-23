@@ -17,6 +17,8 @@ fn stdio_initializes_and_lists_tools() {
         "gam_ad_unit_dependency_probe",
         "gam_ad_unit_retirement_assessment",
         "gam_report_run",
+        "gam_change_history",
+        "gam_change_history_inspect",
         "gam_report_operation_poll",
         "gam_report_result_rows",
         "gam_trafficking_tool_matrix",

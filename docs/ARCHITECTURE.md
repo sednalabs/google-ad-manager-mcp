@@ -22,8 +22,11 @@ surface, not an SDK mirror or generic upstream proxy.
   - authenticated Google Ad Manager SOAP envelope and request adapter
   - curated collection routing
   - saved report run and result polling helpers
+  - bounded Change_History PQL reads on a redirect-disabled, response-capped SOAP client
   - allowlisted REST write planning and execution helpers
   - allowlisted SOAP trafficking planning and execution helpers
+- `src/change_history.rs`
+  - strict UTC window and entity-filter validation, internal-only paging cursor, and operator-supplied field-history inspection with default redaction
 - `src/error.rs`
   - stable error categories and hints
 - `src/contract.rs`
@@ -109,6 +112,9 @@ SOAP v202605 by default:
 - `LineItemCreativeAssociationService`
 - `ForecastService`
 - `YieldGroupService`
+- `PublisherQueryLanguageService.select` for the fixed, bounded `Change_History` query only
+
+The Change_History API returns change time, entity ID/type, operation and user ID. It does not return changed field names or prior/current values. `gam_change_history` retrieves only those documented metadata fields, internally pages with the provider cursor, and marks capped results explicitly. `gam_change_history_inspect` accepts structured operator-supplied rows with a source digest and row references; it does not open files, fetch exports, join rows by position, or independently verify the digest. Values and entity/user identifiers are redacted by default. Returning them requires both the default-off `GOOGLE_AD_MANAGER_MCP_UNREDACTED_CHANGE_HISTORY_READ` gate and per-call acknowledgment.
 
 The SOAP adapter is intentionally typed by operation but thin on object
 modeling. It accepts inner operation XML fragments, wraps them in a

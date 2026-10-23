@@ -45,6 +45,18 @@ performs that token check and only then calls `networks.list`. Failed or skipped
 checks include safe reasons and redacted errors. Selected ADC paths and quota
 project metadata are diagnostic labels only; credential contents are never
 serialized.
+
+The bounded Change_History tools are read-only and use the existing OAuth
+principal, network scope, and official SOAP endpoint. The API tool has a fixed
+column list, validates network/time/entity filters, caps rows, pages only with
+Google's in-call continuation identifier, and does not expose that identifier
+or raw SOAP/XML. Google does not provide field names or old/new values in this
+table. `gam_change_history_inspect` only processes structured rows the caller
+supplies; it has no file or network access and labels the source digest as an
+operator assertion. Supplied values and identifiers are redacted unless the
+server is explicitly configured with
+`GOOGLE_AD_MANAGER_MCP_UNREDACTED_CHANGE_HISTORY_READ=true` and the caller
+acknowledges sensitive values on that individual call.
 `find_tools` also treats its free-form query and group inputs as potentially
 secret-bearing. Public discovery results omit raw query text and query-derived
 terms, return an exact group only when it matches a registered strict

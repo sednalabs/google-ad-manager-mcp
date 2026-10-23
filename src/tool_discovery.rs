@@ -34,7 +34,7 @@ pub(crate) struct RepresentativeDiscoveryCandidate {
     pub no_match_recovery: bool,
 }
 
-pub(crate) const REPRESENTATIVE_DISCOVERY_CANDIDATES: [RepresentativeDiscoveryCandidate; 20] = [
+pub(crate) const REPRESENTATIVE_DISCOVERY_CANDIDATES: [RepresentativeDiscoveryCandidate; 22] = [
     candidate(
         "set up and authenticate Google Ad Manager",
         "gam_auth_status",
@@ -99,6 +99,18 @@ pub(crate) const REPRESENTATIVE_DISCOVERY_CANDIDATES: [RepresentativeDiscoveryCa
         "fetch rows from a completed report result",
         "gam_report_result_rows",
         "reports",
+        true,
+    ),
+    candidate(
+        "inspect bounded Ad Manager change history for line item 123",
+        "gam_change_history",
+        "history",
+        true,
+    ),
+    candidate(
+        "inspect field-level changes from an operator supplied GAM export",
+        "gam_change_history_inspect",
+        "history",
         true,
     ),
     candidate(

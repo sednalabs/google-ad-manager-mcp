@@ -23,6 +23,7 @@
 
 mod ad_unit_retirement;
 pub mod auth_ux;
+mod change_history;
 mod client;
 mod config;
 mod contract;

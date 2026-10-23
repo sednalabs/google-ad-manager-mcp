@@ -1170,6 +1170,7 @@ name = "google-ad-manager-mcp"
 version = "0.1.1"
 dependencies = [
  "anyhow",
+ "chrono",
  "clap",
  "gcp_auth",
  "mcp-toolkit",

@@ -91,6 +91,13 @@ pub struct Cli {
         default_value = DEFAULT_WRITE_MODE
     )]
     pub write_mode: String,
+    /// Allow the operator-supplied change-history inspector to return previous/current values. Defaults to false and still requires per-call acknowledgment.
+    #[arg(
+        long,
+        env = "GOOGLE_AD_MANAGER_MCP_UNREDACTED_CHANGE_HISTORY_READ",
+        default_value_t = false
+    )]
+    pub unredacted_change_history_read: bool,
 
     /// Default report polling timeout in milliseconds.
     #[arg(
@@ -292,6 +299,7 @@ pub struct Settings {
     pub api_base_url: String,
     pub soap_base_url: String,
     pub write_mode: GuardedActionRuntimeMode,
+    pub unredacted_change_history_read: bool,
     pub report_poll_timeout: Duration,
     pub report_poll_initial_interval: Duration,
     pub scratchpad_session_ttl: Duration,
@@ -394,6 +402,7 @@ impl Settings {
             api_base_url,
             soap_base_url,
             write_mode,
+            unredacted_change_history_read: cli.unredacted_change_history_read,
             report_poll_timeout: Duration::from_millis(cli.report_poll_timeout_ms),
             report_poll_initial_interval: Duration::from_millis(
                 cli.report_poll_initial_interval_ms.clamp(5_000, 30_000),
@@ -425,6 +434,7 @@ impl Default for Settings {
             api_base_url: DEFAULT_API_BASE_URL.to_string(),
             soap_base_url: DEFAULT_SOAP_BASE_URL.to_string(),
             write_mode: GuardedActionRuntimeMode::PreviewOnly,
+            unredacted_change_history_read: false,
             report_poll_timeout: Duration::from_millis(300_000),
             report_poll_initial_interval: Duration::from_millis(5_000),
             scratchpad_session_ttl: Duration::from_secs(DEFAULT_SCRATCHPAD_SESSION_TTL_SECS),

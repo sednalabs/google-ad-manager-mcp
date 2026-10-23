@@ -19,6 +19,10 @@ use crate::ad_unit_retirement::{
     AdUnitRetirementAssessmentArgs, MAX_DESCENDANT_PAGE_BYTES,
     assess_ad_unit_retirement_with_readers, response_bytes,
 };
+use crate::change_history::{
+    CHANGE_HISTORY_MAX_PAGES, CHANGE_HISTORY_PAGE_SIZE, ChangeHistoryArgs,
+    ChangeHistoryInspectArgs, inspect_history,
+};
 use crate::client::{
     AdManagerClient, CatalogCollection, CompletedReportRun, DEFAULT_SOAP_API_VERSION,
     MAX_REPORT_INITIAL_POLL_INTERVAL_MS, MAX_REPORT_RESULT_PAGE_SIZE, RestWriteOperation,
@@ -871,6 +875,113 @@ fn bounded_report_result(
 
 #[tool_router(router = tool_router_ad_manager, vis = "pub")]
 impl AdManagerServer {
+    #[tool(
+        name = "gam_change_history",
+        description = "Read a bounded Google Ad Manager Change_History window with exact entity filters, provider timestamps, and explicit capped-versus-complete coverage. The API returns entity, operation, and user IDs, not changed field names or old/new values."
+    )]
+    async fn gam_change_history(
+        &self,
+        Parameters(args): Parameters<ChangeHistoryArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let started = Instant::now();
+        let (network_code, window) = match args.validate() {
+            Ok(value) => value,
+            Err(error) => return Ok(contract::error(error, started)),
+        };
+        let mut events = Vec::with_capacity(window.max_events);
+        let mut seen_ids = BTreeSet::new();
+        let mut before_id: Option<String> = None;
+        let mut page_count = 0usize;
+        let mut complete = false;
+        while events.len() < window.max_events && page_count < CHANGE_HISTORY_MAX_PAGES {
+            let requested = (window.max_events - events.len()).min(CHANGE_HISTORY_PAGE_SIZE);
+            let query = window.query(before_id.as_deref(), requested);
+            let page = match self
+                .client()
+                .select_change_history_page(&network_code, &query)
+                .await
+            {
+                Ok(page) => page,
+                Err(error) => return Ok(contract::error(error, started)),
+            };
+            page_count += 1;
+            if page.len() > requested {
+                return Ok(contract::result_contract_error(
+                    "change_history.rows",
+                    "provider returned more rows than requested",
+                    started,
+                ));
+            }
+            if page.is_empty() {
+                complete = true;
+                break;
+            }
+            let page_len = page.len();
+            let mut next_cursor = None;
+            for event in page {
+                if !seen_ids.insert(event.paging_id.clone()) {
+                    return Ok(contract::result_contract_error(
+                        "change_history.paging_id",
+                        "provider repeated a cursor row; completeness cannot be established",
+                        started,
+                    ));
+                }
+                next_cursor = Some(event.paging_id.clone());
+                events.push(json!({
+                    "change_date_time": event.change_date_time,
+                    "entity_id": event.entity_id,
+                    "entity_type": event.entity_type,
+                    "operation": event.operation,
+                    "user_id": event.user_id,
+                }));
+            }
+            if page_len < requested {
+                complete = true;
+                break;
+            }
+            before_id = next_cursor;
+        }
+        let capped = !complete;
+        Ok(contract::success(
+            json!({
+                "network_code": network_code,
+                "requested_window": {
+                    "start_utc": window.start_utc.to_rfc3339(),
+                    "end_utc": window.end_utc.to_rfc3339(),
+                    "max_events": window.max_events,
+                    "entity_id": window.entity_id,
+                    "entity_types": window.entity_types,
+                },
+                "events": events,
+                "coverage": {
+                    "returned_events": seen_ids.len(),
+                    "pages_read": page_count,
+                    "complete": complete,
+                    "capped": capped,
+                    "reason": if capped { "event_or_page_cap_reached" } else { "provider_window_exhausted" },
+                },
+                "field_level_changes_available_from_api": false,
+                "timestamp_note": "Each event retains the provider's DateTime components and timeZoneId. The requested bounds are normalized to UTC.",
+            }),
+            started,
+        ))
+    }
+
+    #[tool(
+        name = "gam_change_history_inspect",
+        description = "Inspect operator-supplied structured field-level change-history rows with asserted source hash and row references. This tool never opens files or fetches history; sensitive values are redacted by default."
+    )]
+    async fn gam_change_history_inspect(
+        &self,
+        Parameters(args): Parameters<ChangeHistoryInspectArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let started = Instant::now();
+        match inspect_history(args, self.settings().unredacted_change_history_read) {
+            Ok(data) => Ok(contract::success(data, started)),
+            Err(error) => Ok(contract::error(error, started)),
+        }
+    }
+
     #[tool(
         name = "find_tools",
         description = "Semantically search Google Ad Manager MCP tools with ranked matches, guided dependency edges, completeness metadata, and filter-validated empty-result recovery."

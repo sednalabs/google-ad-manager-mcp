@@ -183,6 +183,8 @@ credential material. See [Getting started](docs/GETTING_STARTED.md) for raw
 | Preview a REST change | `gam_trafficking_tool_matrix`, `gam_rest_write_plan` |
 | Preview SOAP trafficking | `gam_soap_payload_build`, `gam_soap_trafficking_plan` |
 | Analyse bounded data locally | `gam_scratchpad_open_session`, then an ingest tool and `gam_scratchpad_query` |
+| Read bounded provider change metadata | `gam_change_history`; field values are not returned by Google's Change_History table |
+| Inspect a supplied field-level history export | `gam_change_history_inspect`; source identity is asserted by the operator, and supplied values are redacted by default |
 | Discover tools from natural language | `find_tools` |
 
 All tools return structured Contract V1 envelopes: `ok/data/meta` on success
@@ -236,6 +238,7 @@ before enabling live writes or placing the server in an unattended environment.
 | `GOOGLE_AD_MANAGER_MCP_SHARED_ADC` | unavailable | `false` by default | Intentionally use conventional shared ADC |
 | `GOOGLE_AD_MANAGER_MCP_WRITE_MODE` | unavailable; release is read-only | `preview_only` by default | `read_only`, `preview_only`, or `enabled` |
 | `GOOGLE_AD_MANAGER_MCP_HTTP_TIMEOUT_MS` | `15000` | `15000` | Upstream request timeout |
+| `GOOGLE_AD_MANAGER_MCP_UNREDACTED_CHANGE_HISTORY_READ` | unavailable | `false` | Permit supplied field-level history values only with per-call acknowledgment |
 
 Run `google-ad-manager-mcp --help` for the options supported by the installed
 version. On `v0.1.1` and newer, use `google-ad-manager-mcp auth --help` for
