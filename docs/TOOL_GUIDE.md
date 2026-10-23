@@ -629,6 +629,14 @@ line-item ids over custom calendar dates:
    retrieves and validates the fixed CSV schema. It returns at most 10,000
    rows from a 5 MiB download and marks either cap as incomplete.
 
+The server binds each successfully returned report-job id to the exact
+canonical request in bounded process memory (up to 256 recent jobs). Read
+requires that binding before contacting GAM. The legacy API exposes job status
+and download by ID but does not expose a supported query-by-job-ID readback.
+Unknown, evicted, or pre-restart IDs therefore fail closed; this is not evidence
+that a provider job is absent. Continue an existing job with the same MCP
+process and exact request, and never resubmit automatically.
+
 The plan binds the provider-selected `PUBLISHER` timezone to the requested
 IANA timezone; GAM network readback must match before submission and result
 projection. Dates are inclusive calendar dates in that timezone. The result

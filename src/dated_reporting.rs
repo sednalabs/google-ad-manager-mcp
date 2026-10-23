@@ -1,5 +1,7 @@
 //! Fixed-shape, bounded dated delivery report planning and CSV projection.
 
+use std::collections::{BTreeMap, VecDeque};
+
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -10,6 +12,7 @@ pub(crate) const MAX_DATE_SPAN_DAYS: u32 = 62;
 pub(crate) const MAX_REPORT_CSV_BYTES: usize = 5 * 1024 * 1024;
 pub(crate) const MAX_REPORT_ROWS: usize = 10_000;
 pub(crate) const MAX_REPORT_CSV_COLUMNS: usize = 6;
+pub(crate) const MAX_BOUND_REPORT_JOBS: usize = 256;
 
 const EXPECTED_HEADERS: [&str; MAX_REPORT_CSV_COLUMNS] = [
     "Dimension.DATE",
@@ -59,6 +62,60 @@ pub(crate) struct DatedDeliveryCsv {
     pub rows: Vec<DatedDeliveryRow>,
     pub complete: bool,
     pub truncation_reason: Option<&'static str>,
+}
+
+/// Process-local binding between a provider-assigned job id and the exact
+/// canonical request that created it. The provider API exposes job status and
+/// downloads by id, but no operation to read a job's query back.
+#[derive(Debug, Default)]
+pub(crate) struct DatedReportJobRegistry {
+    by_job: BTreeMap<(String, String), DatedDeliveryReportPlan>,
+    insertion_order: VecDeque<(String, String)>,
+}
+
+impl DatedReportJobRegistry {
+    pub(crate) fn bind(
+        &mut self,
+        report_job_id: &str,
+        plan: &DatedDeliveryReportPlan,
+    ) -> Result<(), AdManagerError> {
+        let key = (plan.network_code.clone(), report_job_id.to_string());
+        if let Some(existing) = self.by_job.get(&key) {
+            return if existing == plan {
+                Ok(())
+            } else {
+                Err(AdManagerError::DatedReportJobBinding {
+                    message: "provider repeated a report-job id with a conflicting request binding; refusing to replace the original association".to_string(),
+                })
+            };
+        }
+        if self.by_job.len() >= MAX_BOUND_REPORT_JOBS
+            && let Some(oldest) = self.insertion_order.pop_front()
+        {
+            self.by_job.remove(&oldest);
+        }
+        self.insertion_order.push_back(key.clone());
+        self.by_job.insert(key, plan.clone());
+        Ok(())
+    }
+
+    pub(crate) fn require_match(
+        &self,
+        network_code: &str,
+        report_job_id: &str,
+        plan: &DatedDeliveryReportPlan,
+    ) -> Result<(), AdManagerError> {
+        if self
+            .by_job
+            .get(&(network_code.to_string(), report_job_id.to_string()))
+            .is_some_and(|bound| bound == plan)
+        {
+            return Ok(());
+        }
+        Err(AdManagerError::DatedReportJobBinding {
+            message: "no verified association for this network, report-job id and exact request is available in this MCP process (the id may be unknown, evicted, or from an earlier process); the query cannot be verified, so no provider read was attempted. This does not establish that a provider job is absent; do not resubmit automatically".to_string(),
+        })
+    }
 }
 
 pub(crate) fn build_plan(
@@ -439,8 +496,8 @@ fn csv_contract_static(field: &'static str) -> AdManagerError {
 #[cfg(test)]
 mod tests {
     use super::{
-        DatedDeliveryReportRequest, MAX_DATE_SPAN_DAYS, MAX_REPORT_ROWS, build_plan,
-        parse_report_csv,
+        DatedDeliveryReportRequest, DatedReportJobRegistry, MAX_BOUND_REPORT_JOBS,
+        MAX_DATE_SPAN_DAYS, MAX_REPORT_ROWS, build_plan, parse_report_csv,
     };
 
     fn request() -> DatedDeliveryReportRequest {
@@ -468,6 +525,124 @@ mod tests {
         );
         assert!(plan.report_query_xml.contains("<day>31</day>"));
         assert!(!plan.report_query_xml.contains("ORDER BY"));
+    }
+
+    #[test]
+    fn report_job_registry_accepts_only_the_exact_bound_query() {
+        let accepted = build_plan(request()).unwrap();
+        let mut registry = DatedReportJobRegistry::default();
+        registry.bind("7654321", &accepted).unwrap();
+        assert!(
+            registry
+                .require_match(&accepted.network_code, "7654321", &accepted)
+                .is_ok()
+        );
+
+        let mut changed_requests = vec![
+            DatedDeliveryReportRequest {
+                network_code: "7654322".into(),
+                ..request()
+            },
+            DatedDeliveryReportRequest {
+                line_item_ids: vec!["42".into()],
+                ..request()
+            },
+            DatedDeliveryReportRequest {
+                start_date: "2026-10-02".into(),
+                ..request()
+            },
+            DatedDeliveryReportRequest {
+                end_date: "2026-10-30".into(),
+                ..request()
+            },
+            DatedDeliveryReportRequest {
+                publisher_time_zone: "America/Los_Angeles".into(),
+                ..request()
+            },
+        ];
+        // The provider schema is fixed by the adapter rather than caller input;
+        // explicitly exercise exact equality if that shape changes internally.
+        let mut changed_metrics = accepted.clone();
+        changed_metrics.columns = ["AD_SERVER_CLICKS", "AD_SERVER_IMPRESSIONS"];
+        assert!(
+            registry
+                .require_match(&accepted.network_code, "7654321", &changed_metrics)
+                .is_err()
+        );
+
+        for changed in changed_requests.drain(..) {
+            let changed_plan = build_plan(changed).unwrap();
+            assert!(
+                registry
+                    .require_match(&changed_plan.network_code, "7654321", &changed_plan)
+                    .is_err()
+            );
+        }
+        let narrower = build_plan(DatedDeliveryReportRequest {
+            line_item_ids: vec!["42".into()],
+            start_date: "2026-10-02".into(),
+            end_date: "2026-10-02".into(),
+            ..request()
+        })
+        .unwrap();
+        let mut fresh_registry = DatedReportJobRegistry::default();
+        fresh_registry.bind("7654322", &narrower).unwrap();
+        // A narrower provider result cannot be presented as complete for the
+        // broader caller-supplied plan, even when its rows are in scope.
+        assert!(
+            fresh_registry
+                .require_match(&accepted.network_code, "7654322", &accepted)
+                .is_err()
+        );
+        assert!(
+            registry
+                .require_match(&accepted.network_code, "9999999", &accepted)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn report_job_registry_fails_closed_on_restart_eviction_and_conflict() {
+        let plan = build_plan(request()).unwrap();
+        let mut registry = DatedReportJobRegistry::default();
+        registry.bind("1", &plan).unwrap();
+        let conflicting = build_plan(DatedDeliveryReportRequest {
+            end_date: "2026-10-30".into(),
+            ..request()
+        })
+        .unwrap();
+        assert!(registry.bind("1", &conflicting).is_err());
+        assert!(
+            registry
+                .require_match(&plan.network_code, "1", &plan)
+                .is_ok()
+        );
+
+        let restarted = DatedReportJobRegistry::default();
+        assert!(
+            restarted
+                .require_match(&plan.network_code, "1", &plan)
+                .is_err()
+        );
+
+        let mut bounded = DatedReportJobRegistry::default();
+        for id in 1..=(MAX_BOUND_REPORT_JOBS + 1) {
+            bounded.bind(&id.to_string(), &plan).unwrap();
+        }
+        assert!(
+            bounded
+                .require_match(&plan.network_code, "1", &plan)
+                .is_err()
+        );
+        assert!(
+            bounded
+                .require_match(
+                    &plan.network_code,
+                    &(MAX_BOUND_REPORT_JOBS + 1).to_string(),
+                    &plan
+                )
+                .is_ok()
+        );
     }
 
     #[test]

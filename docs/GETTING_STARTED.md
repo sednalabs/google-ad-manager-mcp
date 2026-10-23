@@ -171,6 +171,10 @@ review exact line-item ids, inclusive dates, and publisher timezone; then call
 continue only its returned job id with `gam_dated_delivery_report_read`. The
 legacy SOAP report service requires the Ad Manager manage scope. An uncertain
 job submission must be reconciled before another run.
+The exact query-to-job association is retained in the submitting MCP process
+for up to 256 recent jobs. After process restart or eviction, the read tool
+refuses an unverified ID; that refusal does not establish that the provider
+job is absent.
 
 For REST write planning:
 

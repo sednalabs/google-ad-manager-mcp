@@ -2430,6 +2430,20 @@ impl AdManagerServer {
             }
             Err(err) => return Ok(contract::error(err, started)),
         };
+        if let Err(err) = self.bind_dated_report_job(&report_job_id, &plan).await {
+            return Ok(contract::error_with_detail(
+                err,
+                json!({
+                    "report_job_id": report_job_id,
+                    "network_code": plan.network_code,
+                    "provider_job_created": true,
+                    "query_binding_available": false,
+                    "automatic_replay_safe": false,
+                    "operator_action": "The provider job exists but this process could not safely bind its id to the reviewed request. Do not resubmit; reconcile the exact provider job manually."
+                }),
+                started,
+            ));
+        }
         let apply = GuardedActionApply::new(
             plan_id,
             self.settings().write_mode,
@@ -2468,6 +2482,12 @@ impl AdManagerServer {
             Ok(value) => value,
             Err(err) => return Ok(contract::error(err, started)),
         };
+        if let Err(err) = self
+            .require_dated_report_job_binding(&plan.network_code, &args.report_job_id, &plan)
+            .await
+        {
+            return Ok(contract::error(err, started));
+        }
         let wait_ms = args.max_wait_ms.unwrap_or(20_000);
         if wait_ms > 60_000 {
             return Ok(contract::error(
@@ -2507,7 +2527,7 @@ impl AdManagerServer {
                 json!({
                     "report": base,
                     "coverage": {"complete": false, "reason": "job_still_running"},
-                    "next_action": "Call this tool again with the same network, report_job_id and reviewed request. This continues the existing job and never submits another report."
+                    "next_action": "Call this tool again in this same MCP process with the same network, report_job_id and exact reviewed request. This continues the stored bound job and never submits another report."
                 }),
                 started,
             ));
@@ -8467,6 +8487,54 @@ mod tests {
             let (_, changed_token, _) = dated_delivery_report_identifiers(&changed_plan).unwrap();
             assert_ne!(token, changed_token);
         }
+    }
+
+    #[tokio::test]
+    async fn dated_report_read_refuses_unbound_broader_plan_before_provider_call() {
+        let narrow_request = DatedDeliveryReportRequest {
+            network_code: "1234567".into(),
+            line_item_ids: vec!["42".into()],
+            start_date: "2026-10-02".into(),
+            end_date: "2026-10-02".into(),
+            publisher_time_zone: "Australia/Sydney".into(),
+        };
+        let narrow_plan = build_dated_delivery_plan(narrow_request.clone()).unwrap();
+        let client = AdManagerClient::for_test_report_endpoint("http://127.0.0.1:9/ReportService");
+        let server = AdManagerServer::new(crate::Settings::default())
+            .expect("build test server")
+            .with_test_client(client);
+        server
+            .bind_dated_report_job("7654321", &narrow_plan)
+            .await
+            .unwrap();
+
+        let broad_request = DatedDeliveryReportRequest {
+            line_item_ids: vec!["42".into(), "43".into()],
+            end_date: "2026-10-03".into(),
+            ..narrow_request
+        };
+        let result = server
+            .gam_dated_delivery_report_read(Parameters(DatedDeliveryReportReadArgs {
+                request: broad_request,
+                report_job_id: "7654321".into(),
+                max_wait_ms: Some(0),
+            }))
+            .await
+            .expect("read tool should return a bounded refusal");
+        let response = result
+            .structured_content
+            .expect("structured refusal response");
+        assert_eq!(response["ok"], false);
+        assert_eq!(
+            response["error"]["code"],
+            "dated_report_job_binding_unavailable"
+        );
+        assert!(
+            response["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("no provider read was attempted")
+        );
     }
 
     #[test]
