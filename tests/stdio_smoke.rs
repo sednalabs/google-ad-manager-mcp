@@ -269,8 +269,12 @@ fn find_tools_exposes_dated_delivery_report_preview_schema() {
         }),
     );
     let data = &response["result"]["structuredContent"]["data"];
+    assert!(
+        sorted_string_values(&data["openai_allowed_tools"])
+            .contains(&"gam_dated_delivery_report_plan")
+    );
     assert_eq!(
-        sorted_direct_names(data),
+        sorted_string_values(&data["openai_allowed_tools"]),
         vec!["gam_dated_delivery_report_plan"]
     );
     assert_eq!(
@@ -282,6 +286,47 @@ fn find_tools_exposes_dated_delivery_report_preview_schema() {
             .is_object()
     );
     assert_complete_discovery_result_is_bounded(&response);
+
+    let explicit_response = process.call_tool(
+        1002,
+        "find_tools",
+        json!({
+            "query":"preview dated delivery report impressions and clicks for exact line items",
+            "group":"reports",
+            "read_only":true,
+            "limit":10,
+            "include_schema":true
+        }),
+    );
+    let explicit_data = &explicit_response["result"]["structuredContent"]["data"];
+    assert!(
+        sorted_string_values(&explicit_data["openai_allowed_tools"])
+            .contains(&"gam_dated_delivery_report_plan")
+    );
+    let explicit_tools = sorted_string_values(&explicit_data["openai_allowed_tools"]);
+    assert!(!explicit_tools.contains(&"gam_dated_delivery_report_apply"));
+    assert!(!explicit_tools.contains(&"gam_dated_delivery_report_read"));
+    assert!(!explicit_tools.contains(&"gam_report_run"));
+    assert!(sorted_schema_names(explicit_data).contains(&"gam_dated_delivery_report_plan"));
+    assert_complete_discovery_result_is_bounded(&explicit_response);
+
+    let apply_response = process.call_tool(
+        1003,
+        "find_tools",
+        json!({
+            "query":"run a dated delivery report for exact line items",
+            "group":"reports",
+            "read_only":false,
+            "limit":10,
+            "include_schema":true
+        }),
+    );
+    let apply_data = &apply_response["result"]["structuredContent"]["data"];
+    let apply_tools = sorted_string_values(&apply_data["openai_allowed_tools"]);
+    assert!(apply_tools.contains(&"gam_dated_delivery_report_apply"));
+    assert!(!apply_tools.contains(&"gam_report_run"));
+    assert!(!apply_tools.contains(&"gam_dated_delivery_report_read"));
+    assert_complete_discovery_result_is_bounded(&apply_response);
 }
 
 #[test]
