@@ -1032,7 +1032,21 @@ fn reference_has_non_report_relation_target(terms: &[&str], reference_index: usi
             && target
                 .iter()
                 .any(|term| is_non_report_reference_domain(term))
+            && !is_dated_delivery_line_item_scope(terms, target)
     })
+}
+
+fn is_dated_delivery_line_item_scope(terms: &[&str], target: &[&str]) -> bool {
+    let has_dated_delivery_report =
+        (terms.contains(&"dated") || terms.contains(&"daily") || terms.contains(&"date"))
+            && terms.contains(&"delivery")
+            && (terms.contains(&"report") || terms.contains(&"reports"));
+    has_dated_delivery_report
+        && target.iter().any(|term| matches!(*term, "line" | "lines"))
+        && target.iter().any(|term| matches!(*term, "item" | "items"))
+        && target
+            .iter()
+            .all(|term| matches!(*term, "exact" | "the" | "line" | "lines" | "item" | "items"))
 }
 
 fn report_relation_starts_new_clause(terms: &[&str]) -> bool {
@@ -2065,6 +2079,13 @@ fn report_start_tail_safety(
     {
         return ReportStartTailSafety::Safe;
     }
+    if terms
+        .iter()
+        .all(|term| matches!(*term, "for" | "exact" | "line" | "lines" | "item" | "items"))
+        && terms.first() == Some(&"for")
+    {
+        return ReportStartTailSafety::Safe;
+    }
     let starts_as_continuation = matches!(terms.first(), Some(&"and" | &"then" | &"until"));
     let has_continuation_action = terms.iter().any(|term| {
         is_report_continuation_term(term)
@@ -2209,6 +2230,8 @@ fn is_report_object_modifier(term: &str) -> bool {
             | "latest"
             | "current"
             | "daily"
+            | "dated"
+            | "date"
             | "weekly"
             | "monthly"
             | "quarter"
@@ -3526,6 +3549,10 @@ mod tests {
         );
         assert_eq!(
             report_discovery_intent(Some("run a saved report and wait for completion")),
+            ReportDiscoveryIntent::ExplicitNewRun
+        );
+        assert_eq!(
+            report_discovery_intent(Some("run a dated delivery report for exact line items")),
             ReportDiscoveryIntent::ExplicitNewRun
         );
         for query in [
