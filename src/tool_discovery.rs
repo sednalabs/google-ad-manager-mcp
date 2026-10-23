@@ -102,7 +102,7 @@ pub(crate) const REPRESENTATIVE_DISCOVERY_CANDIDATES: [RepresentativeDiscoveryCa
         true,
     ),
     candidate(
-        "inspect bounded Ad Manager change history for line item 123",
+        "read bounded provider Change_History for line item 123",
         "gam_change_history",
         "history",
         true,
@@ -4054,6 +4054,7 @@ mod tests {
             serde_json::json!([
                 "catalog",
                 "discovery",
+                "history",
                 "networks",
                 "reports",
                 "setup",

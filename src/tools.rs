@@ -8636,7 +8636,7 @@ mod tests {
             }))
             .await
             .expect("open scratchpad session");
-        assert_eq!(opened.is_error, None);
+        assert_eq!(opened.is_error, Some(false));
 
         let report_result = json!({
             "rows": [
@@ -9078,7 +9078,7 @@ mod tests {
             let requests = requests.lock().expect("lock history test requests");
             assert_eq!(requests.len(), 2);
             assert!(requests[0].contains("ORDER BY ChangeDateTime DESC LIMIT 50"));
-            assert!(requests[1].contains("Id &lt; 'cursor-49'"));
+            assert!(requests[1].contains("Id &lt; &apos;cursor-49&apos;"));
             assert!(requests[1].contains(&format!(
                 "ORDER BY ChangeDateTime DESC LIMIT {}",
                 max_events - 50

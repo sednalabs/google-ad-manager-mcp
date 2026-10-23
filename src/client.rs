@@ -698,7 +698,14 @@ impl AdManagerClient {
 
     #[cfg(test)]
     pub(crate) fn for_test_change_history_endpoint(endpoint: impl Into<Arc<str>>) -> Self {
-        let mut client = Self::from_settings(&Settings::default());
+        let settings = Settings::default();
+        let mut client = Self::from_settings(&settings);
+        client.change_history_http = Client::builder()
+            .timeout(settings.http_timeout)
+            .no_proxy()
+            .redirect(Policy::none())
+            .build()
+            .expect("test change-history client should build");
         client.test_access_token = Some(Arc::from("test-access-token"));
         client.change_history_test_endpoint = Some(endpoint.into());
         client
