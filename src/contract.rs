@@ -2,8 +2,8 @@
 
 use std::time::Instant;
 
-use mcp_toolkit::rmcp::model::{CallToolResult, ContentBlock};
 use mcp_toolkit_scratchpad::ScratchpadError;
+use mcp_toolkit_server::rmcp::model::{CallToolResult, ContentBlock};
 use serde_json::{Map, Value, json};
 
 use crate::AdManagerError;

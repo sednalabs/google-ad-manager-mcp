@@ -2,14 +2,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::time::Instant;
 
-use mcp_toolkit::rmcp::handler::server::wrapper::Parameters;
-use mcp_toolkit::rmcp::model::CallToolResult;
-use mcp_toolkit::rmcp::{self, tool, tool_router};
 use mcp_toolkit_auth::provider_auth::{GoogleProviderAuthConfig, GoogleProviderAuthLoginOptions};
 use mcp_toolkit_scratchpad::{
     ScratchpadIngestColumn, ScratchpadIngestMode, ScratchpadQueryProjection, ScratchpadSessionInfo,
     ScratchpadSessionSnapshot, ScratchpadTableInfo, run_scratchpad_blocking,
 };
+use mcp_toolkit_server::rmcp::handler::server::wrapper::Parameters;
+use mcp_toolkit_server::rmcp::model::CallToolResult;
+use mcp_toolkit_server::rmcp::{self, tool, tool_router};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};

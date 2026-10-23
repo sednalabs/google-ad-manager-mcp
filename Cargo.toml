@@ -14,12 +14,13 @@ anyhow = "1.0.102"
 chrono = { version = "0.4.45", default-features = false, features = ["std"] }
 clap = { version = "4.5.60", features = ["derive", "env"] }
 gcp_auth = "0.12.6"
-mcp-toolkit = { version = "0.1.0", git = "https://github.com/sednalabs/mcp-toolkit-rs", branch = "main", package = "mcp-toolkit", features = ["server-stdio"] }
+mcp-toolkit-server = { version = "0.1.0", git = "https://github.com/sednalabs/mcp-toolkit-rs", branch = "main", package = "mcp-toolkit-server", features = ["stdio"] }
 mcp-toolkit-auth = { version = "0.1.0", git = "https://github.com/sednalabs/mcp-toolkit-rs", branch = "main", package = "mcp-toolkit-auth" }
 mcp-toolkit-core = { version = "0.1.0", git = "https://github.com/sednalabs/mcp-toolkit-rs", branch = "main", package = "mcp-toolkit-core" }
 mcp-toolkit-observability = { version = "0.1.0", git = "https://github.com/sednalabs/mcp-toolkit-rs", branch = "main", package = "mcp-toolkit-observability", features = ["tracing-bridge"] }
 mcp-toolkit-scratchpad = { version = "0.1.0", git = "https://github.com/sednalabs/mcp-toolkit-rs", branch = "main", package = "mcp-toolkit-scratchpad", features = ["tokio"] }
 reqwest = { version = "0.12.24", default-features = false, features = ["http2", "json", "rustls-tls"] }
+rmcp = { version = "=2.1.0", default-features = false, features = ["macros", "schemars", "server", "transport-io"] }
 roxmltree = "0.21.1"
 schemars = "1.2.1"
 serde = { version = "1.0.228", features = ["derive"] }

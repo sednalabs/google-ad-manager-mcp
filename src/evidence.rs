@@ -3,7 +3,7 @@
 use std::collections::BTreeSet;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use mcp_toolkit::rmcp::model::CallToolResult;
+use mcp_toolkit_server::rmcp::model::CallToolResult;
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Value, json};
