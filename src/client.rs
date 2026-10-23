@@ -3510,6 +3510,15 @@ mod tests {
             Err(AdManagerError::UpstreamContract { field, .. }) => {
                 format!("upstream_contract:{field}")
             }
+            Err(AdManagerError::Transport { source }) => format!(
+                "transport_error:timeout={},connect={},request={},body={},decode={},status={}",
+                source.is_timeout(),
+                source.is_connect(),
+                source.is_request(),
+                source.is_body(),
+                source.is_decode(),
+                source.status().map_or(0, |status| status.as_u16())
+            ),
             Err(error) => error.code().to_string(),
         }
     }
