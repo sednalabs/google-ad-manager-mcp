@@ -178,6 +178,7 @@ fn find_tools_is_semantic_compact_and_recoverable() {
         json!([
             "catalog",
             "discovery",
+            "history",
             "networks",
             "reports",
             "setup",
