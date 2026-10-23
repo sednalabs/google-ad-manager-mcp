@@ -222,7 +222,12 @@ pub(crate) fn parse_change_history_xml(
                 .map(str::to_string)
         })
         .collect::<Vec<_>>();
-    if columns.iter().map(String::as_str).collect::<Vec<_>>() != expected_columns {
+    let has_expected_columns = columns.len() == expected_columns.len()
+        && columns
+            .iter()
+            .zip(expected_columns)
+            .all(|(actual, expected)| actual.eq_ignore_ascii_case(expected));
+    if !has_expected_columns {
         return Err(contract(
             "change_history.columns",
             "provider returned unexpected column order or shape",
@@ -604,15 +609,15 @@ mod tests {
     }
 
     #[test]
-    fn parses_documented_provider_change_history_shape() {
+    fn parses_lowercase_provider_change_history_columns() {
         let xml = r#"<selectResponse xmlns="https://www.google.com/apis/ads/publisher/v202605">
           <rval>
-            <columnTypes><labelName>ChangeDateTime</labelName></columnTypes>
-            <columnTypes><labelName>EntityId</labelName></columnTypes>
-            <columnTypes><labelName>EntityType</labelName></columnTypes>
-            <columnTypes><labelName>Id</labelName></columnTypes>
-            <columnTypes><labelName>Operation</labelName></columnTypes>
-            <columnTypes><labelName>UserId</labelName></columnTypes>
+            <columnTypes><labelName>changedatetime</labelName></columnTypes>
+            <columnTypes><labelName>entityid</labelName></columnTypes>
+            <columnTypes><labelName>entitytype</labelName></columnTypes>
+            <columnTypes><labelName>id</labelName></columnTypes>
+            <columnTypes><labelName>operation</labelName></columnTypes>
+            <columnTypes><labelName>userid</labelName></columnTypes>
             <rows><values>
               <value xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:type="DateTimeValue"><value><date><year>2026</year><month>10</month><day>22</day></date><hour>12</hour><minute>5</minute><second>4</second><timeZoneId>Australia/Sydney</timeZoneId></value></value>
               <value xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:type="NumberValue"><value>123456</value></value>
@@ -631,6 +636,69 @@ mod tests {
         assert_eq!(rows[0].user_id, "789");
         assert_eq!(rows[0].paging_id, "cursor-1");
         assert_eq!(rows[0].change_date_time["time_zone_id"], "Australia/Sydney");
+    }
+
+    #[test]
+    fn accepts_lowercase_provider_change_history_columns_for_empty_window() {
+        let xml = r#"<selectResponse xmlns="https://www.google.com/apis/ads/publisher/v202605">
+          <rval>
+            <columnTypes><labelName>changedatetime</labelName></columnTypes>
+            <columnTypes><labelName>entityid</labelName></columnTypes>
+            <columnTypes><labelName>entitytype</labelName></columnTypes>
+            <columnTypes><labelName>id</labelName></columnTypes>
+            <columnTypes><labelName>operation</labelName></columnTypes>
+            <columnTypes><labelName>userid</labelName></columnTypes>
+          </rval>
+        </selectResponse>"#;
+
+        let rows = super::parse_change_history_xml(xml).expect("valid empty provider result");
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn rejects_unknown_duplicate_missing_or_reordered_change_history_columns() {
+        let invalid_labels = [
+            vec![
+                "changedatetime",
+                "entityid",
+                "entitytype",
+                "id",
+                "operation",
+                "unknown",
+            ],
+            vec![
+                "changedatetime",
+                "entityid",
+                "entitytype",
+                "id",
+                "operation",
+                "operation",
+            ],
+            vec![
+                "changedatetime",
+                "entityid",
+                "entitytype",
+                "id",
+                "operation",
+            ],
+            vec![
+                "entityid",
+                "changedatetime",
+                "entitytype",
+                "id",
+                "operation",
+                "userid",
+            ],
+        ];
+
+        for labels in invalid_labels {
+            let columns = labels
+                .iter()
+                .map(|label| format!("<columnTypes><labelName>{label}</labelName></columnTypes>"))
+                .collect::<String>();
+            let xml = format!("<selectResponse><rval>{columns}</rval></selectResponse>");
+            assert!(super::parse_change_history_xml(&xml).is_err(), "{labels:?}");
+        }
     }
 
     #[test]
