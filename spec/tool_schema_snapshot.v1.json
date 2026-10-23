@@ -575,6 +575,173 @@
       "name": "gam_change_history_inspect"
     },
     {
+      "description": "Start one fixed GAM dated delivery report job after exact plan-token confirmation; an uncertain response must be reconciled and never replayed.",
+      "inputSchema": {
+        "$defs": {
+          "DatedDeliveryReportRequest": {
+            "properties": {
+              "end_date": {
+                "type": "string"
+              },
+              "line_item_ids": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "network_code": {
+                "type": "string"
+              },
+              "publisher_time_zone": {
+                "description": "Expected publisher IANA time zone, checked against the network before\nthe report job is submitted and again when results are read.",
+                "type": "string"
+              },
+              "start_date": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "network_code",
+              "line_item_ids",
+              "start_date",
+              "end_date",
+              "publisher_time_zone"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "confirmation_token": {
+            "description": "Exact token returned by gam_dated_delivery_report_plan.",
+            "type": "string"
+          },
+          "request": {
+            "$ref": "#/$defs/DatedDeliveryReportRequest"
+          }
+        },
+        "required": [
+          "request",
+          "confirmation_token"
+        ],
+        "type": "object"
+      },
+      "name": "gam_dated_delivery_report_apply"
+    },
+    {
+      "description": "Preview a fixed, bounded GAM daily line-item delivery report. This preview creates no provider job.",
+      "inputSchema": {
+        "$defs": {
+          "DatedDeliveryReportRequest": {
+            "properties": {
+              "end_date": {
+                "type": "string"
+              },
+              "line_item_ids": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "network_code": {
+                "type": "string"
+              },
+              "publisher_time_zone": {
+                "description": "Expected publisher IANA time zone, checked against the network before\nthe report job is submitted and again when results are read.",
+                "type": "string"
+              },
+              "start_date": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "network_code",
+              "line_item_ids",
+              "start_date",
+              "end_date",
+              "publisher_time_zone"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "request": {
+            "$ref": "#/$defs/DatedDeliveryReportRequest"
+          }
+        },
+        "required": [
+          "request"
+        ],
+        "type": "object"
+      },
+      "name": "gam_dated_delivery_report_plan"
+    },
+    {
+      "description": "Wait a bounded time on one exact GAM report-job id, then retrieve and validate fixed-schema dated delivery rows without exposing its signed download URL or raw CSV.",
+      "inputSchema": {
+        "$defs": {
+          "DatedDeliveryReportRequest": {
+            "properties": {
+              "end_date": {
+                "type": "string"
+              },
+              "line_item_ids": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "network_code": {
+                "type": "string"
+              },
+              "publisher_time_zone": {
+                "description": "Expected publisher IANA time zone, checked against the network before\nthe report job is submitted and again when results are read.",
+                "type": "string"
+              },
+              "start_date": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "network_code",
+              "line_item_ids",
+              "start_date",
+              "end_date",
+              "publisher_time_zone"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "max_wait_ms": {
+            "description": "Maximum time to wait for an existing job. Defaults to 20 seconds, max 60 seconds.",
+            "format": "uint64",
+            "maximum": 60000,
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "report_job_id": {
+            "description": "Exact report-job id returned by gam_dated_delivery_report_apply.",
+            "type": "string"
+          },
+          "request": {
+            "$ref": "#/$defs/DatedDeliveryReportRequest"
+          }
+        },
+        "required": [
+          "request",
+          "report_job_id"
+        ],
+        "type": "object"
+      },
+      "name": "gam_dated_delivery_report_read"
+    },
+    {
       "description": "Read-only proof for whether exact Ad Manager ad units appear exposed to AdSense, private auctions, private deals, or yield groups, while naming unsupported protection surfaces explicitly.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
