@@ -348,6 +348,9 @@ pub struct YieldGroupExclusionRequestArgs {
     pub yield_group_id: String,
     /// Ad-unit IDs to ensure in YieldGroupService InventoryTargeting.excludedAdUnits. Requested entries are written descendant-safe with includeDescendants=true.
     pub excluded_ad_unit_ids: Vec<String>,
+    /// Exact exclusion IDs to remove; unrelated exclusions remain unchanged.
+    #[serde(default)]
+    pub remove_excluded_ad_unit_ids: Vec<String>,
     /// SOAP API version, for example v202605. Defaults to the current server default.
     pub api_version: Option<String>,
     /// Include generated SOAP payload fragments in the response. Defaults to false.
@@ -6561,6 +6564,7 @@ struct YieldGroupExclusionDraft {
     targeted_ad_units: Vec<AdUnitTargetingValue>,
     current_excluded_ad_units: Vec<AdUnitTargetingValue>,
     requested_excluded_ad_unit_ids: Vec<String>,
+    removed_excluded_ad_unit_ids: Vec<String>,
     requested_exclusion_include_descendants: bool,
     already_excluded_ad_unit_ids: Vec<String>,
     added_excluded_ad_unit_ids: Vec<String>,
@@ -6570,7 +6574,12 @@ struct YieldGroupExclusionDraft {
 
 impl YieldGroupExclusionDraft {
     fn all_requested_ids_currently_excluded(&self) -> bool {
-        self.requested_excluded_ad_unit_ids.iter().all(|id| {
+        self.removed_excluded_ad_unit_ids.iter().all(|id| {
+            !self
+                .current_excluded_ad_units
+                .iter()
+                .any(|v| v.ad_unit_id == *id)
+        }) && self.requested_excluded_ad_unit_ids.iter().all(|id| {
             self.current_excluded_ad_units.iter().any(|value| {
                 value.ad_unit_id == *id
                     && value.include_descendants
@@ -6590,7 +6599,28 @@ fn validate_yield_group_exclusion_context(
         ));
     }
     let _ = parse_positive_id_string("yield_group_id", &request.yield_group_id)?;
-    let _ = validated_excluded_ad_unit_ids(&request.excluded_ad_unit_ids)?;
+    if request.excluded_ad_unit_ids.is_empty() && request.remove_excluded_ad_unit_ids.is_empty() {
+        return Err(AdManagerError::invalid(
+            "excluded_ad_unit_ids",
+            "supply at least one add or remove ID",
+        ));
+    }
+    let adds = if request.excluded_ad_unit_ids.is_empty() {
+        Vec::new()
+    } else {
+        validated_excluded_ad_unit_ids(&request.excluded_ad_unit_ids)?
+    };
+    let removes = if request.remove_excluded_ad_unit_ids.is_empty() {
+        Vec::new()
+    } else {
+        validated_excluded_ad_unit_ids(&request.remove_excluded_ad_unit_ids)?
+    };
+    if adds.iter().any(|id| removes.contains(id)) {
+        return Err(AdManagerError::invalid(
+            "remove_excluded_ad_unit_ids",
+            "add and remove IDs must be disjoint",
+        ));
+    }
     Ok(())
 }
 
@@ -6629,8 +6659,16 @@ async fn build_yield_group_exclusion_draft(
     request: &YieldGroupExclusionRequestArgs,
 ) -> Result<YieldGroupExclusionDraft, AdManagerError> {
     let yield_group_id = parse_positive_id_string("yield_group_id", &request.yield_group_id)?;
-    let requested_excluded_ad_unit_ids =
-        validated_excluded_ad_unit_ids(&request.excluded_ad_unit_ids)?;
+    let requested_excluded_ad_unit_ids = if request.excluded_ad_unit_ids.is_empty() {
+        Vec::new()
+    } else {
+        validated_excluded_ad_unit_ids(&request.excluded_ad_unit_ids)?
+    };
+    let removed_excluded_ad_unit_ids = if request.remove_excluded_ad_unit_ids.is_empty() {
+        Vec::new()
+    } else {
+        validated_excluded_ad_unit_ids(&request.remove_excluded_ad_unit_ids)?
+    };
     let read_payload_xml = pql_statement_payload(&format!("WHERE id = {yield_group_id}"));
     let read_plan = server.client().build_soap_trafficking_plan(
         &request.network_code,
@@ -6658,6 +6696,7 @@ async fn build_yield_group_exclusion_draft(
         &current_yield_group_xml,
         &yield_group_id,
         &requested_excluded_ad_unit_ids,
+        &removed_excluded_ad_unit_ids,
     )?;
     let update_payload_fingerprint = stable_fingerprint(&update.payload_xml);
     let current_yield_group_fingerprint = stable_fingerprint(&current_yield_group_xml);
@@ -6680,14 +6719,19 @@ async fn build_yield_group_exclusion_draft(
         current_yield_group_fingerprint,
         update_payload_fingerprint,
         targeted_ad_units: update.targeted_ad_units,
-        current_excluded_ad_units: update.current_excluded_ad_units,
+        current_excluded_ad_units: update.current_excluded_ad_units.clone(),
         requested_excluded_ad_unit_ids,
+        removed_excluded_ad_unit_ids: removed_excluded_ad_unit_ids.clone(),
         requested_exclusion_include_descendants: YIELD_GROUP_EXCLUSION_INCLUDE_DESCENDANTS,
         already_excluded_ad_unit_ids: update.already_excluded_ad_unit_ids,
         added_excluded_ad_unit_ids: update.added_excluded_ad_unit_ids.clone(),
         updated_excluded_ad_unit_ids: update.updated_excluded_ad_unit_ids.clone(),
         noop: update.added_excluded_ad_unit_ids.is_empty()
-            && update.updated_excluded_ad_unit_ids.is_empty(),
+            && update.updated_excluded_ad_unit_ids.is_empty()
+            && !update
+                .current_excluded_ad_units
+                .iter()
+                .any(|v| removed_excluded_ad_unit_ids.contains(&v.ad_unit_id)),
     })
 }
 
@@ -6705,6 +6749,7 @@ fn build_yield_group_exclusion_update(
     current_yield_group_xml: &str,
     yield_group_id: &str,
     requested_excluded_ad_unit_ids: &[String],
+    remove_ids: &[String],
 ) -> Result<YieldGroupExclusionUpdate, AdManagerError> {
     let observed_yield_group_id =
         yield_group_id_from_xml(current_yield_group_xml).ok_or_else(|| {
@@ -6773,6 +6818,7 @@ fn build_yield_group_exclusion_update(
     let updated_inventory_xml = yield_group_inventory_targeting_with_exclusions(
         &inventory_block,
         requested_excluded_ad_unit_ids,
+        remove_ids,
         requested_exclusion_include_descendants,
     );
     let updated_yield_group_xml =
@@ -6841,6 +6887,7 @@ fn exact_yield_group_from_readback(
 fn yield_group_inventory_targeting_with_exclusions(
     inventory_block: &str,
     requested_excluded_ad_unit_ids: &[String],
+    remove_ids: &[String],
     include_descendants: bool,
 ) -> String {
     let targeted_blocks = extract_xml_blocks(inventory_block, "targetedAdUnits");
@@ -6851,6 +6898,9 @@ fn yield_group_inventory_targeting_with_exclusions(
     let mut seen_requested_ids = BTreeSet::new();
     let mut excluded_blocks = Vec::new();
     for block in extract_xml_blocks(inventory_block, "excludedAdUnits") {
+        if extract_xml_tag_text(&block, "adUnitId").is_some_and(|id| remove_ids.contains(&id)) {
+            continue;
+        }
         if let Some(ad_unit_id) = extract_xml_tag_text(&block, "adUnitId")
             && requested_ids.contains(ad_unit_id.as_str())
         {
@@ -7087,6 +7137,8 @@ fn guarded_yield_group_exclusion_identifiers(
         "api_version": draft.api_version,
         "yield_group_id": draft.yield_group_id,
         "requested_excluded_ad_unit_ids": draft.requested_excluded_ad_unit_ids,
+        "remove_excluded_ad_unit_ids": draft.removed_excluded_ad_unit_ids,
+        "remaining_exclusions_may_cover_removed_descendants": true,
         "current_yield_group_fingerprint": draft.current_yield_group_fingerprint,
         "update_payload_fingerprint": draft.update_payload_fingerprint,
     });
@@ -7119,6 +7171,8 @@ fn yield_group_exclusion_draft_summary(
         "targeted_ad_units": draft.targeted_ad_units,
         "current_excluded_ad_units": draft.current_excluded_ad_units,
         "requested_excluded_ad_unit_ids": draft.requested_excluded_ad_unit_ids,
+        "remove_excluded_ad_unit_ids": draft.removed_excluded_ad_unit_ids,
+        "remaining_exclusions_may_cover_removed_descendants": true,
         "requested_exclusion_include_descendants": draft.requested_exclusion_include_descendants,
         "already_excluded_ad_unit_ids": draft.already_excluded_ad_unit_ids,
         "added_excluded_ad_unit_ids": draft.added_excluded_ad_unit_ids,
@@ -8449,6 +8503,15 @@ mod tests {
     use std::thread;
 
     use super::*;
+
+    #[test]
+    fn exclusion_removal_preserves_other_entries() {
+        let xml = "<inventoryTargeting><targetedAdUnits><adUnitId>1</adUnitId><includeDescendants>true</includeDescendants></targetedAdUnits><excludedAdUnits><adUnitId>2</adUnitId><includeDescendants>true</includeDescendants></excludedAdUnits><excludedAdUnits><adUnitId>3</adUnitId><includeDescendants>false</includeDescendants></excludedAdUnits></inventoryTargeting>";
+        let result = yield_group_inventory_targeting_with_exclusions(xml, &[], &["2".into()], true);
+        assert!(!result.contains("<adUnitId>2</adUnitId>"));
+        assert!(result.contains("<adUnitId>3</adUnitId>"));
+        assert!(result.contains("<adUnitId>1</adUnitId>"));
+    }
 
     #[test]
     fn dated_report_confirmation_binds_network_ids_dates_and_timezone() {
@@ -11980,6 +12043,7 @@ mod tests {
             sample_yield_group_xml(),
             "10",
             &["200".to_string(), "201".to_string(), "202".to_string()],
+            &[],
         )
         .expect("update");
 
@@ -12034,8 +12098,8 @@ mod tests {
             "<includeDescendants>false</includeDescendants>",
             "<includeDescendants>true</includeDescendants>",
         );
-        let update =
-            build_yield_group_exclusion_update(&xml, "10", &["200".to_string()]).expect("update");
+        let update = build_yield_group_exclusion_update(&xml, "10", &["200".to_string()], &[])
+            .expect("update");
 
         assert_eq!(update.already_excluded_ad_unit_ids, vec!["200"]);
         assert!(update.added_excluded_ad_unit_ids.is_empty());
@@ -12055,6 +12119,7 @@ mod tests {
             sample_yield_group_xml(),
             "10",
             &["100".to_string()],
+            &[],
         )
         .expect_err("target and exclude conflict should fail");
 
@@ -12073,6 +12138,7 @@ mod tests {
             "<yieldGroupId>10</yieldGroupId><yieldGroupName>Group</yieldGroupName>",
             "10",
             &["201".to_string()],
+            &[],
         )
         .expect_err("missing targeting should fail closed");
 
@@ -12107,6 +12173,7 @@ mod tests {
     #[test]
     fn yield_group_exclusion_identifiers_bind_current_readback() {
         let request = YieldGroupExclusionRequestArgs {
+            remove_excluded_ad_unit_ids: vec![],
             network_code: "1234567".to_string(),
             yield_group_id: "10".to_string(),
             excluded_ad_unit_ids: vec!["201".to_string()],
@@ -12175,6 +12242,7 @@ mod tests {
     #[test]
     fn yield_group_preview_receipt_round_trips_to_schema_complete_apply_arguments() {
         let request = YieldGroupExclusionRequestArgs {
+            remove_excluded_ad_unit_ids: vec![],
             network_code: "1234567".to_string(),
             yield_group_id: "10".to_string(),
             excluded_ad_unit_ids: vec!["201".to_string(), "202".to_string()],
@@ -12228,6 +12296,7 @@ mod tests {
     #[test]
     fn yield_group_exclusion_apply_context_requires_operator_impact() {
         let request = YieldGroupExclusionRequestArgs {
+            remove_excluded_ad_unit_ids: vec![],
             network_code: "1234567".to_string(),
             yield_group_id: "10".to_string(),
             excluded_ad_unit_ids: vec!["201".to_string()],
@@ -14086,6 +14155,7 @@ mod tests {
                 include_descendants: Some(false),
             }],
             requested_excluded_ad_unit_ids: vec!["201".to_string()],
+            removed_excluded_ad_unit_ids: vec![],
             requested_exclusion_include_descendants: true,
             already_excluded_ad_unit_ids: vec![],
             added_excluded_ad_unit_ids: vec!["201".to_string()],
