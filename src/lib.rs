@@ -56,7 +56,7 @@ use mcp_toolkit_scratchpad::{
 use mcp_toolkit_server::rmcp::{
     self, ServerHandler,
     handler::server::router::tool::ToolRouter,
-    model::{ServerCapabilities, ServerInfo, Tool},
+    model::{ServerCapabilities, ServerConfig, Tool},
     tool_handler,
 };
 use tool_surface::build_tool_inventory;
@@ -198,8 +198,8 @@ impl AdManagerServer {
 
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for AdManagerServer {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_instructions(
                 "Google Ad Manager MCP for networks, inventory, delivery catalog, saved reports, guarded REST write previews, and guarded SOAP trafficking.",
             )

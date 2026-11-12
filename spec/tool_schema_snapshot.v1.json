@@ -1970,6 +1970,14 @@
                 "description": "Human-readable reason for the proposed yield-group exclusion change.",
                 "type": "string"
               },
+              "remove_excluded_ad_unit_ids": {
+                "default": [],
+                "description": "Exact exclusion IDs to remove; unrelated exclusions remain unchanged.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
               "rollback_note": {
                 "description": "Rollback or reversal note. Required by policy for live apply review.",
                 "type": [
@@ -2055,6 +2063,14 @@
               "reason": {
                 "description": "Human-readable reason for the proposed yield-group exclusion change.",
                 "type": "string"
+              },
+              "remove_excluded_ad_unit_ids": {
+                "default": [],
+                "description": "Exact exclusion IDs to remove; unrelated exclusions remain unchanged.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
               },
               "rollback_note": {
                 "description": "Rollback or reversal note. Required by policy for live apply review.",

@@ -786,8 +786,8 @@ scope. Mutating SOAP operations additionally require
 
 ## `gam_yield_group_exclusions_preview` And `gam_yield_group_exclusions_apply`
 
-These tools provide a typed, guarded path for adding descendant-safe ad-unit exclusions
-to an existing `YieldGroupService` yield group. They are intentionally separate
+These tools provide a typed, guarded path for adding descendant-safe ad-unit exclusions or removing exact exclusions
+from an existing `YieldGroupService` yield group. They are intentionally separate
 from the generic SOAP tools because a safe update must preserve the current
 yield-group object and prove readback.
 
@@ -795,7 +795,8 @@ yield-group object and prove readback.
 
 - `network_code`
 - `yield_group_id`
-- `excluded_ad_unit_ids`
+- `excluded_ad_unit_ids` (use an empty list for removal-only requests)
+- optional `remove_excluded_ad_unit_ids` (exact IDs; disjoint from additions)
 - optional SOAP `api_version`
 - optional `include_payload_xml`
 - `reason`
@@ -811,6 +812,7 @@ The preview tool:
   with `includeDescendants=true` because GAM can reject self-only inventory-unit
   exclusions with
   `InventoryTargetingError.SELF_ONLY_INVENTORY_UNIT_NOT_ALLOWED`;
+- removes only explicitly named exclusions; another ancestor exclusion can still cover a removed unit;
 - refuses to exclude an ad unit that the same yield group directly targets;
 - binds the confirmation token to the current readback fingerprint and the
   exact schema-complete apply request, including requested ad-unit IDs,
@@ -823,9 +825,9 @@ preview confirmation token, the manage scope, write mode enabled,
 group and rebuilds the payload. If the readback changed, the old confirmation
 token no longer matches. After `updateYieldGroups`, it re-reads the yield group
 and reports success only when every requested ad-unit ID is present in
-`excludedAdUnits` with `includeDescendants=true`.
+`excludedAdUnits` with `includeDescendants=true` and every requested removal is absent. Ancestor coverage requires separate inspection.
 
-If every requested ad-unit ID is already excluded with `includeDescendants=true`,
+If every requested addition is already excluded with `includeDescendants=true` and every removal is absent,
 the apply path returns a no-op proof and does not call `updateYieldGroups`.
 
 Example SOAP line-item lookup plan:
