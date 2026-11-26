@@ -13,7 +13,7 @@ readme = "README.md"
 anyhow = "1.0.102"
 chrono = { version = "0.4.45", default-features = false, features = ["std"] }
 clap = { version = "4.5.60", features = ["derive", "env"] }
-gcp_auth = "0.12.6"
+gcp_auth = "0.13.0"
 mcp-toolkit-server = { version = "0.1.0", git = "https://github.com/sednalabs/mcp-toolkit-rs", rev = "785c4b5c209ad1d77827bcf92fa5ed89777698da", package = "mcp-toolkit-server", features = ["stdio"] } # DevSkim: ignore DS173237 because this immutable public commit ID is source identity, not a credential.
 mcp-toolkit-auth = { version = "0.1.0", git = "https://github.com/sednalabs/mcp-toolkit-rs", rev = "785c4b5c209ad1d77827bcf92fa5ed89777698da", package = "mcp-toolkit-auth" } # DevSkim: ignore DS173237 because this immutable public commit ID is source identity, not a credential.
 mcp-toolkit-core = { version = "0.1.0", git = "https://github.com/sednalabs/mcp-toolkit-rs", rev = "785c4b5c209ad1d77827bcf92fa5ed89777698da", package = "mcp-toolkit-core" } # DevSkim: ignore DS173237 because this immutable public commit ID is source identity, not a credential.
